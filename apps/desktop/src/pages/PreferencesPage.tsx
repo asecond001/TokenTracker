@@ -695,7 +695,7 @@ export function PreferencesPage({
                 color: 'var(--text-secondary)',
               }}
             >
-              v0.2.0
+              v0.2.1
             </span>
           </div>
           <p className="text-[12px]" style={{ color: 'var(--text-muted)' }}>

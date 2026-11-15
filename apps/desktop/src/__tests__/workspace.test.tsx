@@ -1383,7 +1383,7 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
     resetWorkspaceState();
     renderWithQuery(<PreferencesPage />);
 
-    expect(await screen.findByText(/^v0\.[23]\.0$/)).toBeInTheDocument();
+    expect(await screen.findByText(/^v0\.[23]\.\d+$/)).toBeInTheDocument();
     const rateInput = screen.getByLabelText('USD 对 CNY 汇率') as HTMLInputElement;
     expect(rateInput.readOnly).toBe(true);
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TokenTracker",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "identifier": "com.tokentracker.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -46,7 +46,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDAwMDAwMDAwMDAwMDAwMDEKUldRQkFBQUFBQUFBQUFFQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUEK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJGQTRDMDZFNDgxNjA0MzcKUldRM0JCWklic0NrdjR3NUNkcUM5ajVWdlFYVVphQkFna3NUS0RWTFpvZ0RlMlhPeGFZRUtDWFEK",
       "endpoints": [
         "https://github.com/asecond001/TokenTracker/releases/latest/download/latest.json"
       ],
