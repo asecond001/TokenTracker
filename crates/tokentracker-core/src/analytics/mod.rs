@@ -280,6 +280,8 @@ pub struct ProviderSpeedStats {
 pub struct SpeedLatencyReport {
     pub providers: Vec<ProviderSpeedStats>,
     pub models: Vec<ModelSpeedStats>,
+    #[serde(default)]
+    pub from_hourly_rollups: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -434,7 +436,7 @@ fn local_offset(tz_offset_minutes: i32) -> FixedOffset {
     FixedOffset::east_opt(tz_offset_minutes.clamp(-720, 840) * 60).unwrap_or_else(|| Utc.fix())
 }
 
-fn local_day_bounds_ms(now_ms: i64, tz_offset_minutes: i32) -> (i64, i64) {
+pub(crate) fn local_day_bounds_ms(now_ms: i64, tz_offset_minutes: i32) -> (i64, i64) {
     let offset = local_offset(tz_offset_minutes);
     let dt = Utc
         .timestamp_millis_opt(now_ms)
@@ -633,7 +635,7 @@ fn fallback_observed_window_status(
     }
 }
 
-fn query_latest_tps(
+pub(crate) fn query_latest_tps(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
@@ -656,13 +658,36 @@ fn query_latest_tps(
     );
     let bound = bound_range_params(start_ms, end_ms, &scope.params);
     match conn.query_row(&sql, params_from_iter(bound), |r| r.get::<_, f64>(0)) {
-        Ok(v) => Ok(Some(v)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Ok(v) => return Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {}
+        Err(e) => return Err(CoreError::from(e)),
+    }
+
+    // Pure-rollup devices (e.g. mobile clients) do not hold raw `usage_events`.
+    let aligned_start = start_ms.div_euclid(HOUR_MS) * HOUR_MS;
+    let rollup_sql = format!(
+        r#"
+        SELECT tps_sum / tps_sample_count AS avg_tps
+        FROM usage_hourly_rollups
+        WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2{where_and}
+          AND tps_sample_count > 0
+          AND tps_sum > 0.0
+        ORDER BY bucket_start_ms DESC, updated_at_ms DESC, rowid DESC
+        LIMIT 1
+        "#,
+        where_and = scope.sql_and
+    );
+    let rollup_bound = bound_range_params(aligned_start, end_ms, &scope.params);
+    match conn.query_row(&rollup_sql, params_from_iter(rollup_bound), |r| {
+        r.get::<_, f64>(0)
+    }) {
+        Ok(v) if v.is_finite() && v > 0.0 => Ok(Some(v)),
+        Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(CoreError::from(e)),
     }
 }
 
-fn query_provider_shares(
+pub(crate) fn query_provider_shares(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
@@ -1153,15 +1178,15 @@ impl Storage {
             }
 
             let provider_shares =
-                query_provider_shares(conn, eff_start_ms, eff_end_ms, provider, device_id)?;
+                query_provider_shares(conn, today_start_ms, now_ms, provider, device_id)?;
             let top_model_shares = query_top_model_shares(
                 conn,
-                eff_start_ms,
-                eff_end_ms,
+                today_start_ms,
+                now_ms,
                 provider,
                 device_id,
-                current.total_tokens(),
-                current.cost_micro_usd,
+                today_totals.total_tokens(),
+                today_totals.cost_micro_usd,
                 3,
             )?;
             let active_sessions =
@@ -1710,6 +1735,21 @@ impl Storage {
         })
     }
 
+    pub fn query_subscription_templates(
+        &self,
+        now_ms: i64,
+    ) -> CoreResult<Vec<crate::domain::SubscriptionPlanTemplate>> {
+        self.with_conn(|conn| {
+            let observed = load_observed_rate_limits(conn)?;
+            let samples_map = load_window_samples_map(conn, now_ms)?;
+            Ok(crate::subscription::evaluate_subscription_templates(
+                &samples_map,
+                &observed,
+                now_ms,
+            ))
+        })
+    }
+
     pub fn query_speed_latency(&self, filter: &AnalyticsFilter) -> CoreResult<SpeedLatencyReport> {
         self.with_conn(|conn| {
             let provider = normalized_optional_filter(&filter.provider_id);
@@ -1760,6 +1800,16 @@ impl Storage {
             })?;
             for r in rows {
                 events.push(r?);
+            }
+
+            if events.is_empty() {
+                return query_speed_latency_from_hourly_rollups(
+                    conn,
+                    eff_start_ms,
+                    eff_end_ms,
+                    provider,
+                    device_id,
+                );
             }
 
             // Aggregate per-provider speed & latency stats
@@ -1875,7 +1925,11 @@ impl Storage {
                     .then_with(|| a.model_id.cmp(&b.model_id))
             });
 
-            Ok(SpeedLatencyReport { providers, models })
+            Ok(SpeedLatencyReport {
+                providers,
+                models,
+                from_hourly_rollups: false,
+            })
         })
     }
 
@@ -2048,7 +2102,11 @@ fn fetch_trend_rows(
                 where_and = scope.sql_and
             );
             let _ = BUCKET_15M;
-            run_trend_query(conn, &sql, start_ms, end_ms, &scope.params)
+            let rows = run_trend_query(conn, &sql, start_ms, end_ms, &scope.params)?;
+            if rows.is_empty() {
+                return fetch_hourly_rows(conn, start_ms, end_ms, provider, device_id);
+            }
+            Ok(rows)
         }
         TrendGranularity::Hourly => fetch_hourly_rows(conn, start_ms, end_ms, provider, device_id),
         TrendGranularity::Daily => fetch_daily_rows(conn, start_ms, end_ms, provider, device_id),
@@ -2087,6 +2145,202 @@ fn fetch_trend_rows(
             Ok(grouped.into_values().collect())
         }
     }
+}
+
+struct RollupSpeedBucket {
+    model_id: String,
+    provider_id: String,
+    request_count: i64,
+    total_duration_ms: i64,
+    tps_sample_count: i64,
+    tps_sum: f64,
+    max_output_tps: f64,
+}
+
+fn summarize_rollup_speed_group(
+    group: &[&RollupSpeedBucket],
+) -> (i64, f64, f64, f64, f64, f64, f64, f64) {
+    let mut bucket_tps: Vec<f64> = group
+        .iter()
+        .filter(|b| b.tps_sample_count > 0 && b.tps_sum > 0.0)
+        .map(|b| b.tps_sum / b.tps_sample_count as f64)
+        .collect();
+    bucket_tps.sort_by(|a, b| a.total_cmp(b));
+
+    let sample_count: i64 = group.iter().map(|b| b.tps_sample_count).sum();
+    let total_tps_sum: f64 = group.iter().map(|b| b.tps_sum).sum();
+    let mean_tps = if sample_count > 0 {
+        total_tps_sum / sample_count as f64
+    } else {
+        0.0
+    };
+    let p50_tps = percentile_sorted(&bucket_tps, 0.50);
+    let p95_tps = percentile_sorted(&bucket_tps, 0.95);
+    let min_tps = bucket_tps.first().copied().unwrap_or(0.0);
+    let max_bucket_tps = bucket_tps.last().copied().unwrap_or(0.0);
+    let max_recorded_tps = group
+        .iter()
+        .map(|b| b.max_output_tps)
+        .fold(0.0_f64, f64::max);
+    let max_tps = max_recorded_tps.max(max_bucket_tps);
+    let latest_tps = group
+        .last()
+        .filter(|b| b.tps_sample_count > 0)
+        .map(|b| b.tps_sum / b.tps_sample_count as f64)
+        .unwrap_or(mean_tps);
+
+    let total_requests: i64 = group.iter().map(|b| b.request_count).sum();
+    let total_duration_ms: i64 = group.iter().map(|b| b.total_duration_ms).sum();
+    let avg_duration_ms = if total_requests > 0 {
+        total_duration_ms as f64 / total_requests as f64
+    } else if sample_count > 0 {
+        total_duration_ms as f64 / sample_count as f64
+    } else {
+        0.0
+    };
+
+    (
+        sample_count,
+        mean_tps,
+        p50_tps,
+        p95_tps,
+        max_tps,
+        min_tps,
+        latest_tps,
+        avg_duration_ms,
+    )
+}
+
+fn query_speed_latency_from_hourly_rollups(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    provider: Option<&str>,
+    device_id: Option<&str>,
+) -> CoreResult<SpeedLatencyReport> {
+    let aligned_start = start_ms.div_euclid(HOUR_MS) * HOUR_MS;
+    let scope = build_scope_clause(2, provider, device_id);
+    let bound = bound_range_params(aligned_start, end_ms, &scope.params);
+    let sql = format!(
+        r#"
+        SELECT model_id, provider_id,
+               SUM(request_count), SUM(total_duration_ms),
+               SUM(tps_sample_count), SUM(tps_sum), MAX(max_output_tps)
+        FROM usage_hourly_rollups
+        WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2{where_and}
+          AND tps_sample_count > 0
+          AND tps_sum > 0.0
+        GROUP BY bucket_start_ms, model_id, provider_id
+        ORDER BY bucket_start_ms ASC
+        "#,
+        where_and = scope.sql_and
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let mut buckets = Vec::new();
+    let rows = stmt.query_map(params_from_iter(bound), |row| {
+        Ok(RollupSpeedBucket {
+            model_id: row.get(0)?,
+            provider_id: row.get(1)?,
+            request_count: row.get(2)?,
+            total_duration_ms: row.get(3)?,
+            tps_sample_count: row.get(4)?,
+            tps_sum: row.get(5)?,
+            max_output_tps: row.get(6)?,
+        })
+    })?;
+    for r in rows {
+        buckets.push(r?);
+    }
+
+    if buckets.is_empty() {
+        return Ok(SpeedLatencyReport {
+            providers: Vec::new(),
+            models: Vec::new(),
+            from_hourly_rollups: false,
+        });
+    }
+
+    let mut by_provider: BTreeMap<String, Vec<&RollupSpeedBucket>> = BTreeMap::new();
+    let mut by_model: BTreeMap<(String, String), Vec<&RollupSpeedBucket>> = BTreeMap::new();
+    for bucket in &buckets {
+        by_provider
+            .entry(bucket.provider_id.clone())
+            .or_default()
+            .push(bucket);
+        by_model
+            .entry((bucket.model_id.clone(), bucket.provider_id.clone()))
+            .or_default()
+            .push(bucket);
+    }
+
+    let mut providers = Vec::with_capacity(by_provider.len());
+    for (provider_id, group) in by_provider {
+        let (
+            sample_count,
+            mean_tps,
+            p50_tps,
+            p95_tps,
+            max_tps,
+            min_tps,
+            _latest_tps,
+            avg_duration_ms,
+        ) = summarize_rollup_speed_group(&group);
+        providers.push(ProviderSpeedStats {
+            provider_id,
+            sample_count,
+            mean_tps,
+            p50_tps,
+            p95_tps,
+            max_tps,
+            min_tps,
+            avg_duration_ms,
+            avg_ttft_ms: None,
+        });
+    }
+    providers.sort_by(|a, b| {
+        b.sample_count
+            .cmp(&a.sample_count)
+            .then_with(|| a.provider_id.cmp(&b.provider_id))
+    });
+
+    let mut models = Vec::with_capacity(by_model.len());
+    for ((model_id, provider_id), group) in by_model {
+        let (
+            sample_count,
+            mean_tps,
+            p50_tps,
+            p95_tps,
+            max_tps,
+            min_tps,
+            latest_tps,
+            avg_duration_ms,
+        ) = summarize_rollup_speed_group(&group);
+        models.push(ModelSpeedStats {
+            model_id,
+            provider_id,
+            sample_count,
+            mean_tps,
+            p50_tps,
+            p95_tps,
+            max_tps,
+            min_tps,
+            latest_tps,
+            avg_duration_ms,
+            avg_ttft_ms: None,
+        });
+    }
+    models.sort_by(|a, b| {
+        b.sample_count
+            .cmp(&a.sample_count)
+            .then_with(|| a.model_id.cmp(&b.model_id))
+    });
+
+    Ok(SpeedLatencyReport {
+        providers,
+        models,
+        from_hourly_rollups: true,
+    })
 }
 
 fn fetch_hourly_rows(
@@ -2346,6 +2600,8 @@ mod tests {
             window_minutes: Some(300),
             resets_at_ms: Some(base_ts + 4 * HOUR_MS),
             observed_at_ms: base_ts,
+            source: Some("local_log".to_string()),
+            plan_hint: Some("plus".to_string()),
         }];
         storage
             .ingest_events_with_cursor(&outliers, None, &observed)
@@ -2371,7 +2627,7 @@ mod tests {
             .iter()
             .find(|p| p.provider_id == "codex")
             .expect("codex row");
-        assert_eq!(codex_row.active_window_label.as_deref(), Some("5h 官方限额"));
+        assert_eq!(codex_row.active_window_label.as_deref(), Some("5h 滚动窗口"));
         assert_eq!(codex_row.active_window_used_percent, Some(42.5));
 
         let trends = storage
@@ -2793,7 +3049,7 @@ mod tests {
         // Single remote device = 50k tokens
         let remote_filter = AnalyticsFilter {
             device_id: Some("remote-mbp".to_string()),
-            ..all_filter
+            ..all_filter.clone()
         };
         let remote_ov = storage
             .query_overview(&remote_filter, base_ts + 2 * HOUR_MS)
@@ -2828,5 +3084,131 @@ mod tests {
             .expect("remote models");
         assert_eq!(remote_models.rows.len(), 1);
         assert_eq!(remote_models.rows[0].model_id, "deepseek-reasoner");
+
+        // Pure-rollup remote device must also support speed latency, latest TPS, and 15m trend fallback.
+        let remote_speed = storage
+            .query_speed_latency(&remote_filter)
+            .expect("remote speed latency");
+        assert!(remote_speed.from_hourly_rollups);
+        assert_eq!(remote_speed.providers.len(), 1);
+        assert_eq!(remote_speed.providers[0].sample_count, 3);
+        assert!((remote_speed.providers[0].mean_tps - 50.0).abs() < 1e-6);
+        assert!((remote_speed.providers[0].max_tps - 60.0).abs() < 1e-6);
+        assert_eq!(remote_speed.providers[0].avg_ttft_ms, None);
+        assert_eq!(remote_speed.models.len(), 1);
+        assert_eq!(remote_speed.models[0].model_id, "deepseek-reasoner");
+
+        assert!(remote_ov.latest_output_tps.is_some());
+        assert!((remote_ov.latest_output_tps.expect("latest tps") - 50.0).abs() < 1e-6);
+
+        let remote_15m_trends = storage
+            .query_trends(&TrendsQuery {
+                filter: remote_filter,
+                granularity: TrendGranularity::FifteenMinutes,
+                dimension: StackDimension::Provider,
+            })
+            .expect("remote 15m fallback trends");
+        assert_eq!(remote_15m_trends.series.len(), 1);
+        assert_eq!(remote_15m_trends.series[0].key, "deepseek_harness");
+
+        // Empty query should report from_hourly_rollups = false cleanly.
+        let empty_speed = storage
+            .query_speed_latency(&AnalyticsFilter {
+                device_id: Some("non-existent-device".to_string()),
+                ..all_filter
+            })
+            .expect("empty speed latency");
+        assert!(!empty_speed.from_hourly_rollups);
+        assert!(empty_speed.providers.is_empty());
+        assert!(empty_speed.models.is_empty());
+    }
+
+    #[test]
+    fn overview_today_shares_remain_fixed_across_time_ranges() {
+        let storage = Storage::open_in_memory().expect("in-memory");
+        let dev_id = storage.local_device().expect("local device").device_id;
+        let now_ms = 1_794_800_000_000i64; // 2026-11-15 in UTC+8
+        let (today_start_ms, _) = local_day_bounds_ms(now_ms, 480);
+        let today_ts = today_start_ms + HOUR_MS;
+        let yesterday_ts = today_start_ms - 4 * HOUR_MS;
+
+        let events = vec![
+            NormalizedUsageEvent {
+                event_id: compute_event_id("claude_code", "s-today", "m-today", today_ts),
+                device_id: dev_id.clone(),
+                provider_id: "claude_code".to_string(),
+                session_id: "s-today".to_string(),
+                project_label: "proj".to_string(),
+                model_id: "claude-sonnet-4-5".to_string(),
+                timestamp_ms: today_ts,
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(1_000),
+                ttft_ms: None,
+                output_tps: Some(50.0),
+                estimated_cost_micro_usd: 15_000,
+                cache_saved_micro_usd: 0,
+            },
+            NormalizedUsageEvent {
+                event_id: compute_event_id("codex", "s-yesterday", "m-yday", yesterday_ts),
+                device_id: dev_id,
+                provider_id: "codex".to_string(),
+                session_id: "s-yesterday".to_string(),
+                project_label: "proj".to_string(),
+                model_id: "gpt-5.3-codex".to_string(),
+                timestamp_ms: yesterday_ts,
+                input_tokens: 9_000,
+                output_tokens: 1_000,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(2_000),
+                ttft_ms: None,
+                output_tps: Some(50.0),
+                estimated_cost_micro_usd: 90_000,
+                cache_saved_micro_usd: 0,
+            },
+        ];
+        storage
+            .ingest_events_with_cursor(&events, None, &[])
+            .expect("ingest");
+
+        let today_filter = AnalyticsFilter {
+            start_ms: today_start_ms,
+            end_ms: now_ms,
+            provider_id: None,
+            device_id: None,
+            tz_offset_minutes: 480,
+            all_time: false,
+        };
+        let range_30d_filter = AnalyticsFilter {
+            start_ms: now_ms - 30 * 24 * HOUR_MS,
+            end_ms: now_ms,
+            provider_id: None,
+            device_id: None,
+            tz_offset_minutes: 480,
+            all_time: false,
+        };
+
+        let ov_today = storage.query_overview(&today_filter, now_ms).expect("today");
+        let ov_30d = storage.query_overview(&range_30d_filter, now_ms).expect("30d");
+
+        // Trend totals change between today vs 30d
+        assert_eq!(ov_today.total_tokens, 1_500);
+        assert_eq!(ov_30d.total_tokens, 11_500);
+
+        // Today live pulse share cards stay pinned to today regardless of filter range
+        assert_eq!(ov_today.provider_shares.len(), 1);
+        assert_eq!(ov_today.provider_shares[0].key, "claude_code");
+        assert_eq!(ov_today.provider_shares[0].tokens, 1_500);
+        assert_eq!(ov_30d.provider_shares, ov_today.provider_shares);
+        assert_eq!(ov_30d.top_model_shares, ov_today.top_model_shares);
+        assert_eq!(ov_30d.top_model_shares.len(), 1);
+        assert_eq!(ov_30d.top_model_shares[0].key, "claude-sonnet-4-5");
     }
 }

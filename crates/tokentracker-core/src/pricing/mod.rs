@@ -76,6 +76,10 @@ pub fn default_pricing_catalog() -> Vec<ModelPricingEntry> {
         entry("_default_antigravity", provider_ids::ANTIGRAVITY, 1.25, 10.0, 0.125, 0.0, 10.0),
         // Kimi Code / Moonshot AI models
         entry("kimi-k2.5", provider_ids::KIMI_CODE, 0.60, 2.50, 0.15, 0.0, 2.50),
+        entry("kimi-for-coding", provider_ids::KIMI_CODE, 0.60, 2.50, 0.15, 0.0, 2.50),
+        entry("kimi-k2-thinking", provider_ids::KIMI_CODE, 0.60, 2.50, 0.15, 0.0, 2.50),
+        entry("kimi-k2-turbo-preview", provider_ids::KIMI_CODE, 1.15, 8.00, 0.15, 0.0, 8.00),
+        entry("kimi-k2-0905-preview", provider_ids::KIMI_CODE, 0.60, 2.50, 0.15, 0.0, 2.50),
         entry("kimi-k2", provider_ids::KIMI_CODE, 0.60, 2.50, 0.15, 0.0, 2.50),
         entry("kimi-latest", provider_ids::KIMI_CODE, 0.28, 1.40, 0.07, 0.0, 1.40),
         entry("moonshot-v1-128k", provider_ids::KIMI_CODE, 1.40, 2.80, 0.35, 0.0, 2.80),

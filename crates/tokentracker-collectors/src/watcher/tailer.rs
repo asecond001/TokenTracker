@@ -20,6 +20,7 @@ pub struct TailFileOutcome {
     pub lines_processed: usize,
     pub events_inserted: usize,
     pub events_deduplicated: usize,
+    pub rate_limits_updated: usize,
     pub reset_detected: bool,
 }
 
@@ -116,6 +117,7 @@ pub fn tail_file_incremental(
     let mut lines_processed = 0usize;
     let mut events_inserted = 0usize;
     let mut events_deduplicated = 0usize;
+    let mut rate_limits_updated = 0usize;
 
     let mut pending_events: Vec<NormalizedUsageEvent> = Vec::with_capacity(FLUSH_BATCH_EVENTS);
     let mut pending_rates: Vec<ObservedRateLimitWindow> = Vec::new();
@@ -150,6 +152,7 @@ pub fn tail_file_incremental(
         if pending_events.len() >= FLUSH_BATCH_EVENTS {
             let batch_events = parser.finalize_batch(std::mem::take(&mut pending_events));
             let batch_rates = std::mem::take(&mut pending_rates);
+            let batch_rate_count = batch_rates.len();
             let cursor = IngestionCursor {
                 source_path: source_path.clone(),
                 provider_id: parser.provider_id().to_string(),
@@ -162,6 +165,7 @@ pub fn tail_file_incremental(
                 storage.ingest_events_with_cursor(&batch_events, Some(&cursor), &batch_rates)?;
             events_inserted += outcome.inserted;
             events_deduplicated += outcome.deduplicated;
+            rate_limits_updated += batch_rate_count;
         }
     }
 
@@ -171,6 +175,7 @@ pub fn tail_file_incremental(
         || !pending_rates.is_empty()
     {
         let final_events = parser.finalize_batch(pending_events);
+        let final_rate_count = pending_rates.len();
         let cursor = IngestionCursor {
             source_path,
             provider_id: parser.provider_id().to_string(),
@@ -183,6 +188,7 @@ pub fn tail_file_incremental(
             storage.ingest_events_with_cursor(&final_events, Some(&cursor), &pending_rates)?;
         events_inserted += outcome.inserted;
         events_deduplicated += outcome.deduplicated;
+        rate_limits_updated += final_rate_count;
     }
 
     Ok(TailFileOutcome {
@@ -190,6 +196,7 @@ pub fn tail_file_incremental(
         lines_processed,
         events_inserted,
         events_deduplicated,
+        rate_limits_updated,
         reset_detected,
     })
 }

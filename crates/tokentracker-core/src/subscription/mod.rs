@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
-pub use crate::domain::SubscriptionPlanTemplate;
+pub use crate::domain::{SubscriptionPlanTemplate, SubscriptionWindowStatus};
 use crate::domain::{
     provider_ids, ObservedRateLimitWindow, QuotaUnit, SubscriptionPlan, SubscriptionWindowRule,
 };
@@ -13,29 +15,6 @@ pub struct WindowUsageSample {
     pub timestamp_ms: i64,
     pub cost_micro_usd: i64,
     pub total_tokens: i64,
-}
-
-/// Evaluated live status for one subscription window (e.g. 5h rolling or 7d weekly).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SubscriptionWindowStatus {
-    pub window_id: String,
-    pub label: String,
-    pub duration_hours: i64,
-    pub rolling: bool,
-    pub unit: QuotaUnit,
-    pub used_value: i64,
-    pub limit_value: i64,
-    pub used_percent: f64,
-    pub warning_percent: u8,
-    pub critical_percent: u8,
-    pub burn_rate_per_hour: f64,
-    pub projected_exhaustion_hours: Option<f64>,
-    pub resets_at_ms: Option<i64>,
-    pub resets_in_seconds: i64,
-    /// `"official_log_snapshot"` or `"local_estimation"`.
-    pub source: String,
-    /// `"normal"` | `"warning"` | `"critical"` | `"exhausted"`.
-    pub alert_level: String,
 }
 
 /// Evaluated live status for a subscription plan across all its windows.
@@ -86,17 +65,18 @@ fn template_entry(
         monthly_fee_micro_usd,
         windows: standard_two_windows(limit_5h_micro_usd, limit_7d_micro_usd),
         description: description.to_string(),
+        live_windows: Vec::new(),
     }
 }
 
-/// Optional reference subscription templates offered in the UI drawer for quick prefill.
-/// Never auto-seeded into SQLite on startup (`PLAN.md` §3.2 zero-assumption principle).
+/// Optional reference subscription templates offered in the UI drawer for quick prefill
+/// and real-time tier comparison.
 pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
     vec![
         template_entry(
             "claude_pro",
             provider_ids::CLAUDE_CODE,
-            "Claude Pro ($20/mo)",
+            "Claude Pro",
             20_000_000,
             15_000_000,
             75_000_000,
@@ -105,7 +85,7 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
         template_entry(
             "claude_max_5x",
             provider_ids::CLAUDE_CODE,
-            "Claude Max 5x ($100/mo)",
+            "Claude Max 5x",
             100_000_000,
             75_000_000,
             375_000_000,
@@ -114,7 +94,7 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
         template_entry(
             "claude_max_20x",
             provider_ids::CLAUDE_CODE,
-            "Claude Max 20x ($200/mo)",
+            "Claude Max 20x",
             200_000_000,
             200_000_000,
             1_200_000_000,
@@ -123,7 +103,7 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
         template_entry(
             "codex_plus",
             provider_ids::CODEX,
-            "ChatGPT Plus / Codex ($20/mo)",
+            "ChatGPT Plus / Codex",
             20_000_000,
             18_000_000,
             90_000_000,
@@ -132,7 +112,7 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
         template_entry(
             "codex_pro",
             provider_ids::CODEX,
-            "ChatGPT Pro / Codex ($200/mo)",
+            "ChatGPT Pro / Codex",
             200_000_000,
             150_000_000,
             900_000_000,
@@ -141,34 +121,43 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
         template_entry(
             "google_ai_pro",
             provider_ids::ANTIGRAVITY,
-            "Google AI Pro ($19.99/mo)",
+            "Google AI Pro",
             19_990_000,
             20_000_000,
             100_000_000,
-            "Google AI Pro / Antigravity 个人订阅（19.99 USD/月参考窗口）",
+            "Google AI Pro / Antigravity 个人订阅参考窗口",
         ),
         template_entry(
             "google_ai_ultra",
             provider_ids::ANTIGRAVITY,
-            "Google AI Ultra ($249.99/mo)",
+            "Google AI Ultra",
             249_990_000,
             250_000_000,
             1_250_000_000,
-            "Google AI Ultra / Antigravity 旗舰订阅（249.99 USD/月高额度窗口）",
+            "Google AI Ultra / Antigravity 旗舰订阅参考窗口",
+        ),
+        template_entry(
+            "kimi_code_allegretto",
+            provider_ids::KIMI_CODE,
+            "Kimi Code Allegretto",
+            7_000_000,
+            8_000_000,
+            40_000_000,
+            "Kimi Code 个人会员（配置 `sk-kimi-...` 官方 Key 后自动对接 `/coding/v1/usages` 实时限额）",
         ),
         template_entry(
             "minimax_coding_plan",
             provider_ids::MINIMAX_CODE,
-            "MiniMax Coding Plan ($15/mo)",
+            "MiniMax Coding Plan",
             15_000_000,
             12_000_000,
             60_000_000,
-            "MiniMax Coding Plan 编码订阅参考窗口（支持官方 Coding Plan 额度接口对齐）",
+            "MiniMax Coding Plan 编码订阅参考窗口（支持官方 Coding Plan 额度接口自动同步）",
         ),
         SubscriptionPlanTemplate {
             template_id: "minimax_token_plan".to_string(),
             provider_id: provider_ids::MINIMAX_CODE.to_string(),
-            plan_name: "MiniMax Token Plan ($49/mo)".to_string(),
+            plan_name: "MiniMax Token Plan".to_string(),
             monthly_fee_micro_usd: 49_000_000,
             windows: vec![
                 SubscriptionWindowRule {
@@ -193,6 +182,25 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
                 },
             ],
             description: "MiniMax Token Plan 按 Token 计量订阅参考模板（可按需修改额度）".to_string(),
+            live_windows: Vec::new(),
+        },
+        SubscriptionPlanTemplate {
+            template_id: "qcode_daily_plan".to_string(),
+            provider_id: provider_ids::QCODE.to_string(),
+            plan_name: "QCode 日额度套餐".to_string(),
+            monthly_fee_micro_usd: 15_000_000,
+            windows: vec![SubscriptionWindowRule {
+                window_id: "24h".to_string(),
+                label: "24h 日额度".to_string(),
+                duration_hours: 24,
+                rolling: false,
+                unit: QuotaUnit::MicroUsd,
+                limit_value: 10_000_000,
+                warning_percent: 80,
+                critical_percent: 95,
+            }],
+            description: "QCode 每日额度参考模板（配置官方 Key 后自动同步日额度用量）".to_string(),
+            live_windows: Vec::new(),
         },
     ]
 }
@@ -204,35 +212,82 @@ fn match_observed_snapshot<'a>(
     now_ms: i64,
 ) -> Option<&'a ObservedRateLimitWindow> {
     let duration_minutes = rule.duration_hours * 60;
-    observed.iter().find(|obs| {
-        if !obs.provider_id.eq_ignore_ascii_case(provider_id) {
-            return false;
-        }
-        // Only apply snapshots whose reset deadline has not expired yet,
-        // or that were observed within the window duration when reset time is omitted.
-        let fresh = match obs.resets_at_ms {
-            Some(reset_ms) => reset_ms > now_ms,
-            None => now_ms.saturating_sub(obs.observed_at_ms) < rule.duration_hours * HOUR_MS,
-        };
-        if !fresh {
-            return false;
-        }
+    observed
+        .iter()
+        .filter(|obs| {
+            if !obs.provider_id.eq_ignore_ascii_case(provider_id) {
+                return false;
+            }
+            // Only apply snapshots whose reset deadline has not expired yet,
+            // or that were observed within the window duration when reset time is omitted.
+            let fresh = match obs.resets_at_ms {
+                Some(reset_ms) => reset_ms > now_ms,
+                None => now_ms.saturating_sub(obs.observed_at_ms) < rule.duration_hours * HOUR_MS,
+            };
+            if !fresh {
+                return false;
+            }
 
-        if let Some(mins) = obs.window_minutes {
-            if mins == duration_minutes {
+            if let Some(mins) = obs.window_minutes {
+                if mins == duration_minutes {
+                    return true;
+                }
+            }
+
+            let name = obs.window_name.to_ascii_lowercase();
+            let wid = rule.window_id.to_ascii_lowercase();
+            if wid == "5h" && (name.contains("primary") || name.contains("5h")) {
                 return true;
             }
-        }
+            if (wid == "7d" || wid == "weekly")
+                && (name.contains("secondary") || name.contains("7d") || name.contains("week"))
+            {
+                return true;
+            }
+            if (wid == "24h" || wid == "1d" || wid == "daily")
+                && (name.contains("24h") || name.contains("daily") || name.contains("day"))
+            {
+                return true;
+            }
+            if (wid == "30d" || wid == "monthly")
+                && (name.contains("30d") || name.contains("month"))
+            {
+                return true;
+            }
+            false
+        })
+        .max_by(|a, b| {
+            a.observed_at_ms.cmp(&b.observed_at_ms).then_with(|| {
+                a.used_percent
+                    .partial_cmp(&b.used_percent)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        })
+}
 
-        let name = obs.window_name.to_ascii_lowercase();
-        if rule.window_id == "5h" && (name.contains("primary") || name.contains("5h")) {
-            return true;
-        }
-        if rule.window_id == "7d" && (name.contains("secondary") || name.contains("7d")) {
-            return true;
-        }
-        false
-    })
+/// Evaluate all reference templates against current live usage samples and observed snapshots.
+pub fn evaluate_subscription_templates(
+    samples_map: &HashMap<String, Vec<WindowUsageSample>>,
+    observed_snapshots: &[ObservedRateLimitWindow],
+    now_ms: i64,
+) -> Vec<SubscriptionPlanTemplate> {
+    subscription_plan_templates()
+        .into_iter()
+        .map(|mut tpl| {
+            let samples = samples_map
+                .get(&tpl.provider_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            tpl.live_windows = tpl
+                .windows
+                .iter()
+                .map(|rule| {
+                    evaluate_window(&tpl.provider_id, rule, samples, observed_snapshots, now_ms)
+                })
+                .collect();
+            tpl
+        })
+        .collect()
 }
 
 /// Evaluate all windows of a subscription plan given historical samples for that provider.
@@ -311,7 +366,10 @@ pub fn evaluate_window(
             resets_at_ms = Some(obs_reset);
         }
         used_value = ((used_percent / 100.0) * safe_limit as f64).round() as i64;
-        source = "official_log_snapshot".to_string();
+        source = match obs.source.as_deref() {
+            Some("official_api") => "official_api".to_string(),
+            _ => "official_log_snapshot".to_string(),
+        };
     }
 
     let resets_in_seconds = resets_at_ms
@@ -322,7 +380,7 @@ pub fn evaluate_window(
     let projected_exhaustion_hours = if used_percent >= 100.0 {
         Some(0.0)
     } else if burn_rate_per_hour > 0.0 {
-        let remaining_value = if source == "official_log_snapshot" {
+        let remaining_value = if source != "local_estimation" {
             ((100.0 - used_percent) / 100.0) * safe_limit as f64
         } else {
             (safe_limit - used_value).max(0) as f64
@@ -380,6 +438,7 @@ mod tests {
             monthly_fee_micro_usd: tpl.monthly_fee_micro_usd,
             windows: tpl.windows,
             is_user_configured: true,
+            auto_source: None,
             updated_at_ms: 0,
         }
     }
@@ -387,7 +446,7 @@ mod tests {
     #[test]
     fn templates_cover_all_reference_plans() {
         let templates = subscription_plan_templates();
-        assert_eq!(templates.len(), 9);
+        assert_eq!(templates.len(), 11);
         let ids: Vec<&str> = templates.iter().map(|t| t.template_id.as_str()).collect();
         assert_eq!(
             ids,
@@ -399,14 +458,18 @@ mod tests {
                 "codex_pro",
                 "google_ai_pro",
                 "google_ai_ultra",
+                "kimi_code_allegretto",
                 "minimax_coding_plan",
                 "minimax_token_plan",
+                "qcode_daily_plan",
             ]
         );
         assert_eq!(templates[5].monthly_fee_micro_usd, 19_990_000);
         assert_eq!(templates[6].monthly_fee_micro_usd, 249_990_000);
-        assert_eq!(templates[7].provider_id, provider_ids::MINIMAX_CODE);
-        assert_eq!(templates[8].windows[0].unit, QuotaUnit::Tokens);
+        assert_eq!(templates[7].provider_id, provider_ids::KIMI_CODE);
+        assert_eq!(templates[8].provider_id, provider_ids::MINIMAX_CODE);
+        assert_eq!(templates[9].windows[0].unit, QuotaUnit::Tokens);
+        assert_eq!(templates[10].provider_id, provider_ids::QCODE);
     }
 
     #[test]
@@ -458,6 +521,8 @@ mod tests {
             window_minutes: Some(300),
             resets_at_ms: Some(now_ms + 3_600_000),
             observed_at_ms: now_ms - 30_000,
+            source: Some("local_log".to_string()),
+            plan_hint: Some("plus".to_string()),
         }];
 
         let status = evaluate_subscription_plan(&codex, &[], &obs, now_ms);

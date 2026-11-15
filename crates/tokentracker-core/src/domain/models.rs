@@ -287,7 +287,30 @@ pub struct SubscriptionWindowRule {
     pub critical_percent: u8,
 }
 
-/// User-configurable subscription plan definition.
+/// Evaluated live status for one subscription window (e.g. 5h rolling or 7d weekly).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionWindowStatus {
+    pub window_id: String,
+    pub label: String,
+    pub duration_hours: i64,
+    pub rolling: bool,
+    pub unit: QuotaUnit,
+    pub used_value: i64,
+    pub limit_value: i64,
+    pub used_percent: f64,
+    pub warning_percent: u8,
+    pub critical_percent: u8,
+    pub burn_rate_per_hour: f64,
+    pub projected_exhaustion_hours: Option<f64>,
+    pub resets_at_ms: Option<i64>,
+    pub resets_in_seconds: i64,
+    /// `"official_api"`, `"official_log_snapshot"`, or `"local_estimation"`.
+    pub source: String,
+    /// `"normal"` | `"warning"` | `"critical"` | `"exhausted"`.
+    pub alert_level: String,
+}
+
+/// User-configurable or auto-discovered subscription plan definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscriptionPlan {
     pub plan_id: String,
@@ -298,11 +321,13 @@ pub struct SubscriptionPlan {
     pub windows: Vec<SubscriptionWindowRule>,
     #[serde(default)]
     pub is_user_configured: bool,
+    #[serde(default)]
+    pub auto_source: Option<String>,
     pub updated_at_ms: i64,
 }
 
-/// Reference template used only to prefill a user-configured subscription form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Reference template used to prefill a user-configured subscription form and preview live tier utilization.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubscriptionPlanTemplate {
     pub template_id: String,
     pub provider_id: String,
@@ -310,9 +335,11 @@ pub struct SubscriptionPlanTemplate {
     pub monthly_fee_micro_usd: i64,
     pub windows: Vec<SubscriptionWindowRule>,
     pub description: String,
+    #[serde(default)]
+    pub live_windows: Vec<SubscriptionWindowStatus>,
 }
 
-/// Official rate limit window snapshot parsed from provider local logs (e.g. Codex).
+/// Official rate limit window snapshot parsed from provider local logs (e.g. Codex) or official quota APIs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObservedRateLimitWindow {
     pub provider_id: String,
@@ -321,6 +348,10 @@ pub struct ObservedRateLimitWindow {
     pub window_minutes: Option<i64>,
     pub resets_at_ms: Option<i64>,
     pub observed_at_ms: i64,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub plan_hint: Option<String>,
 }
 
 fn default_bg_mode() -> String {

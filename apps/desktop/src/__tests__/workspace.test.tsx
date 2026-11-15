@@ -747,7 +747,8 @@ describe('Subscriptions v0.1.1 zero-preset, templates, deletion & observed rate 
     expect(await screen.findByText('添加我的订阅配置')).toBeInTheDocument();
     expect(templatesSpy).toHaveBeenCalled();
 
-    fireEvent.click(await screen.findByText('Claude Max 5x ($100/mo)'));
+    const tplMatches = await screen.findAllByText('Claude Max 5x ($100/mo)');
+    fireEvent.click(tplMatches[tplMatches.length - 1]);
     const nameInput = screen.getByPlaceholderText('例如 Claude Max 5x 或 Google AI Ultra');
     expect(nameInput).toHaveValue('Claude Max 5x ($100/mo)');
 
@@ -1377,12 +1378,12 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
       );
     });
 
-    // Now verify PreferencesPage controls & v0.2.0 badge
+    // Now verify PreferencesPage controls & version badge
     cleanup();
     resetWorkspaceState();
     renderWithQuery(<PreferencesPage />);
 
-    expect(await screen.findByText('v0.2.0')).toBeInTheDocument();
+    expect(await screen.findByText(/^v0\.[23]\.0$/)).toBeInTheDocument();
     const rateInput = screen.getByLabelText('USD 对 CNY 汇率') as HTMLInputElement;
     expect(rateInput.readOnly).toBe(true);
 
@@ -1787,5 +1788,199 @@ describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sy
     expect(screen.getByText('MacBookPro')).toBeInTheDocument();
     expect(screen.getByText('只读远端快照')).toBeInTheDocument();
     expect(screen.getByText('42.5%')).toBeInTheDocument();
+  });
+});
+
+describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Live/Auto Subscriptions', () => {
+  beforeEach(() => {
+    resetWorkspaceState();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it('renders fixed today share headings and subtitle in OverviewPage', async () => {
+    useWorkspaceStore.getState().setTimePreset('30d');
+    vi.spyOn(ipc, 'getOverview').mockResolvedValue(
+      makeOverviewReport({
+        provider_shares: [
+          {
+            key: 'claude_code',
+            label: 'Claude Code',
+            tokens: 45_000,
+            token_share_percent: 100,
+            cost_micro_usd: 900_000,
+            cost_share_percent: 100,
+          },
+        ],
+        top_model_shares: [
+          {
+            key: 'claude-sonnet-4-5',
+            label: 'claude-sonnet-4-5',
+            tokens: 45_000,
+            token_share_percent: 100,
+            cost_micro_usd: 900_000,
+            cost_share_percent: 100,
+          },
+        ],
+      })
+    );
+
+    renderWithQuery(<OverviewPage />);
+
+    expect(await screen.findByText('今日 Provider 占比')).toBeInTheDocument();
+    expect(screen.getByText('今日 Top 3 模型消耗占比')).toBeInTheDocument();
+    expect(screen.getByText('今日零点起实时累计')).toBeInTheDocument();
+  });
+
+  it('renders auto-discovered official API plans, live reference tiers, and converts open drawer currency reactively', async () => {
+    const now = Date.now();
+    const autoPlan: SubscriptionPlanStatus = {
+      plan: {
+        plan_id: 'auto_kimi_code_kimi_code_allegretto',
+        provider_id: 'kimi_code',
+        plan_name: 'Kimi Code Allegretto',
+        enabled: true,
+        monthly_fee_micro_usd: 7_000_000,
+        is_user_configured: true,
+        auto_source: 'official_api',
+        updated_at_ms: now,
+        windows: [
+          {
+            window_id: '5h',
+            label: '5h 滚动窗口',
+            duration_hours: 5,
+            rolling: true,
+            unit: 'micro_usd',
+            limit_value: 8_000_000,
+            warning_percent: 80,
+            critical_percent: 95,
+          },
+        ],
+      },
+      windows: [
+        {
+          window_id: '5h',
+          label: '5h 滚动窗口',
+          duration_hours: 5,
+          rolling: true,
+          unit: 'micro_usd',
+          used_value: 1_920_000,
+          limit_value: 8_000_000,
+          used_percent: 24.0,
+          warning_percent: 80,
+          critical_percent: 95,
+          burn_rate_per_hour: 384_000,
+          projected_exhaustion_hours: null,
+          resets_at_ms: now + 3_600_000,
+          resets_in_seconds: 3_600,
+          source: 'official_api',
+          alert_level: 'normal',
+        },
+      ],
+    };
+
+    const liveTemplates: SubscriptionPlanTemplate[] = makeTemplates().map((tpl) =>
+      tpl.template_id === 'claude_max_5x'
+        ? {
+            ...tpl,
+            live_windows: [
+              {
+                window_id: '5h',
+                label: '5h 滚动窗口',
+                duration_hours: 5,
+                rolling: true,
+                unit: 'micro_usd',
+                used_value: 18_750_000,
+                limit_value: 75_000_000,
+                used_percent: 25.0,
+                warning_percent: 80,
+                critical_percent: 95,
+                burn_rate_per_hour: 3_750_000,
+                projected_exhaustion_hours: 15.0,
+                resets_at_ms: now + 5_400_000,
+                resets_in_seconds: 5_400,
+                source: 'local_estimate',
+                alert_level: 'normal',
+              },
+            ],
+          }
+        : tpl
+    );
+
+    vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue([autoPlan]);
+    vi.spyOn(ipc, 'getObservedRateLimits').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getSubscriptionTemplates').mockResolvedValue(liveTemplates);
+    vi.spyOn(ipc, 'getRemoteSubscriptionSnapshots').mockResolvedValue([]);
+
+    renderWithQuery(<SubscriptionsPage />);
+
+    expect(await screen.findByText('自动获取 · 官方 API')).toBeInTheDocument();
+    expect(screen.getAllByText('官方 API 实时').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('各档位参考配额实时对照')).toBeInTheDocument();
+    expect(screen.getByText('24.0%')).toBeInTheDocument();
+    expect(screen.getByText('25.0%')).toBeInTheDocument();
+
+    // Open drawer from reference tier table & verify reactive USD -> CNY conversion
+    const applyButtons = screen.getAllByRole('button', { name: '套用此档位' });
+    fireEvent.click(applyButtons[0]);
+    expect(await screen.findByText('添加我的订阅配置')).toBeInTheDocument();
+
+    const feeInput = screen.getByLabelText(/订阅月费/) as HTMLInputElement;
+    expect(feeInput.value).toBe('100');
+    const limitInput = screen.getByLabelText(/估算等效额度/) as HTMLInputElement;
+    expect(limitInput.value).toBe('75');
+
+    act(() => {
+      useWorkspaceStore.getState().setCurrency('CNY');
+    });
+
+    await waitFor(() => {
+      expect((screen.getByLabelText(/订阅月费/) as HTMLInputElement).value).toBe('725');
+      expect((screen.getByLabelText(/估算等效额度/) as HTMLInputElement).value).toBe('543.75');
+    });
+  });
+
+  it('renders Kimi Code QUOTA snapshot cleanly in DataSourcesPage', async () => {
+    const now = Date.now();
+    const configs: ProviderConfig[] = [
+      {
+        provider_id: 'kimi_code',
+        enabled: true,
+        collection_mode: 'official_api',
+        custom_log_paths: [],
+        has_credential: true,
+        last_sync_at_ms: now - 5_000,
+        last_error: null,
+        updated_at_ms: now,
+      },
+    ];
+
+    vi.spyOn(ipc, 'getProviderConfigs').mockResolvedValue(configs);
+    vi.spyOn(ipc, 'getIngestionCursors').mockResolvedValue([]);
+    vi.spyOn(ipc, 'listCustomProviderRules').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(makePreferences());
+    vi.spyOn(ipc, 'getProviderBalances').mockResolvedValue([
+      {
+        provider_id: 'kimi_code',
+        currency: 'QUOTA',
+        total_balance_micro: null,
+        granted_balance_micro: null,
+        topped_up_balance_micro: null,
+        daily_quota_used_micro: 18,
+        daily_quota_limit_micro: 100,
+        fetched_at_ms: now,
+      },
+    ]);
+
+    renderWithQuery(<DataSourcesPage />);
+
+    expect(
+      await screen.findByText('Kimi Code 实时配额已同步至「订阅配额」')
+    ).toBeInTheDocument();
+    expect(screen.getByText('周期配额: 18 / 100')).toBeInTheDocument();
+    expect(screen.queryByText(/QUOTA 0\.00/)).not.toBeInTheDocument();
   });
 });

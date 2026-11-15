@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import type { EChartsOption } from 'echarts';
 import { AnimatedNumber } from '../components/AnimatedNumber';
 import { EChartBox } from '../components/EChartBox';
@@ -88,6 +88,7 @@ export function OverviewPage() {
   const { data, isLoading } = useQuery({
     queryKey: ['overview', filter],
     queryFn: () => ipc.getOverview(filter),
+    placeholderData: keepPreviousData,
     refetchInterval: 10_000,
   });
 
@@ -262,7 +263,7 @@ export function OverviewPage() {
               </div>
             </div>
             <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-              统计周期按 {data?.series_granularity === 'hourly' ? '小时' : '自然日'}
+              今日零点起实时累计
             </span>
           </div>
 
@@ -272,7 +273,7 @@ export function OverviewPage() {
               className="flex items-center justify-between text-[11px]"
               style={{ color: 'var(--text-secondary)' }}
             >
-              <span>当前筛选区间 Provider 占比</span>
+              <span>今日 Provider 占比</span>
               <span className="tabular-nums" style={{ color: 'var(--text-muted)' }}>
                 {(data?.provider_shares ?? []).length} 个活跃数据源
               </span>
@@ -316,7 +317,7 @@ export function OverviewPage() {
               </>
             ) : (
               <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                当前筛选窗口暂无用量占比数据
+                今日暂无用量占比数据
               </div>
             )}
           </div>
@@ -327,7 +328,7 @@ export function OverviewPage() {
             style={{ borderTop: '1px solid var(--border-subtle)' }}
           >
             <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-              Top 3 模型消耗占比
+              今日 Top 3 模型消耗占比
             </div>
             {(data?.top_model_shares ?? []).slice(0, 3).map((model) => (
               <div key={model.key} className="space-y-1 text-[11px] tabular-nums">

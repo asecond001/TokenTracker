@@ -285,6 +285,12 @@ fn extract_rate_limits(payload: &Value, observed_at_ms: i64) -> Vec<ObservedRate
     let Some(rl) = payload.get("rate_limits").and_then(|v| v.as_object()) else {
         return Vec::new();
     };
+    let plan_hint = rl
+        .get("plan_type")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
     let mut out = Vec::new();
     for (window_name, win_val) in rl {
         if win_val.is_null() {
@@ -307,6 +313,8 @@ fn extract_rate_limits(payload: &Value, observed_at_ms: i64) -> Vec<ObservedRate
             window_minutes,
             resets_at_ms,
             observed_at_ms,
+            source: Some("local_log".to_string()),
+            plan_hint: plan_hint.clone(),
         });
     }
     out

@@ -856,6 +856,8 @@ async fn official_balance_api_parses_all_vendors_and_enforces_60s_cooldown() {
 
     let endpoints = BalanceApiEndpoints {
         moonshot_url: "https://api.moonshot.cn/v1/users/me/balance".to_string(),
+        moonshot_global_url: "https://api.moonshot.ai/v1/users/me/balance".to_string(),
+        kimi_coding_url: "https://api.kimi.com/coding/v1/usages".to_string(),
         deepseek_url: "https://api.deepseek.com/user/balance".to_string(),
         qcode_url: "https://api.qcode.cc/api/v1/usage".to_string(),
         minimax_url: "https://www.minimaxi.com/v1/token_plan/remains".to_string(),
@@ -1283,6 +1285,7 @@ async fn cloud_sync_client_supports_plaintext_e2ee_and_realtime_sse() {
             enabled: true,
             monthly_fee_micro_usd: 20_000_000,
             is_user_configured: true,
+            auto_source: None,
             updated_at_ms: now_ms,
             windows: vec![SubscriptionWindowRule {
                 window_id: "5h".to_string(),
@@ -1463,5 +1466,214 @@ async fn cloud_sync_client_supports_plaintext_e2ee_and_realtime_sse() {
         .expect("SSE sync_update must trigger remote pull within 5s");
 
     sse_handle.shutdown();
+}
+
+#[test]
+fn kimi_code_wire_and_context_logs_parse_without_double_counting() {
+    use tokentracker_collectors::providers::kimi_code::KimiCodeParser;
+    use tokentracker_collectors::providers::ProviderLogParser;
+    use tokentracker_collectors::watcher::tailer::tail_file_incremental;
+
+    let tmp = tempdir().expect("tmpdir");
+    let session_dir = tmp
+        .path()
+        .join(".kimi-code")
+        .join("sessions")
+        .join("a1b2c3d4")
+        .join("sess-kimi-99");
+    std::fs::create_dir_all(&session_dir).expect("mkdir");
+    std::fs::write(
+        session_dir.join("metadata.json"),
+        r#"{"work_dir":"C:\\Projects\\my-kimi-app","model":"kimi-for-coding"}"#,
+    )
+    .expect("write metadata");
+
+    let wire_path = session_dir.join("wire.jsonl");
+    let wire_lines = [
+        r#"{"timestamp":1763300000.0,"message":{"type":"TurnBegin","payload":{"user_input":"hi"}}}"#,
+        r#"{"timestamp":1763300002.5,"message":{"type":"StatusUpdate","payload":{"token_usage":{"input_other":1200,"output":300,"input_cache_read":800,"input_cache_creation":200}}}}"#,
+        r#"{"jsonrpc":"2.0","method":"event","timestamp":1763300005.0,"params":{"type":"StatusUpdate","payload":{"token_usage":{"inputOther":500,"outputTokens":150,"inputCacheRead":250,"inputCacheCreation":0}}}}"#,
+        r#"{"timestamp":1763300006.0,"type":"usage.record","scope":"session","usage":{"inputOther":1700,"output":450}}"#,
+    ]
+    .join("\n");
+    std::fs::write(&wire_path, format!("{wire_lines}\n")).expect("write wire.jsonl");
+
+    // Sibling context.jsonl alongside wire.jsonl must be skipped to prevent double-counting.
+    let context_sibling = session_dir.join("context.jsonl");
+    std::fs::write(
+        &context_sibling,
+        "{\"role\":\"_usage\",\"token_count\":2500}\n",
+    )
+    .expect("write sibling context.jsonl");
+
+    // Separate legacy session with ONLY context.jsonl (no wire.jsonl) must parse deltas accurately.
+    let legacy_dir = tmp
+        .path()
+        .join(".kimi")
+        .join("sessions")
+        .join("legacy-ws")
+        .join("sess-legacy-1");
+    std::fs::create_dir_all(&legacy_dir).expect("mkdir legacy");
+    let legacy_context = legacy_dir.join("context.jsonl");
+    std::fs::write(
+        &legacy_context,
+        "{\"role\":\"_usage\",\"token_count\":1000,\"timestamp\":1763300010}\n{\"role\":\"_usage\",\"token_count\":1800,\"timestamp\":1763300020}\n",
+    )
+    .expect("write legacy context");
+
+    let parser = KimiCodeParser::new();
+    assert!(parser.matches_file(&wire_path));
+    assert!(!parser.matches_file(&context_sibling));
+    assert!(parser.matches_file(&legacy_context));
+
+    let wire_ctx = parser.init_context(&wire_path, "dev-test");
+    assert_eq!(wire_ctx.session_id, "sess-kimi-99");
+    assert_eq!(wire_ctx.project_label, "my-kimi-app");
+    assert_eq!(wire_ctx.current_model.as_deref(), Some("kimi-for-coding"));
+
+    let storage = Storage::open_in_memory().expect("db");
+    let dev_id = storage.local_device().expect("device").device_id;
+
+    let out_wire = tail_file_incremental(&storage, &parser, &wire_path, &dev_id).expect("tail wire");
+    assert_eq!(out_wire.events_inserted, 2);
+
+    let out_legacy =
+        tail_file_incremental(&storage, &parser, &legacy_context, &dev_id).expect("tail legacy");
+    assert_eq!(out_legacy.events_inserted, 2);
+
+    let ov = storage
+        .query_overview(
+            &AnalyticsFilter {
+                start_ms: 1_763_000_000_000,
+                end_ms: 1_764_000_000_000,
+                provider_id: Some(provider_ids::KIMI_CODE.to_string()),
+                device_id: None,
+                tz_offset_minutes: 480,
+                all_time: false,
+            },
+            1_763_300_100_000,
+        )
+        .expect("kimi overview");
+    // wire: (1200+300+800+200=2500) + (500+150+250=900) = 3400; legacy deltas: 1000 + 800 = 1800; total = 5200
+    assert_eq!(ov.total_tokens, 5_200);
+    assert!(ov.active_sessions.iter().any(|s| {
+        s.provider_id == provider_ids::KIMI_CODE
+            && s.project_label == "my-kimi-app"
+            && s.model_id == "kimi-for-coding"
+            && s.total_tokens == 3_400
+    }));
+}
+
+#[tokio::test]
+async fn kimi_coding_usages_api_and_qcode_auto_materialize_subscriptions() {
+    use tokentracker_collectors::credentials::MemoryCredentialStore;
+    use tokentracker_collectors::providers::official_api::refresh_provider_balance_with_fetcher_inner;
+
+    let storage = Storage::open_in_memory().expect("db");
+    let creds = MemoryCredentialStore::new();
+    let endpoints = BalanceApiEndpoints::default();
+    let now_ms = 1_763_300_000_000i64;
+
+    creds
+        .set_api_key(provider_ids::KIMI_CODE, "sk-kimi-live-membership-key")
+        .expect("set kimi coding key");
+    creds
+        .set_api_key(provider_ids::QCODE, "qot-qcode-key")
+        .expect("set qcode key");
+
+    let mut responses = HashMap::new();
+    responses.insert(
+        endpoints.kimi_coding_url.clone(),
+        (
+            200,
+            serde_json::json!({
+                "user": { "membership": { "level": "LEVEL_INTERMEDIATE" } },
+                "usage": {
+                    "limit": "200",
+                    "used": "40",
+                    "remaining": "160",
+                    "resetTime": "2026-11-22T00:00:00Z"
+                },
+                "limits": [
+                    {
+                        "window": { "duration": 300, "timeUnit": "TIME_UNIT_MINUTE" },
+                        "detail": {
+                            "limit": "100",
+                            "used": "30",
+                            "remaining": "70",
+                            "resetTime": "2026-11-16T05:00:00Z"
+                        }
+                    }
+                ]
+            })
+            .to_string(),
+        ),
+    );
+    responses.insert(
+        endpoints.qcode_url.clone(),
+        (
+            200,
+            serde_json::json!({
+                "data": {
+                    "balance": 12.0,
+                    "daily_used": 3.0,
+                    "daily_limit": 10.0,
+                    "currency": "USD"
+                }
+            })
+            .to_string(),
+        ),
+    );
+
+    let fetcher = MockAuthFetcher {
+        responses: Mutex::new(responses),
+        calls: Mutex::new(Vec::new()),
+    };
+
+    let kimi_res = refresh_provider_balance_with_fetcher_inner(
+        &storage,
+        provider_ids::KIMI_CODE,
+        &creds,
+        &fetcher,
+        &endpoints,
+        now_ms,
+        true,
+    )
+    .await
+    .expect("kimi coding usages");
+    assert_eq!(kimi_res.endpoint, endpoints.kimi_coding_url);
+    assert_eq!(kimi_res.snapshot.currency, "QUOTA");
+    assert_eq!(kimi_res.rate_limits_updated, 2);
+
+    let qcode_res = refresh_provider_balance_with_fetcher_inner(
+        &storage,
+        provider_ids::QCODE,
+        &creds,
+        &fetcher,
+        &endpoints,
+        now_ms,
+        true,
+    )
+    .await
+    .expect("qcode usage");
+    assert_eq!(qcode_res.rate_limits_updated, 1);
+
+    let subs = storage.query_subscriptions(now_ms).expect("auto subs");
+    let kimi_sub = subs
+        .iter()
+        .find(|s| s.plan.provider_id == provider_ids::KIMI_CODE)
+        .expect("kimi auto sub present");
+    assert_eq!(kimi_sub.plan.plan_id, "auto_kimi_code");
+    assert_eq!(kimi_sub.plan.auto_source.as_deref(), Some("official_api"));
+    assert_eq!(kimi_sub.plan.plan_name, "Kimi Code Allegretto");
+    assert_eq!(kimi_sub.windows.len(), 2);
+
+    let qcode_sub = subs
+        .iter()
+        .find(|s| s.plan.provider_id == provider_ids::QCODE)
+        .expect("qcode auto sub present");
+    assert_eq!(qcode_sub.plan.plan_id, "auto_qcode");
+    assert_eq!(qcode_sub.windows[0].limit_value, 10_000_000);
+    assert!((qcode_sub.windows[0].used_percent - 30.0).abs() < 0.01);
 }
 

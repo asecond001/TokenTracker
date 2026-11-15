@@ -9,7 +9,7 @@ use crate::error::CoreResult;
 use crate::pricing::default_pricing_catalog;
 use crate::storage::repository::{rebuild_rollup_from_events, DAY_MS, HOUR_MS};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 4;
+pub const CURRENT_SCHEMA_VERSION: i64 = 5;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -202,6 +202,10 @@ pub fn run_migrations(conn: &mut Connection) -> CoreResult<()> {
         migrate_v3_to_v4(conn, now_ms)?;
     }
 
+    if current_version < 5 {
+        migrate_v4_to_v5(conn, now_ms)?;
+    }
+
     seed_defaults(conn, now_ms)?;
     Ok(())
 }
@@ -241,6 +245,7 @@ fn legacy_v1_default_subscription_plans() -> Vec<SubscriptionPlan> {
             monthly_fee_micro_usd: 20_000_000,
             windows: legacy_default_windows(15_000_000, 75_000_000),
             is_user_configured: false,
+            auto_source: None,
             updated_at_ms: 0,
         },
         SubscriptionPlan {
@@ -251,6 +256,7 @@ fn legacy_v1_default_subscription_plans() -> Vec<SubscriptionPlan> {
             monthly_fee_micro_usd: 100_000_000,
             windows: legacy_default_windows(75_000_000, 375_000_000),
             is_user_configured: false,
+            auto_source: None,
             updated_at_ms: 0,
         },
         SubscriptionPlan {
@@ -261,6 +267,7 @@ fn legacy_v1_default_subscription_plans() -> Vec<SubscriptionPlan> {
             monthly_fee_micro_usd: 200_000_000,
             windows: legacy_default_windows(200_000_000, 1_200_000_000),
             is_user_configured: false,
+            auto_source: None,
             updated_at_ms: 0,
         },
         SubscriptionPlan {
@@ -271,6 +278,7 @@ fn legacy_v1_default_subscription_plans() -> Vec<SubscriptionPlan> {
             monthly_fee_micro_usd: 20_000_000,
             windows: legacy_default_windows(18_000_000, 90_000_000),
             is_user_configured: false,
+            auto_source: None,
             updated_at_ms: 0,
         },
         SubscriptionPlan {
@@ -281,6 +289,7 @@ fn legacy_v1_default_subscription_plans() -> Vec<SubscriptionPlan> {
             monthly_fee_micro_usd: 200_000_000,
             windows: legacy_default_windows(150_000_000, 900_000_000),
             is_user_configured: false,
+            auto_source: None,
             updated_at_ms: 0,
         },
         SubscriptionPlan {
@@ -291,6 +300,7 @@ fn legacy_v1_default_subscription_plans() -> Vec<SubscriptionPlan> {
             monthly_fee_micro_usd: 19_990_000,
             windows: legacy_default_windows(20_000_000, 100_000_000),
             is_user_configured: false,
+            auto_source: None,
             updated_at_ms: 0,
         },
     ]
@@ -517,6 +527,45 @@ fn migrate_v3_to_v4(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
         params![4i64, now_ms],
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v4_to_v5(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+
+    add_column_if_missing(&tx, "subscription_plans", "auto_source", "TEXT")?;
+    add_column_if_missing(
+        &tx,
+        "subscription_plans",
+        "user_customized",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        &tx,
+        "subscription_plans",
+        "user_dismissed",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(&tx, "observed_rate_limits", "source", "TEXT")?;
+    add_column_if_missing(&tx, "observed_rate_limits", "plan_hint", "TEXT")?;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![5i64, now_ms],
+    )?;
+    tx.commit()?;
+
+    // Backfill auto-discovered subscriptions for any existing official observed rate-limit snapshots.
+    let existing_observed = crate::storage::repository::load_observed_rate_limits(conn)?;
+    let mut providers: Vec<String> = existing_observed
+        .iter()
+        .map(|o| o.provider_id.clone())
+        .collect();
+    providers.sort();
+    providers.dedup();
+    for pid in providers {
+        crate::storage::repository::sync_auto_subscription_for_provider_conn(conn, &pid, now_ms)?;
+    }
     Ok(())
 }
 

@@ -47,8 +47,8 @@ const DEFAULT_PATH_HINTS: Record<string, string> = {
 
 const BALANCE_API_LABELS: Record<string, { label: string; placeholder: string }> = {
   kimi_code: {
-    label: 'Moonshot / Kimi 官方 API Key',
-    placeholder: '粘贴 sk-... 查询 Moonshot 官方余额',
+    label: 'Kimi Code / Moonshot 官方 Key',
+    placeholder: '粘贴 sk-kimi-... (Coding 会员实时配额) 或 sk-... (Moonshot 余额)',
   },
   deepseek_harness: {
     label: 'DeepSeek 官方 API Key',
@@ -835,43 +835,65 @@ export function DataSourcesPage() {
                           color: 'var(--text-secondary)',
                         }}
                       >
-                        <span>
-                          可用余额:{' '}
-                          <strong style={{ color: 'var(--text-primary)' }}>
-                            {formatNativeBalance(balanceSnap.total_balance_micro, balanceSnap.currency)}
-                          </strong>
-                        </span>
-                        {balanceSnap.granted_balance_micro !== null && (
-                          <span>
-                            赠金/代金券:{' '}
-                            {formatNativeBalance(
-                              balanceSnap.granted_balance_micro,
-                              balanceSnap.currency
+                        {balanceSnap.currency === 'QUOTA' ? (
+                          <>
+                            <span>
+                              官方接口:{' '}
+                              <strong style={{ color: 'var(--text-primary)' }}>
+                                Kimi Code 实时配额已同步至「订阅配额」
+                              </strong>
+                            </span>
+                            {balanceSnap.daily_quota_limit_micro !== null && (
+                              <span>
+                                周期配额: {formatExactInt(balanceSnap.daily_quota_used_micro ?? 0)}{' '}
+                                / {formatExactInt(balanceSnap.daily_quota_limit_micro)}
+                              </span>
                             )}
-                          </span>
-                        )}
-                        {balanceSnap.topped_up_balance_micro !== null && (
-                          <span>
-                            现金/充值:{' '}
-                            {formatNativeBalance(
-                              balanceSnap.topped_up_balance_micro,
-                              balanceSnap.currency
+                          </>
+                        ) : (
+                          <>
+                            <span>
+                              可用余额:{' '}
+                              <strong style={{ color: 'var(--text-primary)' }}>
+                                {formatNativeBalance(
+                                  balanceSnap.total_balance_micro,
+                                  balanceSnap.currency
+                                )}
+                              </strong>
+                            </span>
+                            {balanceSnap.granted_balance_micro !== null && (
+                              <span>
+                                赠金/代金券:{' '}
+                                {formatNativeBalance(
+                                  balanceSnap.granted_balance_micro,
+                                  balanceSnap.currency
+                                )}
+                              </span>
                             )}
-                          </span>
-                        )}
-                        {balanceSnap.daily_quota_limit_micro !== null && (
-                          <span>
-                            今日限额:{' '}
-                            {formatNativeBalance(
-                              balanceSnap.daily_quota_used_micro ?? 0,
-                              balanceSnap.currency
-                            )}{' '}
-                            /{' '}
-                            {formatNativeBalance(
-                              balanceSnap.daily_quota_limit_micro,
-                              balanceSnap.currency
+                            {balanceSnap.topped_up_balance_micro !== null && (
+                              <span>
+                                现金/充值:{' '}
+                                {formatNativeBalance(
+                                  balanceSnap.topped_up_balance_micro,
+                                  balanceSnap.currency
+                                )}
+                              </span>
                             )}
-                          </span>
+                            {balanceSnap.daily_quota_limit_micro !== null && (
+                              <span>
+                                今日限额:{' '}
+                                {formatNativeBalance(
+                                  balanceSnap.daily_quota_used_micro ?? 0,
+                                  balanceSnap.currency
+                                )}{' '}
+                                /{' '}
+                                {formatNativeBalance(
+                                  balanceSnap.daily_quota_limit_micro,
+                                  balanceSnap.currency
+                                )}
+                              </span>
+                            )}
+                          </>
                         )}
                         <span style={{ color: 'var(--text-muted)' }}>
                           更新于 {formatRelativeTime(balanceSnap.fetched_at_ms)}

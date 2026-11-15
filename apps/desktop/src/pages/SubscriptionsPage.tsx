@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, Info, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { InlineProgressBar } from '../components/InlineProgressBar';
@@ -21,6 +21,7 @@ import type {
   SubscriptionPlanStatus,
   SubscriptionPlanTemplate,
   SubscriptionWindowRule,
+  SubscriptionWindowStatus,
 } from '../types/ipc';
 
 const PROVIDERS: Array<{ id: string; label: string }> = [
@@ -165,6 +166,68 @@ function observedWindowSortKey(obs: ObservedRateLimitWindow): number {
   return 999999;
 }
 
+function windowSourceBadge(source: string): { label: string; color: string } {
+  if (source === 'official_api') {
+    return { label: '官方 API 实时', color: 'var(--accent-emerald)' };
+  }
+  if (source === 'official_log_snapshot') {
+    return { label: '官方日志快照', color: 'var(--accent-emerald)' };
+  }
+  return { label: '本地推算', color: 'var(--text-muted)' };
+}
+
+function autoSourceBadge(
+  autoSource: string | null | undefined
+): { label: string; color: string } | null {
+  if (!autoSource) {
+    return null;
+  }
+  if (autoSource === 'official_api') {
+    return { label: '自动获取 · 官方 API', color: 'var(--accent-emerald)' };
+  }
+  if (autoSource === 'local_log') {
+    return { label: '自动获取 · 本地日志', color: 'var(--accent-sky)' };
+  }
+  return { label: `自动获取 · ${autoSource}`, color: 'var(--accent-sky)' };
+}
+
+function computeLiveResetSeconds(
+  win: Pick<SubscriptionWindowStatus, 'resets_at_ms' | 'resets_in_seconds'>,
+  fetchedAtMs: number,
+  nowMs: number
+): number {
+  if (win.resets_at_ms !== null && Number.isFinite(win.resets_at_ms)) {
+    return Math.max(0, Math.floor((win.resets_at_ms - nowMs) / 1000));
+  }
+  const elapsedSecs =
+    fetchedAtMs > 0 ? Math.max(0, Math.floor((nowMs - fetchedAtMs) / 1000)) : 0;
+  return Math.max(0, win.resets_in_seconds - elapsedSecs);
+}
+
+function templateToFallbackWindows(tpl: SubscriptionPlanTemplate): SubscriptionWindowStatus[] {
+  if (tpl.live_windows && tpl.live_windows.length > 0) {
+    return tpl.live_windows;
+  }
+  return tpl.windows.map((rule) => ({
+    window_id: rule.window_id,
+    label: rule.label,
+    duration_hours: rule.duration_hours,
+    rolling: rule.rolling,
+    unit: rule.unit,
+    used_value: 0,
+    limit_value: rule.limit_value,
+    used_percent: 0,
+    warning_percent: rule.warning_percent,
+    critical_percent: rule.critical_percent,
+    burn_rate_per_hour: 0,
+    projected_exhaustion_hours: null,
+    resets_at_ms: null,
+    resets_in_seconds: 0,
+    source: 'local_estimate',
+    alert_level: 'normal',
+  }));
+}
+
 export function SubscriptionsPage() {
   const queryClient = useQueryClient();
   const { currency, usdToCnyRate } = useWorkspaceStore();
@@ -172,10 +235,65 @@ export function SubscriptionsPage() {
   const [draft, setDraft] = useState<PlanFormDraft | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('custom');
   const [templateProviderFilter, setTemplateProviderFilter] = useState<string>('all');
+  const [refProviderFilter, setRefProviderFilter] = useState<string>('all');
   const [formError, setFormError] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const prevCurrencyRef = useRef<{ currency: CurrencyCode; usdToCnyRate: string }>({
+    currency,
+    usdToCnyRate,
+  });
 
-  const { data: plans = [], isLoading } = useQuery({
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const prev = prevCurrencyRef.current;
+    if (prev.currency === currency && prev.usdToCnyRate === usdToCnyRate) {
+      return;
+    }
+    prevCurrencyRef.current = { currency, usdToCnyRate };
+    setDraft((current) => {
+      if (!current) {
+        return current;
+      }
+      const feeMicro = currencyInputToMicroUsd(
+        current.monthly_fee_input,
+        prev.currency,
+        prev.usdToCnyRate
+      );
+      return {
+        ...current,
+        monthly_fee_input:
+          feeMicro !== null
+            ? microUsdToCurrencyInput(feeMicro, currency, usdToCnyRate)
+            : current.monthly_fee_input,
+        windows: current.windows.map((w) => {
+          if (w.unit !== 'micro_usd') {
+            return w;
+          }
+          const limitMicro = currencyInputToMicroUsd(
+            w.limit_input,
+            prev.currency,
+            prev.usdToCnyRate
+          );
+          return limitMicro !== null
+            ? { ...w, limit_input: microUsdToCurrencyInput(limitMicro, currency, usdToCnyRate) }
+            : w;
+        }),
+      };
+    });
+  }, [currency, usdToCnyRate]);
+
+  const {
+    data: plans = [],
+    isLoading,
+    dataUpdatedAt: plansUpdatedAt,
+  } = useQuery({
     queryKey: ['subscriptions'],
     queryFn: () => ipc.getSubscriptions(),
     refetchInterval: 10_000,
@@ -187,10 +305,10 @@ export function SubscriptionsPage() {
     refetchInterval: 10_000,
   });
 
-  const { data: templates = [] } = useQuery({
+  const { data: templates = [], dataUpdatedAt: templatesUpdatedAt } = useQuery({
     queryKey: ['subscription_templates'],
     queryFn: () => ipc.getSubscriptionTemplates(),
-    staleTime: Infinity,
+    refetchInterval: 10_000,
   });
 
   const { data: remoteSnapshots = [] } = useQuery({
@@ -255,6 +373,7 @@ export function SubscriptionsPage() {
 
   const invalidateSubscriptionQueries = async () => {
     await queryClient.invalidateQueries({ queryKey: ['subscriptions'] });
+    await queryClient.invalidateQueries({ queryKey: ['subscription_templates'] });
     await queryClient.invalidateQueries({ queryKey: ['monthly'] });
     await queryClient.invalidateQueries({ queryKey: ['overview'] });
     await queryClient.invalidateQueries({ queryKey: ['tray_summary'] });
@@ -318,6 +437,25 @@ export function SubscriptionsPage() {
         currency,
         usdToCnyRate
       ),
+    });
+  };
+
+  const openCreateWithTemplate = (tpl: SubscriptionPlanTemplate) => {
+    setTemplateProviderFilter(tpl.provider_id);
+    setSelectedTemplateId(tpl.template_id);
+    setFormError(null);
+    setDraft({
+      mode: 'create',
+      plan_id: `sub_${tpl.provider_id}_${tpl.template_id}_${Date.now()}`,
+      provider_id: tpl.provider_id,
+      plan_name: tpl.plan_name,
+      enabled: true,
+      monthly_fee_input: microUsdToCurrencyInput(
+        tpl.monthly_fee_micro_usd,
+        currency,
+        usdToCnyRate
+      ),
+      windows: windowsToDrafts(tpl.windows, currency, usdToCnyRate),
     });
   };
 
@@ -457,6 +595,18 @@ export function SubscriptionsPage() {
     return templates.filter((t) => t.provider_id === templateProviderFilter);
   }, [templates, templateProviderFilter]);
 
+  const templateProviders = useMemo(() => {
+    const ids = Array.from(new Set(templates.map((t) => t.provider_id)));
+    return ids.map((id) => ({ id, label: providerDisplayName(id) }));
+  }, [templates]);
+
+  const filteredReferenceTemplates = useMemo(() => {
+    if (refProviderFilter === 'all') {
+      return templates;
+    }
+    return templates.filter((t) => t.provider_id === refProviderFilter);
+  }, [templates, refProviderFilter]);
+
   const draftFeeMicroPreview = draft
     ? currencyInputToMicroUsd(draft.monthly_fee_input, currency, usdToCnyRate)
     : null;
@@ -471,7 +621,7 @@ export function SubscriptionsPage() {
         <div>
           <h1 className="text-[16px] font-semibold tracking-tight">订阅配额与滚动窗口预警</h1>
           <p className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
-            严守零假设原则：绝不猜测未配置套餐的档位或月费；仅核算您主动录入的订阅与官方日志实际记录的限额快照
+            基于手动录入与官方 API / 本地官方日志实际可获取的订阅配额实时核算，并实时联动对照各参考档位；绝不臆测未公开套餐
           </p>
         </div>
 
@@ -524,8 +674,7 @@ export function SubscriptionsPage() {
                     <span>尚未添加个人订阅配置</span>
                   </div>
                   <p className="text-[12px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
-                    TokenTracker 仅通过本地只读日志与官方公开账单接口核算用量，绝不探测私有账号接口或臆测您的订阅档位与月费。
-                    如果您购买了固定月费订阅（如 Claude Pro / Max、ChatGPT Plus / Pro、Google AI Pro / Ultra），可点击右侧按钮添加并设定 5h / 7d 预警规则；若仅需查看按量等效金额，无需配置订阅。
+                    TokenTracker 仅通过本地只读日志与官方公开 API 核算用量；在配置支持官方配额接口的 Key（如 Kimi Code `sk-kimi-...`、MiniMax、QCode）或产生含官方限额快照的本地日志（如 Codex）后，系统会自动将其加入此处。您也可以随时手动添加固定月费订阅（如 Claude Pro / Max、ChatGPT Plus / Pro、Google AI Pro / Ultra）或查看下方各参考档位实时对照；若仅需按量等效金额，无需配置订阅。
                   </p>
                 </div>
 
@@ -547,6 +696,7 @@ export function SubscriptionsPage() {
                 {configuredPlans.map((status) => {
                   const { plan, windows } = status;
                   const confirmingDelete = confirmDeleteId === plan.plan_id;
+                  const autoBadge = autoSourceBadge(plan.auto_source);
 
                   return (
                     <div
@@ -571,7 +721,21 @@ export function SubscriptionsPage() {
                             {providerDisplayName(plan.provider_id)}
                           </span>
                         </div>
-                        <div className="text-[14px] font-semibold">{plan.plan_name}</div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-[14px] font-semibold">{plan.plan_name}</span>
+                          {autoBadge && (
+                            <span
+                              className="px-1.5 py-0.5 text-[10px] rounded shrink-0"
+                              style={{
+                                backgroundColor: 'var(--bg-elevated)',
+                                border: '1px solid var(--border-hairline)',
+                                color: autoBadge.color,
+                              }}
+                            >
+                              {autoBadge.label}
+                            </span>
+                          )}
+                        </div>
                         <div
                           className="flex flex-wrap items-center gap-2 text-[11.5px] tabular-nums"
                           style={{ color: 'var(--text-secondary)' }}
@@ -607,6 +771,7 @@ export function SubscriptionsPage() {
                             w.unit === 'micro_usd'
                               ? formatCost(w.limit_value, currency, usdToCnyRate)
                               : formatTokens(w.limit_value);
+                          const srcBadge = windowSourceBadge(w.source);
                           return (
                             <div key={w.window_id} className="space-y-1">
                               <div className="flex items-center justify-between gap-2 text-[12px] tabular-nums">
@@ -617,13 +782,10 @@ export function SubscriptionsPage() {
                                     style={{
                                       backgroundColor: 'var(--bg-elevated)',
                                       border: '1px solid var(--border-hairline)',
-                                      color:
-                                        w.source === 'official_log_snapshot'
-                                          ? 'var(--accent-emerald)'
-                                          : 'var(--text-muted)',
+                                      color: srcBadge.color,
                                     }}
                                   >
-                                    {w.source === 'official_log_snapshot' ? '官方日志快照' : '本地推算'}
+                                    {srcBadge.label}
                                   </span>
                                 </div>
                                 <div className="shrink-0">
@@ -658,7 +820,9 @@ export function SubscriptionsPage() {
                                 <div style={{ color: 'var(--text-secondary)' }}>
                                   {w.window_id} 重置:{' '}
                                   <strong style={{ color: 'var(--text-primary)' }}>
-                                    {formatCountdown(w.resets_in_seconds)}
+                                    {formatCountdown(
+                                      computeLiveResetSeconds(w, plansUpdatedAt, nowMs)
+                                    )}
                                   </strong>
                                 </div>
                                 <div style={{ color: 'var(--text-muted)' }}>
@@ -815,7 +979,7 @@ export function SubscriptionsPage() {
                         {group.windows.map((obs) => {
                           const resetSecs =
                             obs.resets_at_ms !== null
-                              ? Math.max(0, Math.floor((obs.resets_at_ms - Date.now()) / 1000))
+                              ? Math.max(0, Math.floor((obs.resets_at_ms - nowMs) / 1000))
                               : null;
                           return (
                             <div key={`${obs.provider_id}-${obs.window_name}-reset`}>
@@ -852,7 +1016,170 @@ export function SubscriptionsPage() {
             </section>
           )}
 
-          {/* Section 3: Cross-Device Synced Remote Subscription Snapshots (Read-only) */}
+          {/* Section 3: Live Reference Subscription Tiers */}
+          {templates.length > 0 && (
+            <section className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2
+                    className="text-[11px] font-semibold uppercase tracking-wider"
+                    style={{ color: 'var(--text-muted)' }}
+                  >
+                    各档位参考配额实时对照
+                  </h2>
+                  <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+                    按当前本地用量与官方实时限额动态推算各公开订阅档位窗口消耗，随货币汇率与采集事件实时联动（仅供参考）
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1">
+                  {[{ id: 'all', label: '全部' }, ...templateProviders].map((p) => (
+                    <button
+                      key={`ref-filter-${p.id}`}
+                      type="button"
+                      onClick={() => setRefProviderFilter(p.id)}
+                      className="seg-pill px-2 py-0.5 rounded text-[11px] cursor-pointer"
+                      data-active={refProviderFilter === p.id ? 'true' : 'false'}
+                      style={{
+                        border:
+                          refProviderFilter === p.id
+                            ? '1px solid var(--border-strong)'
+                            : '1px solid transparent',
+                        color:
+                          refProviderFilter === p.id
+                            ? 'var(--text-primary)'
+                            : 'var(--text-muted)',
+                      }}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                {filteredReferenceTemplates.map((tpl) => {
+                  const liveWindows = templateToFallbackWindows(tpl);
+                  return (
+                    <div
+                      key={tpl.template_id}
+                      className="row-interactive py-4 px-2 grid grid-cols-12 gap-5 items-center"
+                      style={{ borderBottom: '1px solid var(--border-hairline)' }}
+                    >
+                      {/* Left: Template Identity & Fee */}
+                      <div className="col-span-12 lg:col-span-3 space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="inline-block w-2 h-2 rounded-full shrink-0"
+                            style={{ backgroundColor: providerAccentColor(tpl.provider_id) }}
+                          />
+                          <span
+                            className="text-[11px] uppercase tracking-wider"
+                            style={{ color: 'var(--text-muted)' }}
+                          >
+                            {providerDisplayName(tpl.provider_id)}
+                          </span>
+                        </div>
+                        <div className="text-[13.5px] font-semibold">{tpl.plan_name}</div>
+                        <div
+                          className="text-[11.5px] tabular-nums"
+                          style={{ color: 'var(--text-secondary)' }}
+                        >
+                          月费 {formatCost(tpl.monthly_fee_micro_usd, currency, usdToCnyRate)}
+                        </div>
+                      </div>
+
+                      {/* Center: Live Reference Window Progress Bars */}
+                      <div className="col-span-12 lg:col-span-6 space-y-2.5">
+                        {liveWindows.map((w) => {
+                          const srcBadge = windowSourceBadge(w.source);
+                          const usedStr =
+                            w.unit === 'micro_usd'
+                              ? formatCost(w.used_value, currency, usdToCnyRate)
+                              : formatTokens(w.used_value);
+                          const limitStr =
+                            w.unit === 'micro_usd'
+                              ? formatCost(w.limit_value, currency, usdToCnyRate)
+                              : formatTokens(w.limit_value);
+                          return (
+                            <div key={`${tpl.template_id}-${w.window_id}`} className="space-y-1">
+                              <div className="flex items-center justify-between gap-2 text-[12px] tabular-nums">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className="font-medium truncate">{w.label}</span>
+                                  <span
+                                    className="px-1.5 py-0.5 text-[10px] rounded shrink-0"
+                                    style={{
+                                      backgroundColor: 'var(--bg-elevated)',
+                                      border: '1px solid var(--border-hairline)',
+                                      color: srcBadge.color,
+                                    }}
+                                  >
+                                    {srcBadge.label}
+                                  </span>
+                                </div>
+                                <div className="shrink-0">
+                                  <span style={{ color: 'var(--text-secondary)' }}>
+                                    {usedStr} / {limitStr}
+                                  </span>
+                                  <span className="ml-2 font-semibold">
+                                    {w.used_percent.toFixed(1)}%
+                                  </span>
+                                </div>
+                              </div>
+                              <InlineProgressBar
+                                percent={w.used_percent}
+                                alertLevel={w.alert_level}
+                                heightPx={5}
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Right: Live Ticking Countdown & Quick Apply */}
+                      <div className="col-span-12 lg:col-span-3 flex items-center justify-between gap-3">
+                        <div className="space-y-1.5 text-[11.5px] tabular-nums">
+                          {liveWindows.map((w) => {
+                            const resetSecs = computeLiveResetSeconds(
+                              w,
+                              templatesUpdatedAt,
+                              nowMs
+                            );
+                            return (
+                              <div
+                                key={`${tpl.template_id}-${w.window_id}-reset`}
+                                style={{ color: 'var(--text-secondary)' }}
+                              >
+                                {w.window_id} 重置:{' '}
+                                <strong style={{ color: 'var(--text-primary)' }}>
+                                  {formatCountdown(resetSecs)}
+                                </strong>
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => openCreateWithTemplate(tpl)}
+                          className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1 px-2.5 py-1.5 rounded text-[11.5px] font-medium shrink-0 cursor-pointer"
+                          style={{
+                            border: '1px solid var(--border-strong)',
+                            color: 'var(--text-primary)',
+                          }}
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>套用此档位</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {/* Section 4: Cross-Device Synced Remote Subscription Snapshots (Read-only) */}
           {remoteDeviceGroups.length > 0 && (
             <section className="space-y-2">
               <div>
@@ -903,7 +1230,7 @@ export function SubscriptionsPage() {
                           : 0;
                         const resetSecs =
                           snap.resets_at_ms !== null
-                            ? Math.max(0, Math.floor((snap.resets_at_ms - Date.now()) / 1000))
+                            ? Math.max(0, Math.floor((snap.resets_at_ms - nowMs) / 1000))
                             : null;
                         return (
                           <div
@@ -1049,6 +1376,16 @@ export function SubscriptionsPage() {
                         {providerDisplayName(tpl.provider_id)} ·{' '}
                         {formatCost(tpl.monthly_fee_micro_usd, currency, usdToCnyRate)}/月
                       </div>
+                      {tpl.live_windows && tpl.live_windows.length > 0 && (
+                        <div
+                          className="text-[10px] tabular-nums truncate"
+                          style={{ color: 'var(--text-secondary)' }}
+                        >
+                          {tpl.live_windows
+                            .map((w) => `${w.window_id} ${w.used_percent.toFixed(1)}%`)
+                            .join(' · ')}
+                        </div>
+                      )}
                     </button>
                   );
                 })}
@@ -1129,6 +1466,7 @@ export function SubscriptionsPage() {
 
               <div>
                 <label
+                  htmlFor="sub-monthly-fee"
                   className="block text-[11.5px] mb-1"
                   style={{ color: 'var(--text-secondary)' }}
                 >
@@ -1136,6 +1474,7 @@ export function SubscriptionsPage() {
                 </label>
                 <div className="flex items-center gap-2">
                   <input
+                    id="sub-monthly-fee"
                     type="text"
                     inputMode="decimal"
                     placeholder="0"
@@ -1219,12 +1558,17 @@ export function SubscriptionsPage() {
                     </div>
 
                     <div>
-                      <label className="block text-[11px] mb-1" style={{ color: 'var(--text-muted)' }}>
+                      <label
+                        htmlFor={`sub-win-limit-${idx}`}
+                        className="block text-[11px] mb-1"
+                        style={{ color: 'var(--text-muted)' }}
+                      >
                         {win.unit === 'micro_usd'
                           ? `估算等效额度 (${currency})`
                           : '估算额度 (Tokens)'}
                       </label>
                       <input
+                        id={`sub-win-limit-${idx}`}
                         type="text"
                         inputMode="decimal"
                         value={win.limit_input}

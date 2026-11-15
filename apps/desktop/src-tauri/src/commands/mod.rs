@@ -10,8 +10,10 @@ use tokentracker_collectors::providers::official_api::{
 };
 use tokentracker_collectors::{
     clear_sync_credentials as clear_sync_creds,
-    refresh_provider_balance as collect_provider_balance, set_sync_credentials as set_sync_creds,
-    BalanceRefreshOutcome, ScanReport, SyncRunReport, SyncStatusView,
+    refresh_provider_balance as collect_provider_balance,
+    refresh_provider_balance_force as collect_provider_balance_force,
+    set_sync_credentials as set_sync_creds, BalanceRefreshOutcome, ScanReport, SyncRunReport,
+    SyncStatusView,
 };
 use tokentracker_core::analytics::{
     export_monthly_csv, export_monthly_json, AnalyticsFilter, ModelStatsReport, MonthlyQuery,
@@ -24,7 +26,7 @@ use tokentracker_core::domain::{
     ProviderConfig, RemoteSubscriptionSnapshot, SubscriptionPlan, SubscriptionPlanTemplate,
     SyncEnvelopeV1,
 };
-use tokentracker_core::subscription::{subscription_plan_templates, SubscriptionPlanStatus};
+use tokentracker_core::subscription::SubscriptionPlanStatus;
 use tokentracker_core::sync_crypto::generate_kdf_salt_hex;
 use tokentracker_core::CoreError;
 
@@ -330,8 +332,14 @@ pub fn delete_subscription_plan(
 }
 
 #[tauri::command]
-pub fn get_subscription_templates() -> Result<Vec<SubscriptionPlanTemplate>, IpcError> {
-    Ok(subscription_plan_templates())
+pub fn get_subscription_templates(
+    state: State<'_, AppState>,
+) -> Result<Vec<SubscriptionPlanTemplate>, IpcError> {
+    let now_ms = Utc::now().timestamp_millis();
+    state
+        .storage
+        .query_subscription_templates(now_ms)
+        .map_err(IpcError::from)
 }
 
 #[tauri::command]
@@ -398,14 +406,15 @@ pub async fn trigger_scan_now(state: State<'_, AppState>) -> Result<ScanReport, 
         .await
         .map_err(|e| IpcError::new("TASK_JOIN_ERROR", e.to_string()))?
         .map_err(IpcError::from)?;
-    if report.events_inserted > 0 {
+    if report.events_inserted > 0 || report.rate_limits_updated > 0 {
         state.sync_client.notify_local_change();
     }
     Ok(report)
 }
 
 #[tauri::command]
-pub fn set_provider_api_key(
+pub async fn set_provider_api_key(
+    app: AppHandle,
     state: State<'_, AppState>,
     provider_id: String,
     api_key: String,
@@ -414,11 +423,48 @@ pub fn set_provider_api_key(
     state
         .storage
         .set_provider_has_credential(&provider_id, true)?;
+    state
+        .storage
+        .reset_auto_subscription_dismissal(&provider_id)?;
+
+    if matches!(
+        provider_id.as_str(),
+        "kimi_code" | "deepseek_harness" | "qcode" | "minimax_code"
+    ) {
+        match collect_provider_balance_force(
+            &state.storage,
+            &provider_id,
+            state.credentials.as_ref(),
+        )
+        .await
+        {
+            Ok(outcome) => {
+                let _ = state.storage.set_provider_sync_status(
+                    &provider_id,
+                    Some(outcome.snapshot.fetched_at_ms),
+                    None,
+                );
+                if outcome.rate_limits_updated > 0 {
+                    state.sync_client.notify_local_change();
+                }
+            }
+            Err(err) => {
+                let _ = state.storage.set_provider_sync_status(
+                    &provider_id,
+                    Some(Utc::now().timestamp_millis()),
+                    Some(&err.to_string()),
+                );
+            }
+        }
+    }
+
+    let _ = app.emit("usage-updated", &provider_id);
     Ok(())
 }
 
 #[tauri::command]
 pub fn delete_provider_api_key(
+    app: AppHandle,
     state: State<'_, AppState>,
     provider_id: String,
 ) -> Result<(), IpcError> {
@@ -426,6 +472,14 @@ pub fn delete_provider_api_key(
     state
         .storage
         .set_provider_has_credential(&provider_id, false)?;
+    state
+        .storage
+        .clear_provider_api_artifacts(&provider_id)?;
+    let _ = state
+        .storage
+        .set_provider_sync_status(&provider_id, None, None);
+    let _ = app.emit("usage-updated", &provider_id);
+    state.sync_client.notify_local_change();
     Ok(())
 }
 
@@ -725,8 +779,16 @@ pub async fn refresh_provider_balance(
     let outcome = collect_provider_balance(&state.storage, &provider_id, state.credentials.as_ref())
         .await
         .map_err(IpcError::from)?;
-    if !outcome.from_cache && outcome.rate_limits_updated > 0 {
+    if !outcome.from_cache {
+        let _ = state.storage.set_provider_sync_status(
+            &provider_id,
+            Some(outcome.snapshot.fetched_at_ms),
+            None,
+        );
         let _ = app.emit("usage-updated", &outcome);
+        if outcome.rate_limits_updated > 0 {
+            state.sync_client.notify_local_change();
+        }
     }
     Ok(outcome)
 }

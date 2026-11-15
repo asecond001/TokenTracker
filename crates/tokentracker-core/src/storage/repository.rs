@@ -6,11 +6,12 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::domain::{
-    AppPreferences, CollectionMode, CurrencyCode, CustomProtocolKind, CustomProviderRule,
-    DeclarativeMappingSpec, DeviceRecord, IngestionCursor, ModelPricingEntry,
+    provider_ids, AppPreferences, CollectionMode, CurrencyCode, CustomProtocolKind,
+    CustomProviderRule, DeclarativeMappingSpec, DeviceRecord, IngestionCursor, ModelPricingEntry,
     NormalizedUsageEvent, ObservedRateLimitWindow, ProviderBalanceSnapshot, ProviderConfig,
-    RemoteSubscriptionSnapshot, RemoteSyncApplyResult, SubscriptionPlan, SubscriptionWindowRule,
-    SyncConfigState, SyncEnvelopeV1, SyncHourlyDelta, SyncSubscriptionSnapshot,
+    QuotaUnit, RemoteSubscriptionSnapshot, RemoteSyncApplyResult, SubscriptionPlan,
+    SubscriptionWindowRule, SyncConfigState, SyncEnvelopeV1, SyncHourlyDelta,
+    SyncSubscriptionSnapshot,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::pricing::{
@@ -18,7 +19,9 @@ use crate::pricing::{
     resolve_pricing,
 };
 use crate::storage::migrations::run_migrations;
-use crate::subscription::{evaluate_subscription_plan, WindowUsageSample};
+use crate::subscription::{
+    evaluate_subscription_plan, subscription_plan_templates, WindowUsageSample,
+};
 
 pub const HOUR_MS: i64 = 3_600_000;
 pub const DAY_MS: i64 = 86_400_000;
@@ -126,7 +129,7 @@ impl Storage {
         f(&guard)
     }
 
-    fn with_conn_mut<F, T>(&self, f: F) -> CoreResult<T>
+    pub(crate) fn with_conn_mut<F, T>(&self, f: F) -> CoreResult<T>
     where
         F: FnOnce(&mut Connection) -> CoreResult<T>,
     {
@@ -309,17 +312,21 @@ impl Storage {
                 touched_providers.insert(cur.provider_id.clone(), ());
             }
 
+            let mut rate_limit_providers: BTreeSet<String> = BTreeSet::new();
             for obs in rate_limits {
+                rate_limit_providers.insert(obs.provider_id.clone());
                 tx.execute(
                     r#"
                     INSERT INTO observed_rate_limits
-                        (provider_id, window_name, used_percent, window_minutes, resets_at_ms, observed_at_ms)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                        (provider_id, window_name, used_percent, window_minutes, resets_at_ms, observed_at_ms, source, plan_hint)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                     ON CONFLICT(provider_id, window_name) DO UPDATE SET
                         used_percent = excluded.used_percent,
                         window_minutes = excluded.window_minutes,
                         resets_at_ms = excluded.resets_at_ms,
-                        observed_at_ms = excluded.observed_at_ms
+                        observed_at_ms = excluded.observed_at_ms,
+                        source = COALESCE(excluded.source, observed_rate_limits.source),
+                        plan_hint = COALESCE(excluded.plan_hint, observed_rate_limits.plan_hint)
                     WHERE excluded.observed_at_ms >= observed_rate_limits.observed_at_ms
                     "#,
                     params![
@@ -329,8 +336,14 @@ impl Storage {
                         obs.window_minutes,
                         obs.resets_at_ms,
                         obs.observed_at_ms,
+                        obs.source,
+                        obs.plan_hint,
                     ],
                 )?;
+            }
+
+            for pid in rate_limit_providers {
+                sync_auto_subscription_for_provider_conn(&tx, &pid, now_ms)?;
             }
 
             for provider_id in touched_providers.keys() {
@@ -688,12 +701,25 @@ impl Storage {
     pub fn upsert_subscription_plan(&self, plan: &SubscriptionPlan) -> CoreResult<()> {
         let now_ms = Utc::now().timestamp_millis();
         let windows_json = serde_json::to_string(&plan.windows)?;
-        self.with_conn(|conn| {
-            conn.execute(
+        let is_auto = plan.plan_id.starts_with("auto_") || plan.auto_source.is_some();
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if !is_auto {
+                tx.execute(
+                    r#"
+                    DELETE FROM subscription_plans
+                    WHERE provider_id = ?1
+                      AND (plan_id LIKE 'auto_%' OR auto_source IS NOT NULL)
+                      AND user_customized = 0
+                    "#,
+                    params![plan.provider_id],
+                )?;
+            }
+            tx.execute(
                 r#"
                 INSERT INTO subscription_plans
-                    (plan_id, provider_id, plan_name, enabled, monthly_fee_micro_usd, windows_json, is_user_configured, updated_at_ms)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
+                    (plan_id, provider_id, plan_name, enabled, monthly_fee_micro_usd, windows_json, is_user_configured, auto_source, user_customized, user_dismissed, updated_at_ms)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, 0, ?9)
                 ON CONFLICT(plan_id) DO UPDATE SET
                     provider_id = excluded.provider_id,
                     plan_name = excluded.plan_name,
@@ -701,6 +727,9 @@ impl Storage {
                     monthly_fee_micro_usd = excluded.monthly_fee_micro_usd,
                     windows_json = excluded.windows_json,
                     is_user_configured = 1,
+                    auto_source = COALESCE(excluded.auto_source, subscription_plans.auto_source),
+                    user_customized = 1,
+                    user_dismissed = 0,
                     updated_at_ms = excluded.updated_at_ms
                 "#,
                 params![
@@ -710,9 +739,12 @@ impl Storage {
                     i64::from(plan.enabled),
                     plan.monthly_fee_micro_usd,
                     windows_json,
+                    plan.auto_source,
+                    i64::from(is_auto),
                     now_ms,
                 ],
             )?;
+            tx.commit()?;
             Ok(())
         })
     }
@@ -724,11 +756,66 @@ impl Storage {
                 "Subscription plan_id cannot be empty".to_string(),
             ));
         }
+        let now_ms = Utc::now().timestamp_millis();
+        self.with_conn(|conn| {
+            let auto_source: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT auto_source FROM subscription_plans WHERE plan_id = ?1",
+                    params![trimmed],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            if auto_source.flatten().is_some() || trimmed.starts_with("auto_") {
+                conn.execute(
+                    r#"
+                    UPDATE subscription_plans
+                    SET enabled = 0, is_user_configured = 0, user_dismissed = 1, updated_at_ms = ?2
+                    WHERE plan_id = ?1
+                    "#,
+                    params![trimmed, now_ms],
+                )?;
+            } else {
+                conn.execute(
+                    "DELETE FROM subscription_plans WHERE plan_id = ?1",
+                    params![trimmed],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn reset_auto_subscription_dismissal(&self, provider_id: &str) -> CoreResult<()> {
+        let now_ms = Utc::now().timestamp_millis();
         self.with_conn(|conn| {
             conn.execute(
-                "DELETE FROM subscription_plans WHERE plan_id = ?1",
-                params![trimmed],
+                r#"
+                UPDATE subscription_plans
+                SET user_dismissed = 0, updated_at_ms = ?2
+                WHERE provider_id = ?1 AND (plan_id LIKE 'auto_%' OR auto_source IS NOT NULL)
+                "#,
+                params![provider_id, now_ms],
             )?;
+            Ok(())
+        })
+    }
+
+    pub fn clear_provider_api_artifacts(&self, provider_id: &str) -> CoreResult<()> {
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
+                "DELETE FROM provider_balances WHERE provider_id = ?1",
+                params![provider_id],
+            )?;
+            tx.execute(
+                "DELETE FROM observed_rate_limits WHERE provider_id = ?1 AND source = 'official_api'",
+                params![provider_id],
+            )?;
+            tx.execute(
+                "DELETE FROM subscription_plans WHERE provider_id = ?1 AND auto_source = 'official_api' AND user_customized = 0",
+                params![provider_id],
+            )?;
+            tx.commit()?;
             Ok(())
         })
     }
@@ -996,166 +1083,18 @@ impl Storage {
                 });
             }
 
-            let display_name = if envelope.device_display_name.trim().is_empty() {
-                remote_device_id.to_string()
-            } else {
-                envelope.device_display_name.trim().to_string()
-            };
-
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            tx.execute(
-                r#"
-                INSERT INTO devices (device_id, device_name, platform, created_at_ms)
-                VALUES (?1, ?2, 'remote', ?3)
-                ON CONFLICT(device_id) DO UPDATE SET
-                    device_name = excluded.device_name
-                "#,
-                params![remote_device_id, display_name, received_at_ms],
+            let mut affected_days: BTreeSet<(String, i64)> = BTreeSet::new();
+            let outcome = merge_remote_envelope_tx(
+                &tx,
+                &local_dev.device_id,
+                envelope,
+                received_at_ms,
+                &mut affected_days,
             )?;
-
-            let mut affected_days: BTreeSet<i64> = BTreeSet::new();
-            let mut hourly_applied = 0usize;
-            {
-                let mut hourly_stmt = tx.prepare_cached(
-                    r#"
-                    INSERT INTO usage_hourly_rollups (
-                        device_id, provider_id, model_id, bucket_start_ms,
-                        request_count, observable_step_count, input_tokens, output_tokens,
-                        cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                        estimated_cost_micro_usd, cache_saved_micro_usd,
-                        total_duration_ms, tps_sample_count, tps_sum, max_output_tps, updated_at_ms
-                    ) VALUES (
-                        ?1, ?2, ?3, ?4,
-                        ?5, ?6, ?7, ?8,
-                        ?9, ?10, ?11,
-                        ?12, ?13,
-                        ?14, ?15, ?16, ?17, ?18
-                    )
-                    ON CONFLICT(device_id, provider_id, model_id, bucket_start_ms) DO UPDATE SET
-                        request_count = excluded.request_count,
-                        observable_step_count = excluded.observable_step_count,
-                        input_tokens = excluded.input_tokens,
-                        output_tokens = excluded.output_tokens,
-                        cache_read_tokens = excluded.cache_read_tokens,
-                        cache_write_tokens = excluded.cache_write_tokens,
-                        reasoning_tokens = excluded.reasoning_tokens,
-                        estimated_cost_micro_usd = excluded.estimated_cost_micro_usd,
-                        cache_saved_micro_usd = excluded.cache_saved_micro_usd,
-                        total_duration_ms = excluded.total_duration_ms,
-                        tps_sample_count = excluded.tps_sample_count,
-                        tps_sum = excluded.tps_sum,
-                        max_output_tps = excluded.max_output_tps,
-                        updated_at_ms = excluded.updated_at_ms
-                    WHERE excluded.updated_at_ms >= usage_hourly_rollups.updated_at_ms
-                    "#,
-                )?;
-
-                for delta in &envelope.hourly_deltas {
-                    let changed = hourly_stmt.execute(params![
-                        remote_device_id,
-                        delta.provider_id,
-                        delta.model_id,
-                        delta.bucket_start_ms,
-                        delta.request_count,
-                        delta.observable_step_count,
-                        delta.input_tokens,
-                        delta.output_tokens,
-                        delta.cache_read_tokens,
-                        delta.cache_write_tokens,
-                        delta.reasoning_tokens,
-                        delta.estimated_cost_micro_usd,
-                        delta.cache_saved_micro_usd,
-                        delta.total_duration_ms,
-                        delta.tps_sample_count,
-                        delta.tps_sum,
-                        delta.max_output_tps,
-                        delta.updated_at_ms,
-                    ])?;
-                    if changed > 0 {
-                        hourly_applied += 1;
-                    }
-                    affected_days.insert(delta.bucket_start_ms.div_euclid(DAY_MS) * DAY_MS);
-                }
-            }
-
-            // Recompute affected UTC days for the remote device directly from its hourly buckets.
-            for day_start_ms in affected_days {
-                let day_end_ms = day_start_ms.saturating_add(DAY_MS - 1);
-                tx.execute(
-                    "DELETE FROM usage_daily_rollups WHERE device_id = ?1 AND bucket_start_ms = ?2",
-                    params![remote_device_id, day_start_ms],
-                )?;
-                tx.execute(
-                    r#"
-                    INSERT INTO usage_daily_rollups (
-                        device_id, provider_id, model_id, bucket_start_ms,
-                        request_count, observable_step_count, input_tokens, output_tokens,
-                        cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                        estimated_cost_micro_usd, cache_saved_micro_usd,
-                        total_duration_ms, tps_sample_count, tps_sum, max_output_tps, updated_at_ms
-                    )
-                    SELECT
-                        device_id,
-                        provider_id,
-                        model_id,
-                        ?2 AS bucket_start_ms,
-                        SUM(request_count),
-                        SUM(observable_step_count),
-                        SUM(input_tokens),
-                        SUM(output_tokens),
-                        SUM(cache_read_tokens),
-                        SUM(cache_write_tokens),
-                        SUM(reasoning_tokens),
-                        SUM(estimated_cost_micro_usd),
-                        SUM(cache_saved_micro_usd),
-                        SUM(total_duration_ms),
-                        SUM(tps_sample_count),
-                        SUM(tps_sum),
-                        MAX(max_output_tps),
-                        MAX(updated_at_ms)
-                    FROM usage_hourly_rollups
-                    WHERE device_id = ?1 AND bucket_start_ms >= ?2 AND bucket_start_ms <= ?3
-                    GROUP BY device_id, provider_id, model_id
-                    "#,
-                    params![remote_device_id, day_start_ms, day_end_ms],
-                )?;
-            }
-
-            tx.execute(
-                "DELETE FROM remote_subscription_snapshots WHERE device_id = ?1",
-                params![remote_device_id],
-            )?;
-            let mut sub_stmt = tx.prepare_cached(
-                r#"
-                INSERT INTO remote_subscription_snapshots (
-                    device_id, device_display_name, plan_id, window_id, provider_id,
-                    plan_name, window_label, used_percent, resets_at_ms, source, updated_at_ms
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                "#,
-            )?;
-            for snap in &envelope.subscription_snapshots {
-                sub_stmt.execute(params![
-                    remote_device_id,
-                    display_name,
-                    snap.plan_id,
-                    snap.window_id,
-                    snap.provider_id,
-                    snap.plan_name,
-                    snap.window_label,
-                    snap.used_percent,
-                    snap.resets_at_ms,
-                    snap.source,
-                    envelope.generated_at_ms.max(received_at_ms),
-                ])?;
-            }
-            drop(sub_stmt);
-
+            rebuild_remote_daily_rollups_tx(&tx, &affected_days)?;
             tx.commit()?;
-            Ok(RemoteSyncApplyResult {
-                device_id: remote_device_id.to_string(),
-                hourly_buckets_applied: hourly_applied,
-                subscription_snapshots_applied: envelope.subscription_snapshots.len(),
-            })
+            Ok(outcome)
         })
     }
 
@@ -1297,19 +1236,24 @@ impl Storage {
         if rate_limits.is_empty() {
             return Ok(());
         }
+        let now_ms = Utc::now().timestamp_millis();
         self.with_conn_mut(|conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut rate_limit_providers: BTreeSet<String> = BTreeSet::new();
             for obs in rate_limits {
+                rate_limit_providers.insert(obs.provider_id.clone());
                 tx.execute(
                     r#"
                     INSERT INTO observed_rate_limits
-                        (provider_id, window_name, used_percent, window_minutes, resets_at_ms, observed_at_ms)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                        (provider_id, window_name, used_percent, window_minutes, resets_at_ms, observed_at_ms, source, plan_hint)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                     ON CONFLICT(provider_id, window_name) DO UPDATE SET
                         used_percent = excluded.used_percent,
                         window_minutes = excluded.window_minutes,
                         resets_at_ms = excluded.resets_at_ms,
-                        observed_at_ms = excluded.observed_at_ms
+                        observed_at_ms = excluded.observed_at_ms,
+                        source = COALESCE(excluded.source, observed_rate_limits.source),
+                        plan_hint = COALESCE(excluded.plan_hint, observed_rate_limits.plan_hint)
                     WHERE excluded.observed_at_ms >= observed_rate_limits.observed_at_ms
                     "#,
                     params![
@@ -1319,8 +1263,14 @@ impl Storage {
                         obs.window_minutes,
                         obs.resets_at_ms,
                         obs.observed_at_ms,
+                        obs.source,
+                        obs.plan_hint,
                     ],
                 )?;
+            }
+
+            for pid in rate_limit_providers {
+                sync_auto_subscription_for_provider_conn(&tx, &pid, now_ms)?;
             }
             tx.commit()?;
             Ok(())
@@ -1511,7 +1461,200 @@ impl Storage {
     }
 }
 
-fn configure_connection(conn: &Connection, enable_wal: bool) -> CoreResult<()> {
+pub(crate) fn merge_remote_envelope_tx(
+    tx: &rusqlite::Transaction<'_>,
+    local_device_id: &str,
+    envelope: &SyncEnvelopeV1,
+    received_at_ms: i64,
+    affected_days: &mut BTreeSet<(String, i64)>,
+) -> CoreResult<RemoteSyncApplyResult> {
+    if envelope.schema_version != 1 {
+        return Err(CoreError::Validation(format!(
+            "Unsupported SyncEnvelope schema_version {}",
+            envelope.schema_version
+        )));
+    }
+    let remote_device_id = envelope.device_id.trim();
+    if remote_device_id.is_empty() {
+        return Err(CoreError::Validation(
+            "Remote SyncEnvelope device_id cannot be empty".to_string(),
+        ));
+    }
+    if remote_device_id == local_device_id {
+        return Ok(RemoteSyncApplyResult {
+            device_id: remote_device_id.to_string(),
+            hourly_buckets_applied: 0,
+            subscription_snapshots_applied: 0,
+        });
+    }
+
+    let display_name = if envelope.device_display_name.trim().is_empty() {
+        remote_device_id.to_string()
+    } else {
+        envelope.device_display_name.trim().to_string()
+    };
+
+    tx.execute(
+        r#"
+        INSERT INTO devices (device_id, device_name, platform, created_at_ms)
+        VALUES (?1, ?2, 'remote', ?3)
+        ON CONFLICT(device_id) DO UPDATE SET
+            device_name = excluded.device_name
+        "#,
+        params![remote_device_id, display_name, received_at_ms],
+    )?;
+
+    let mut hourly_applied = 0usize;
+    {
+        let mut hourly_stmt = tx.prepare_cached(
+            r#"
+            INSERT INTO usage_hourly_rollups (
+                device_id, provider_id, model_id, bucket_start_ms,
+                request_count, observable_step_count, input_tokens, output_tokens,
+                cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                estimated_cost_micro_usd, cache_saved_micro_usd,
+                total_duration_ms, tps_sample_count, tps_sum, max_output_tps, updated_at_ms
+            ) VALUES (
+                ?1, ?2, ?3, ?4,
+                ?5, ?6, ?7, ?8,
+                ?9, ?10, ?11,
+                ?12, ?13,
+                ?14, ?15, ?16, ?17, ?18
+            )
+            ON CONFLICT(device_id, provider_id, model_id, bucket_start_ms) DO UPDATE SET
+                request_count = excluded.request_count,
+                observable_step_count = excluded.observable_step_count,
+                input_tokens = excluded.input_tokens,
+                output_tokens = excluded.output_tokens,
+                cache_read_tokens = excluded.cache_read_tokens,
+                cache_write_tokens = excluded.cache_write_tokens,
+                reasoning_tokens = excluded.reasoning_tokens,
+                estimated_cost_micro_usd = excluded.estimated_cost_micro_usd,
+                cache_saved_micro_usd = excluded.cache_saved_micro_usd,
+                total_duration_ms = excluded.total_duration_ms,
+                tps_sample_count = excluded.tps_sample_count,
+                tps_sum = excluded.tps_sum,
+                max_output_tps = excluded.max_output_tps,
+                updated_at_ms = excluded.updated_at_ms
+            WHERE excluded.updated_at_ms >= usage_hourly_rollups.updated_at_ms
+            "#,
+        )?;
+
+        for delta in &envelope.hourly_deltas {
+            let changed = hourly_stmt.execute(params![
+                remote_device_id,
+                delta.provider_id,
+                delta.model_id,
+                delta.bucket_start_ms,
+                delta.request_count,
+                delta.observable_step_count,
+                delta.input_tokens,
+                delta.output_tokens,
+                delta.cache_read_tokens,
+                delta.cache_write_tokens,
+                delta.reasoning_tokens,
+                delta.estimated_cost_micro_usd,
+                delta.cache_saved_micro_usd,
+                delta.total_duration_ms,
+                delta.tps_sample_count,
+                delta.tps_sum,
+                delta.max_output_tps,
+                delta.updated_at_ms,
+            ])?;
+            if changed > 0 {
+                hourly_applied += 1;
+            }
+            affected_days.insert((
+                remote_device_id.to_string(),
+                delta.bucket_start_ms.div_euclid(DAY_MS) * DAY_MS,
+            ));
+        }
+    }
+
+    tx.execute(
+        "DELETE FROM remote_subscription_snapshots WHERE device_id = ?1",
+        params![remote_device_id],
+    )?;
+    let mut sub_stmt = tx.prepare_cached(
+        r#"
+        INSERT INTO remote_subscription_snapshots (
+            device_id, device_display_name, plan_id, window_id, provider_id,
+            plan_name, window_label, used_percent, resets_at_ms, source, updated_at_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        "#,
+    )?;
+    for snap in &envelope.subscription_snapshots {
+        sub_stmt.execute(params![
+            remote_device_id,
+            display_name,
+            snap.plan_id,
+            snap.window_id,
+            snap.provider_id,
+            snap.plan_name,
+            snap.window_label,
+            snap.used_percent,
+            snap.resets_at_ms,
+            snap.source,
+            envelope.generated_at_ms.max(received_at_ms),
+        ])?;
+    }
+
+    Ok(RemoteSyncApplyResult {
+        device_id: remote_device_id.to_string(),
+        hourly_buckets_applied: hourly_applied,
+        subscription_snapshots_applied: envelope.subscription_snapshots.len(),
+    })
+}
+
+pub(crate) fn rebuild_remote_daily_rollups_tx(
+    tx: &rusqlite::Transaction<'_>,
+    affected_days: &BTreeSet<(String, i64)>,
+) -> CoreResult<()> {
+    for (remote_device_id, day_start_ms) in affected_days {
+        let day_end_ms = day_start_ms.saturating_add(DAY_MS - 1);
+        tx.execute(
+            "DELETE FROM usage_daily_rollups WHERE device_id = ?1 AND bucket_start_ms = ?2",
+            params![remote_device_id, day_start_ms],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO usage_daily_rollups (
+                device_id, provider_id, model_id, bucket_start_ms,
+                request_count, observable_step_count, input_tokens, output_tokens,
+                cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                estimated_cost_micro_usd, cache_saved_micro_usd,
+                total_duration_ms, tps_sample_count, tps_sum, max_output_tps, updated_at_ms
+            )
+            SELECT
+                device_id,
+                provider_id,
+                model_id,
+                ?2 AS bucket_start_ms,
+                SUM(request_count),
+                SUM(observable_step_count),
+                SUM(input_tokens),
+                SUM(output_tokens),
+                SUM(cache_read_tokens),
+                SUM(cache_write_tokens),
+                SUM(reasoning_tokens),
+                SUM(estimated_cost_micro_usd),
+                SUM(cache_saved_micro_usd),
+                SUM(total_duration_ms),
+                SUM(tps_sample_count),
+                SUM(tps_sum),
+                MAX(max_output_tps),
+                MAX(updated_at_ms)
+            FROM usage_hourly_rollups
+            WHERE device_id = ?1 AND bucket_start_ms >= ?2 AND bucket_start_ms <= ?3
+            GROUP BY device_id, provider_id, model_id
+            "#,
+            params![remote_device_id, day_start_ms, day_end_ms],
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn configure_connection(conn: &Connection, enable_wal: bool) -> CoreResult<()> {
     if enable_wal {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -1521,7 +1664,7 @@ fn configure_connection(conn: &Connection, enable_wal: bool) -> CoreResult<()> {
     Ok(())
 }
 
-fn query_local_device(conn: &Connection) -> CoreResult<DeviceRecord> {
+pub(crate) fn query_local_device(conn: &Connection) -> CoreResult<DeviceRecord> {
     conn.query_row(
         "SELECT device_id, device_name, platform, created_at_ms FROM devices ORDER BY created_at_ms ASC LIMIT 1",
         [],
@@ -1833,7 +1976,7 @@ pub(crate) fn load_subscription_plans(conn: &Connection) -> CoreResult<Vec<Subsc
     let mut stmt = conn.prepare(
         r#"
         SELECT plan_id, provider_id, plan_name, enabled, monthly_fee_micro_usd,
-               windows_json, is_user_configured, updated_at_ms
+               windows_json, is_user_configured, auto_source, updated_at_ms
         FROM subscription_plans
         ORDER BY provider_id ASC, monthly_fee_micro_usd ASC
         "#,
@@ -1850,7 +1993,8 @@ pub(crate) fn load_subscription_plans(conn: &Connection) -> CoreResult<Vec<Subsc
             monthly_fee_micro_usd: row.get(4)?,
             windows,
             is_user_configured: row.get::<_, i64>(6)? != 0,
-            updated_at_ms: row.get(7)?,
+            auto_source: row.get(7)?,
+            updated_at_ms: row.get(8)?,
         })
     })?;
     let mut out = Vec::new();
@@ -1865,7 +2009,8 @@ pub(crate) fn load_observed_rate_limits(
 ) -> CoreResult<Vec<ObservedRateLimitWindow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT provider_id, window_name, used_percent, window_minutes, resets_at_ms, observed_at_ms
+        SELECT provider_id, window_name, used_percent, window_minutes, resets_at_ms,
+               observed_at_ms, source, plan_hint
         FROM observed_rate_limits
         "#,
     )?;
@@ -1877,6 +2022,8 @@ pub(crate) fn load_observed_rate_limits(
             window_minutes: row.get(3)?,
             resets_at_ms: row.get(4)?,
             observed_at_ms: row.get(5)?,
+            source: row.get(6)?,
+            plan_hint: row.get(7)?,
         })
     })?;
     let mut out = Vec::new();
@@ -1884,6 +2031,261 @@ pub(crate) fn load_observed_rate_limits(
         out.push(row?);
     }
     Ok(out)
+}
+
+fn infer_window_rule_from_observed(
+    provider_id: &str,
+    obs: &ObservedRateLimitWindow,
+    template_windows: &[SubscriptionWindowRule],
+    daily_quota_limit_micro: Option<i64>,
+    balance_currency: Option<&str>,
+) -> SubscriptionWindowRule {
+    let name = obs.window_name.to_ascii_lowercase();
+    let (window_id, default_label, duration_hours, rolling) = match obs.window_minutes {
+        Some(m) if (240..=360).contains(&m) => ("5h".to_string(), "5h 滚动窗口".to_string(), 5, true),
+        Some(m) if (1_200..=1_680).contains(&m) => {
+            ("24h".to_string(), "24h 日额度".to_string(), 24, false)
+        }
+        Some(m) if (9_600..=10_560).contains(&m) => {
+            ("7d".to_string(), "7d 周额度".to_string(), 168, true)
+        }
+        Some(m) if m >= 40_000 => ("30d".to_string(), "30d 月额度".to_string(), 720, false),
+        Some(m) => {
+            let hours = (m / 60).max(1);
+            (
+                format!("{hours}h"),
+                format!("{hours}h 窗口"),
+                hours,
+                hours <= 168,
+            )
+        }
+        None if name.contains("primary") || name.contains("5h") => {
+            ("5h".to_string(), "5h 滚动窗口".to_string(), 5, true)
+        }
+        None if name.contains("secondary") || name.contains("7d") || name.contains("week") => {
+            ("7d".to_string(), "7d 周额度".to_string(), 168, true)
+        }
+        None if name.contains("daily") || name.contains("24h") || name.contains("day") => {
+            ("24h".to_string(), "24h 日额度".to_string(), 24, false)
+        }
+        None => ("5h".to_string(), "5h 滚动窗口".to_string(), 5, true),
+    };
+
+    if provider_id == provider_ids::QCODE && window_id == "24h" {
+        if let Some(limit) = daily_quota_limit_micro.filter(|&v| v > 0) {
+            return SubscriptionWindowRule {
+                window_id,
+                label: default_label,
+                duration_hours,
+                rolling,
+                unit: QuotaUnit::MicroUsd,
+                limit_value: limit,
+                warning_percent: 80,
+                critical_percent: 95,
+            };
+        }
+    }
+
+    if let Some(tpl_win) = template_windows.iter().find(|w| w.window_id == window_id) {
+        let mut cloned = tpl_win.clone();
+        if provider_id == provider_ids::KIMI_CODE && balance_currency == Some("QUOTA") {
+            cloned.label = if window_id == "5h" {
+                "5h 请求/频次窗口".to_string()
+            } else {
+                "7d 周额度窗口".to_string()
+            };
+        }
+        return cloned;
+    }
+
+    SubscriptionWindowRule {
+        window_id,
+        label: default_label,
+        duration_hours,
+        rolling,
+        unit: QuotaUnit::MicroUsd,
+        limit_value: 20_000_000,
+        warning_percent: 80,
+        critical_percent: 95,
+    }
+}
+
+pub(crate) fn sync_auto_subscription_for_provider_conn(
+    conn: &Connection,
+    provider_id: &str,
+    now_ms: i64,
+) -> CoreResult<()> {
+    let trimmed = provider_id.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    // Do not auto-seed if the user already maintains an active manually created plan for this provider.
+    let has_manual_plan: Option<i64> = conn
+        .query_row(
+            r#"
+            SELECT 1
+            FROM subscription_plans
+            WHERE provider_id = ?1
+              AND is_user_configured = 1
+              AND auto_source IS NULL
+              AND plan_id NOT LIKE 'auto_%'
+            LIMIT 1
+            "#,
+            params![trimmed],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if has_manual_plan.is_some() {
+        return Ok(());
+    }
+
+    let auto_plan_id = format!("auto_{trimmed}");
+    let existing_flags: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT user_dismissed, user_customized FROM subscription_plans WHERE plan_id = ?1",
+            params![auto_plan_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((dismissed, customized)) = existing_flags {
+        if dismissed != 0 || customized != 0 {
+            return Ok(());
+        }
+    }
+
+    let obs_rows: Vec<ObservedRateLimitWindow> = load_observed_rate_limits(conn)?
+        .into_iter()
+        .filter(|o| o.provider_id.eq_ignore_ascii_case(trimmed))
+        .collect();
+    if obs_rows.is_empty() {
+        return Ok(());
+    }
+
+    let bal_info: Option<(String, Option<i64>)> = conn
+        .query_row(
+            "SELECT currency, daily_quota_limit_micro FROM provider_balances WHERE provider_id = ?1",
+            params![trimmed],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let balance_currency = bal_info.as_ref().map(|(c, _)| c.as_str());
+    let daily_quota_limit = bal_info.as_ref().and_then(|(_, l)| *l);
+
+    let auto_source = if obs_rows
+        .iter()
+        .any(|o| o.source.as_deref() == Some("official_api"))
+        || matches!(
+            trimmed,
+            provider_ids::KIMI_CODE | provider_ids::MINIMAX_CODE | provider_ids::QCODE
+        ) {
+        "official_api".to_string()
+    } else {
+        "official_log_snapshot".to_string()
+    };
+
+    let plan_hint = obs_rows
+        .iter()
+        .filter_map(|o| {
+            o.plan_hint
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| (o.observed_at_ms, s.to_string()))
+        })
+        .max_by_key(|(ts, _)| *ts)
+        .map(|(_, s)| s);
+
+    let hint_lower = plan_hint
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let templates = subscription_plan_templates();
+    let preferred_tpl = templates.iter().find(|tpl| {
+        tpl.provider_id == trimmed
+            && match trimmed {
+                provider_ids::CODEX if hint_lower.contains("pro") => tpl.template_id == "codex_pro",
+                provider_ids::CODEX => tpl.template_id == "codex_plus",
+                _ => true,
+            }
+    });
+    let tpl_windows: Vec<SubscriptionWindowRule> = preferred_tpl
+        .map(|t| t.windows.clone())
+        .unwrap_or_default();
+
+    let mut rules_by_id: BTreeMap<String, SubscriptionWindowRule> = BTreeMap::new();
+    for obs in &obs_rows {
+        let rule = infer_window_rule_from_observed(
+            trimmed,
+            obs,
+            &tpl_windows,
+            daily_quota_limit,
+            balance_currency,
+        );
+        rules_by_id.entry(rule.window_id.clone()).or_insert(rule);
+    }
+    let mut windows: Vec<SubscriptionWindowRule> = rules_by_id.into_values().collect();
+    windows.sort_by_key(|w| w.duration_hours);
+    if windows.is_empty() {
+        return Ok(());
+    }
+
+    let (plan_name, monthly_fee_micro_usd) = match trimmed {
+        provider_ids::CODEX => {
+            if hint_lower.contains("pro") {
+                ("ChatGPT Pro / Codex".to_string(), 200_000_000)
+            } else if hint_lower.contains("team") {
+                ("ChatGPT Team / Codex".to_string(), 25_000_000)
+            } else if hint_lower.contains("plus") {
+                ("ChatGPT Plus / Codex".to_string(), 20_000_000)
+            } else {
+                ("Codex 官方订阅".to_string(), 0)
+            }
+        }
+        provider_ids::KIMI_CODE => {
+            let name = match hint_lower.as_str() {
+                "level_basic" | "basic" => "Kimi Code 基础会员",
+                "level_intermediate" | "allegretto" => "Kimi Code Allegretto",
+                "level_advanced" | "moderato" => "Kimi Code Moderato",
+                "level_max" | "vivace" | "max" => "Kimi Code Vivace",
+                _ => "Kimi Code 会员订阅",
+            };
+            (name.to_string(), 0)
+        }
+        provider_ids::MINIMAX_CODE => ("MiniMax Coding Plan".to_string(), 0),
+        provider_ids::QCODE => ("QCode 日额度套餐".to_string(), 0),
+        other => (format!("{other} 官方订阅"), 0),
+    };
+
+    let windows_json = serde_json::to_string(&windows)?;
+    conn.execute(
+        r#"
+        INSERT INTO subscription_plans
+            (plan_id, provider_id, plan_name, enabled, monthly_fee_micro_usd, windows_json, is_user_configured, auto_source, user_customized, user_dismissed, updated_at_ms)
+        VALUES (?1, ?2, ?3, 1, ?4, ?5, 1, ?6, 0, 0, ?7)
+        ON CONFLICT(plan_id) DO UPDATE SET
+            plan_name = excluded.plan_name,
+            enabled = 1,
+            monthly_fee_micro_usd = excluded.monthly_fee_micro_usd,
+            windows_json = excluded.windows_json,
+            is_user_configured = 1,
+            auto_source = excluded.auto_source,
+            updated_at_ms = excluded.updated_at_ms
+        WHERE subscription_plans.user_customized = 0 AND subscription_plans.user_dismissed = 0
+        "#,
+        params![
+            auto_plan_id,
+            trimmed,
+            plan_name,
+            monthly_fee_micro_usd,
+            windows_json,
+            auto_source,
+            now_ms,
+        ],
+    )?;
+
+    Ok(())
 }
 
 pub(crate) fn load_preferences(conn: &Connection) -> CoreResult<AppPreferences> {
@@ -2119,6 +2521,7 @@ mod tests {
             monthly_fee_micro_usd: 20_000_000,
             windows: vec![],
             is_user_configured: false,
+            auto_source: None,
             updated_at_ms: 1_760_000_000_000,
         };
         storage.upsert_subscription_plan(&plan).expect("upsert plan");
@@ -2250,7 +2653,7 @@ mod tests {
             .with_conn(|conn| {
                 let ver: i64 =
                     conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))?;
-                assert_eq!(ver, 4);
+                assert_eq!(ver, crate::storage::migrations::CURRENT_SCHEMA_VERSION);
 
                 let ok_tps: Option<f64> = conn.query_row(
                     "SELECT output_tps FROM usage_events WHERE event_id = 'ev-ok'",
@@ -2683,5 +3086,126 @@ mod tests {
             .expect("remote snaps");
         assert_eq!(remote_snaps.len(), 1);
         assert_eq!(remote_snaps[0].device_display_name, "MacBook Air");
+    }
+
+    #[test]
+    fn auto_subscription_discovery_respects_user_edits_dismissal_and_resets() {
+        let storage = Storage::open_in_memory().expect("db");
+        let now_ms = Utc::now().timestamp_millis();
+
+        // 1. Fresh DB starts with zero subscriptions (Bug 4 preserves zero-assumption for non-observable providers).
+        assert!(storage
+            .query_subscriptions(now_ms)
+            .expect("initial subs")
+            .is_empty());
+
+        // 2. Observed rate-limit from official API creates auto_kimi_code in "我的订阅配置".
+        storage
+            .upsert_observed_rate_limits(&[
+                ObservedRateLimitWindow {
+                    provider_id: provider_ids::KIMI_CODE.to_string(),
+                    window_name: "5h".to_string(),
+                    used_percent: 25.0,
+                    window_minutes: Some(300),
+                    resets_at_ms: Some(now_ms + 3_600_000),
+                    observed_at_ms: now_ms,
+                    source: Some("official_api".to_string()),
+                    plan_hint: Some("LEVEL_INTERMEDIATE".to_string()),
+                },
+                ObservedRateLimitWindow {
+                    provider_id: provider_ids::KIMI_CODE.to_string(),
+                    window_name: "7d".to_string(),
+                    used_percent: 40.0,
+                    window_minutes: Some(10_080),
+                    resets_at_ms: Some(now_ms + 3 * DAY_MS),
+                    observed_at_ms: now_ms,
+                    source: Some("official_api".to_string()),
+                    plan_hint: Some("LEVEL_INTERMEDIATE".to_string()),
+                },
+            ])
+            .expect("upsert kimi observed");
+
+        let subs = storage.query_subscriptions(now_ms).expect("subs after api");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].plan.plan_id, "auto_kimi_code");
+        assert_eq!(subs[0].plan.auto_source.as_deref(), Some("official_api"));
+        assert_eq!(subs[0].plan.plan_name, "Kimi Code Allegretto");
+        assert_eq!(subs[0].windows.len(), 2);
+        assert_eq!(subs[0].windows[0].source, "official_api");
+        assert!((subs[0].windows[0].used_percent - 25.0).abs() < 0.01);
+
+        // 3. Deleting an auto-discovered plan soft-dismisses it so future polls do not resurrect it.
+        storage
+            .delete_subscription_plan("auto_kimi_code")
+            .expect("dismiss auto");
+        assert!(storage
+            .query_subscriptions(now_ms)
+            .expect("after dismiss")
+            .is_empty());
+
+        storage
+            .upsert_observed_rate_limits(&[ObservedRateLimitWindow {
+                provider_id: provider_ids::KIMI_CODE.to_string(),
+                window_name: "5h".to_string(),
+                used_percent: 30.0,
+                window_minutes: Some(300),
+                resets_at_ms: Some(now_ms + 3_600_000),
+                observed_at_ms: now_ms + 5_000,
+                source: Some("official_api".to_string()),
+                plan_hint: Some("LEVEL_INTERMEDIATE".to_string()),
+            }])
+            .expect("poll while dismissed");
+        assert!(storage
+            .query_subscriptions(now_ms + 5_000)
+            .expect("remains dismissed")
+            .is_empty());
+
+        // 4. Re-configuring API key resets dismissal and re-discovers on next fetch.
+        storage
+            .reset_auto_subscription_dismissal(provider_ids::KIMI_CODE)
+            .expect("reset dismissal");
+        storage
+            .upsert_observed_rate_limits(&[ObservedRateLimitWindow {
+                provider_id: provider_ids::KIMI_CODE.to_string(),
+                window_name: "5h".to_string(),
+                used_percent: 35.0,
+                window_minutes: Some(300),
+                resets_at_ms: Some(now_ms + 3_600_000),
+                observed_at_ms: now_ms + 10_000,
+                source: Some("official_api".to_string()),
+                plan_hint: Some("LEVEL_MAX".to_string()),
+            }])
+            .expect("poll after reset");
+        let revived = storage
+            .query_subscriptions(now_ms + 10_000)
+            .expect("revived");
+        assert_eq!(revived.len(), 1);
+        assert_eq!(revived[0].plan.plan_name, "Kimi Code Vivace");
+
+        // 5. User customization preserves custom plan_name while windows keep refreshing from API.
+        let mut custom = revived[0].plan.clone();
+        custom.plan_name = "我的 Kimi 专享套餐".to_string();
+        custom.monthly_fee_micro_usd = 7_000_000;
+        storage
+            .upsert_subscription_plan(&custom)
+            .expect("customize auto");
+        storage
+            .upsert_observed_rate_limits(&[ObservedRateLimitWindow {
+                provider_id: provider_ids::KIMI_CODE.to_string(),
+                window_name: "5h".to_string(),
+                used_percent: 50.0,
+                window_minutes: Some(300),
+                resets_at_ms: Some(now_ms + 3_600_000),
+                observed_at_ms: now_ms + 20_000,
+                source: Some("official_api".to_string()),
+                plan_hint: Some("LEVEL_MAX".to_string()),
+            }])
+            .expect("poll after customize");
+        let after_edit = storage
+            .query_subscriptions(now_ms + 20_000)
+            .expect("after edit");
+        assert_eq!(after_edit[0].plan.plan_name, "我的 Kimi 专享套餐");
+        assert_eq!(after_edit[0].plan.monthly_fee_micro_usd, 7_000_000);
+        assert!((after_edit[0].windows[0].used_percent - 50.0).abs() < 0.01);
     }
 }

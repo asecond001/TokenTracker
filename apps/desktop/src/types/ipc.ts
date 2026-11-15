@@ -68,6 +68,7 @@ export interface ScanReport {
   files_scanned: number;
   events_inserted: number;
   events_deduplicated: number;
+  rate_limits_updated?: number;
   errors: string[];
   scanned_at_ms: number;
 }
@@ -314,6 +315,7 @@ export interface SubscriptionPlan {
   monthly_fee_micro_usd: number;
   windows: SubscriptionWindowRule[];
   is_user_configured: boolean;
+  auto_source?: string | null;
   updated_at_ms: number;
 }
 
@@ -324,6 +326,7 @@ export interface SubscriptionPlanTemplate {
   monthly_fee_micro_usd: number;
   windows: SubscriptionWindowRule[];
   description: string;
+  live_windows?: SubscriptionWindowStatus[];
 }
 
 export interface ObservedRateLimitWindow {
@@ -333,6 +336,8 @@ export interface ObservedRateLimitWindow {
   window_minutes: number | null;
   resets_at_ms: number | null;
   observed_at_ms: number;
+  source?: string | null;
+  plan_hint?: string | null;
 }
 
 export interface SubscriptionWindowStatus {
@@ -388,6 +393,7 @@ export interface ProviderSpeedStats {
 export interface SpeedLatencyReport {
   providers: ProviderSpeedStats[];
   models: ModelSpeedStats[];
+  from_hourly_rollups?: boolean;
 }
 
 export interface TraySummary {

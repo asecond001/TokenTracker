@@ -67,13 +67,14 @@ impl AppState {
     pub fn start_background_services(&self, app_handle: AppHandle) {
         let (tx, rx) = watch::channel(false);
         let mut catalog_rx = tx.subscribe();
+        let mut quota_rx = tx.subscribe();
         let watcher_app = app_handle.clone();
         let coord = self.coordinator.clone();
         let sync_for_watcher = self.sync_client.clone();
         tauri::async_runtime::spawn(async move {
             coord
                 .run_background_watcher_with_hook(rx, move |report| {
-                    if report.events_inserted > 0 {
+                    if report.events_inserted > 0 || report.rate_limits_updated > 0 {
                         let _ = watcher_app.emit("usage-updated", report);
                         sync_for_watcher.notify_local_change();
                     }
@@ -87,6 +88,38 @@ impl AppState {
             sync_client.start_background(move |report| {
                 let _ = sync_app.emit("usage-updated", report);
             });
+        });
+
+        let quota_storage = self.storage.clone();
+        let quota_creds = Arc::clone(&self.credentials);
+        let quota_app = app_handle.clone();
+        let quota_sync = self.sync_client.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(4)) => {}
+                _ = quota_rx.changed() => {
+                    return;
+                }
+            }
+
+            poll_configured_provider_apis(&quota_storage, quota_creds.as_ref(), &quota_app, &quota_sync).await;
+
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await;
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        poll_configured_provider_apis(&quota_storage, quota_creds.as_ref(), &quota_app, &quota_sync).await;
+                    }
+                    _ = quota_rx.changed() => {
+                        if *quota_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
         });
 
         let sync_storage = self.storage.clone();
@@ -233,4 +266,56 @@ pub async fn run_catalog_sync_shared(
         let _ = app.emit("usage-updated", &res);
     }
     Ok(res)
+}
+
+async fn poll_configured_provider_apis(
+    storage: &Storage,
+    credentials: &dyn CredentialManager,
+    app: &AppHandle,
+    sync_client: &SyncClientHandle,
+) {
+    let Ok(configs) = storage.list_provider_configs() else {
+        return;
+    };
+    let mut any_updated = false;
+    let mut any_rate_limits = false;
+
+    for cfg in configs {
+        if !cfg.enabled || !cfg.has_credential {
+            continue;
+        }
+        if !matches!(
+            cfg.provider_id.as_str(),
+            "kimi_code" | "minimax_code" | "qcode" | "deepseek_harness"
+        ) {
+            continue;
+        }
+        match tokentracker_collectors::refresh_provider_balance(storage, &cfg.provider_id, credentials)
+            .await
+        {
+            Ok(outcome) => {
+                if !outcome.from_cache {
+                    any_updated = true;
+                    let _ = storage.set_provider_sync_status(
+                        &cfg.provider_id,
+                        Some(outcome.snapshot.fetched_at_ms),
+                        None,
+                    );
+                }
+                if outcome.rate_limits_updated > 0 {
+                    any_rate_limits = true;
+                }
+            }
+            Err(err) => {
+                tracing::debug!("Background API poll warning for {}: {err}", cfg.provider_id);
+            }
+        }
+    }
+
+    if any_updated {
+        let _ = app.emit("usage-updated", "api_poll");
+    }
+    if any_rate_limits {
+        sync_client.notify_local_change();
+    }
 }

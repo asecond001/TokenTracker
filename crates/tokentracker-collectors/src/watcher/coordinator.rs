@@ -30,6 +30,8 @@ pub struct ScanReport {
     pub files_scanned: usize,
     pub events_inserted: usize,
     pub events_deduplicated: usize,
+    #[serde(default)]
+    pub rate_limits_updated: usize,
     pub errors: Vec<String>,
     pub scanned_at_ms: i64,
 }
@@ -112,6 +114,7 @@ impl CollectorCoordinator {
                         report.files_scanned += 1;
                         report.events_inserted += out.events_inserted;
                         report.events_deduplicated += out.events_deduplicated;
+                        report.rate_limits_updated += out.rate_limits_updated;
                     }
                     Err(err) => {
                         let msg = format!(
@@ -152,6 +155,7 @@ impl CollectorCoordinator {
                             report.files_scanned += 1;
                             report.events_inserted += out.events_inserted;
                             report.events_deduplicated += out.events_deduplicated;
+                            report.rate_limits_updated += out.rate_limits_updated;
                         }
                         Err(err) => {
                             report.errors.push(format!(

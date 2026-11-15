@@ -39,6 +39,8 @@ pub struct FileParseContext {
     pub last_codex_totals: Option<CodexRawTotals>,
     /// Bounded LRU-like ring of active streaming `message.id` turns for Claude Code logs.
     pub active_message_turns: Vec<(String, ActiveMessageTurn)>,
+    /// Tracks cumulative context token checkpoint (e.g. Kimi CLI `_usage` records) to derive step deltas.
+    pub last_context_tokens: Option<i64>,
     pub line_number: u64,
 }
 

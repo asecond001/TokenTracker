@@ -16,8 +16,9 @@ pub use credentials::{CredentialManager, MemoryCredentialStore, OsKeyringStore};
 pub use error::{CollectorError, CollectorResult};
 pub use otlp::{start_loopback_otlp_server, validate_loopback_addr, OtlpServerHandle};
 pub use providers::official_api::{
-    refresh_provider_balance, refresh_provider_balance_with_fetcher, AuthHttpFetcher,
-    BalanceApiEndpoints, BalanceRefreshOutcome, ReqwestAuthFetcher, BALANCE_COOLDOWN_MS,
+    refresh_provider_balance, refresh_provider_balance_force,
+    refresh_provider_balance_with_fetcher, AuthHttpFetcher, BalanceApiEndpoints,
+    BalanceRefreshOutcome, ReqwestAuthFetcher, BALANCE_COOLDOWN_MS,
 };
 pub use sync_client::{
     clear_sync_credentials, has_sync_credentials, read_sync_status_view, run_sync_cycle_once,

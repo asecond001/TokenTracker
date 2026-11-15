@@ -23,6 +23,13 @@ pub fn appdata_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+pub fn local_appdata_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("XDG_DATA_HOME"))
+        .map(PathBuf::from)
+        .or_else(|| user_home_dir().map(|h| h.join(".local").join("share")))
+}
+
 pub fn init_generic_context(
     path: &Path,
     device_id: &str,
@@ -97,7 +104,8 @@ fn extract_routed_or_model(
         "upstream_model",
         "target_model",
     ];
-    let std_keys = ["model", "model_id", "model_name"];
+    let std_keys = ["model", "model_id", "model_name", "modelName"];
+    let nested_payload = envelope.and_then(|e| e.get("payload"));
 
     if prefer_routed {
         if let Some(s) = first_str(root, &routed_keys) {
@@ -108,6 +116,11 @@ fn extract_routed_or_model(
                 return Some(s.to_string());
             }
         }
+        if let Some(payload) = nested_payload {
+            if let Some(s) = first_str(payload, &routed_keys) {
+                return Some(s.to_string());
+            }
+        }
         if let Some(meta) = root.get("metadata") {
             if let Some(s) = first_str(meta, &routed_keys) {
                 return Some(s.to_string());
@@ -115,6 +128,11 @@ fn extract_routed_or_model(
         }
     }
 
+    if let Some(payload) = nested_payload {
+        if let Some(s) = first_str(payload, &std_keys) {
+            return Some(s.to_string());
+        }
+    }
     if let Some(env) = envelope {
         if let Some(s) = first_str(env, &std_keys) {
             return Some(s.to_string());
@@ -127,6 +145,8 @@ fn extract_routed_or_model(
 }
 
 pub fn extract_usage_tokens(usage: &Value) -> (i64, i64, i64, i64, i64) {
+    let has_any = |keys: &[&str]| keys.iter().any(|k| usage.get(*k).is_some());
+
     let cache_write_tokens = get_i64(
         usage,
         &[
@@ -134,41 +154,63 @@ pub fn extract_usage_tokens(usage: &Value) -> (i64, i64, i64, i64, i64) {
             "cache_write_tokens",
             "cache_write_input_tokens",
             "input_cache_creation",
+            "cacheCreationInputTokens",
+            "cacheWriteTokens",
+            "inputCacheCreation",
         ],
     );
 
     let nested_cached = usage
         .pointer("/prompt_tokens_details/cached_tokens")
         .or_else(|| usage.pointer("/input_tokens_details/cached_tokens"))
+        .or_else(|| usage.pointer("/promptTokensDetails/cachedTokens"))
+        .or_else(|| usage.pointer("/inputTokensDetails/cachedTokens"))
         .and_then(|v| v.as_i64())
         .unwrap_or(0)
         .max(0);
 
-    let cache_hit = get_i64(usage, &["prompt_cache_hit_tokens", "input_cache_read"]);
+    let cache_hit = get_i64(
+        usage,
+        &[
+            "prompt_cache_hit_tokens",
+            "input_cache_read",
+            "promptCacheHitTokens",
+            "inputCacheRead",
+        ],
+    );
     let direct_cached = get_i64(
         usage,
         &[
             "cache_read_input_tokens",
             "cache_read_tokens",
             "cached_tokens",
+            "cacheReadInputTokens",
+            "cacheReadTokens",
+            "cachedTokens",
         ],
     );
     let cache_read_tokens = cache_hit.max(direct_cached).max(nested_cached);
 
-    let input_tokens = if usage.get("prompt_cache_miss_tokens").is_some() {
-        get_i64(usage, &["prompt_cache_miss_tokens"])
-    } else if usage.get("input_other").is_some() {
-        get_i64(usage, &["input_other"])
-    } else if usage.get("cache_read_input_tokens").is_some() && usage.get("input_tokens").is_some()
+    let input_tokens = if has_any(&["prompt_cache_miss_tokens", "promptCacheMissTokens"]) {
+        get_i64(usage, &["prompt_cache_miss_tokens", "promptCacheMissTokens"])
+    } else if has_any(&["input_other", "inputOther"]) {
+        get_i64(usage, &["input_other", "inputOther"])
+    } else if has_any(&["cache_read_input_tokens", "cacheReadInputTokens"])
+        && has_any(&["input_tokens", "inputTokens"])
     {
         // Anthropic convention: `input_tokens` already excludes cache_read / cache_creation.
-        get_i64(usage, &["input_tokens"])
-    } else if usage.get("prompt_tokens").is_some() {
+        get_i64(usage, &["input_tokens", "inputTokens"])
+    } else if has_any(&["prompt_tokens", "promptTokens"]) {
         // OpenAI convention: `prompt_tokens` includes `cached_tokens`.
-        get_i64(usage, &["prompt_tokens"]).saturating_sub(cache_read_tokens)
+        get_i64(usage, &["prompt_tokens", "promptTokens"]).saturating_sub(cache_read_tokens)
     } else {
-        let raw_in = get_i64(usage, &["input_tokens"]);
-        if usage.get("input_tokens_details").is_some() || usage.get("cached_tokens").is_some() {
+        let raw_in = get_i64(usage, &["input_tokens", "inputTokens", "input"]);
+        if has_any(&[
+            "input_tokens_details",
+            "inputTokensDetails",
+            "cached_tokens",
+            "cachedTokens",
+        ]) {
             raw_in.saturating_sub(cache_read_tokens)
         } else {
             raw_in
@@ -178,6 +220,8 @@ pub fn extract_usage_tokens(usage: &Value) -> (i64, i64, i64, i64, i64) {
     let nested_reasoning = usage
         .pointer("/completion_tokens_details/reasoning_tokens")
         .or_else(|| usage.pointer("/output_tokens_details/reasoning_tokens"))
+        .or_else(|| usage.pointer("/completionTokensDetails/reasoningTokens"))
+        .or_else(|| usage.pointer("/outputTokensDetails/reasoningTokens"))
         .and_then(|v| v.as_i64())
         .unwrap_or(0)
         .max(0);
@@ -188,17 +232,32 @@ pub fn extract_usage_tokens(usage: &Value) -> (i64, i64, i64, i64, i64) {
             "reasoning_tokens",
             "thinking_tokens",
             "completion_reasoning_tokens",
+            "reasoningTokens",
+            "thinkingTokens",
         ],
     )
     .max(nested_reasoning);
 
-    let raw_out = get_i64(usage, &["output_tokens", "completion_tokens", "output"]);
+    let raw_out = get_i64(
+        usage,
+        &[
+            "output_tokens",
+            "completion_tokens",
+            "output",
+            "outputTokens",
+            "completionTokens",
+        ],
+    );
     let output_tokens = if reasoning_tokens > 0
         && raw_out >= reasoning_tokens
-        && (usage.get("completion_tokens").is_some()
-            || usage.get("completion_tokens_details").is_some()
-            || usage.get("output_tokens_details").is_some())
-    {
+        && has_any(&[
+            "completion_tokens",
+            "completionTokens",
+            "completion_tokens_details",
+            "output_tokens_details",
+            "completionTokensDetails",
+            "outputTokensDetails",
+        ]) {
         raw_out.saturating_sub(reasoning_tokens)
     } else {
         raw_out
@@ -262,21 +321,52 @@ pub fn parse_compatible_jsonl_line(
     {
         ctx.session_id = sid.to_string();
     }
-    if let Some(cwd) = first_str(
-        &val,
-        &["cwd", "workspace", "workspace_dir", "project_dir", "project_root"],
-    ) {
-        ctx.project_label = sanitize_project_label(Some(cwd));
-    }
-
     let envelope = val
         .get("message")
+        .or_else(|| val.get("params"))
         .or_else(|| val.get("response"))
         .or_else(|| val.get("payload"))
         .or_else(|| val.get("data"));
+    let nested_payload = envelope.and_then(|e| e.get("payload"));
+
+    if let Some(cwd) = first_str(
+        &val,
+        &["cwd", "workspace", "workspace_dir", "project_dir", "project_root", "work_dir"],
+    )
+    .or_else(|| {
+        envelope.and_then(|e| {
+            first_str(
+                e,
+                &["cwd", "workspace", "workspace_dir", "project_dir", "project_root", "work_dir"],
+            )
+        })
+    })
+    .or_else(|| {
+        nested_payload.and_then(|p| {
+            first_str(
+                p,
+                &["cwd", "workspace", "workspace_dir", "project_dir", "project_root", "work_dir"],
+            )
+        })
+    }) {
+        ctx.project_label = sanitize_project_label(Some(cwd));
+    }
 
     if let Some(model) = extract_routed_or_model(&val, envelope, profile.prefer_routed_model) {
         ctx.current_model = Some(model);
+    }
+
+    let is_cumulative_scope = [Some(&val), envelope, nested_payload]
+        .into_iter()
+        .flatten()
+        .filter_map(|obj| first_str(obj, &["scope"]))
+        .any(|s| {
+            s.eq_ignore_ascii_case("session")
+                || s.eq_ignore_ascii_case("cumulative")
+                || s.eq_ignore_ascii_case("total")
+        });
+    if is_cumulative_scope {
+        return None;
     }
 
     let ts_ms = parse_timestamp_ms(
@@ -285,14 +375,27 @@ pub fn parse_compatible_jsonl_line(
             .or_else(|| val.get("time"))
             .or_else(|| val.get("ts"))
             .or_else(|| val.get("created"))
-            .or_else(|| envelope.and_then(|e| e.get("created"))),
+            .or_else(|| {
+                envelope.and_then(|e| {
+                    e.get("timestamp")
+                        .or_else(|| e.get("created_at"))
+                        .or_else(|| e.get("created"))
+                })
+            })
+            .or_else(|| {
+                nested_payload.and_then(|p| p.get("timestamp").or_else(|| p.get("created_at")))
+            }),
     )
     .unwrap_or_else(now_ms);
 
     let role_or_type = first_str(&val, &["role", "type", "event"])
+        .or_else(|| envelope.and_then(|e| first_str(e, &["role", "type", "event"])))
         .unwrap_or("")
         .to_ascii_lowercase();
-    if matches!(role_or_type.as_str(), "user" | "prompt" | "tool_result") {
+    if matches!(
+        role_or_type.as_str(),
+        "user" | "prompt" | "tool_result" | "turnbegin" | "turn_begin"
+    ) {
         ctx.last_prompt_ts_ms = Some(ts_ms);
         return None;
     }
