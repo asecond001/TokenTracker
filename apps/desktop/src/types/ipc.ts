@@ -3,7 +3,7 @@ export type CollectionMode = 'local_log' | 'otlp' | 'official_api';
 export type CurrencyCode = 'USD' | 'CNY';
 export type ThemeMode = 'system' | 'dark' | 'light';
 export type QuotaUnit = 'micro_usd' | 'tokens';
-export type TrendGranularity = 'fifteen_minutes' | 'hourly' | 'daily' | 'weekly';
+export type TrendGranularity = 'auto' | 'fifteen_minutes' | 'hourly' | 'daily' | 'weekly';
 export type StackDimension = 'provider' | 'model' | 'token_type';
 
 export interface DeviceRecord {
@@ -42,6 +42,15 @@ export interface AppPreferences {
   otlp_enabled: boolean;
   otlp_port: number;
   device_display_name: string;
+  bg_mode: 'none' | 'image' | 'gradient' | string;
+  bg_image_path: string | null;
+  bg_preset_id: string;
+  bg_opacity: number;
+  bg_blur_px: number;
+  auto_sync_pricing: boolean;
+  exchange_rate_auto: boolean;
+  last_rate_sync_at_ms: number | null;
+  last_pricing_sync_at_ms: number | null;
   updated_at_ms: number;
 }
 
@@ -69,6 +78,7 @@ export interface AnalyticsFilter {
   end_ms: number;
   provider_id: string | null;
   tz_offset_minutes: number;
+  all_time?: boolean;
 }
 
 export interface TimeBucketPoint {
@@ -114,6 +124,7 @@ export interface OverviewReport {
   tps_delta_pct: number | null;
   series_granularity: string;
   series: TimeBucketPoint[];
+  provider_series: TrendSeries[];
   providers: ProviderSummaryRow[];
 }
 
@@ -153,6 +164,7 @@ export interface TrendsReport {
   buckets: number[];
   series: TrendSeries[];
   comparisons: TrendComparisonRow[];
+  effective_granularity: TrendGranularity;
 }
 
 export interface MonthlyQuery {
@@ -253,7 +265,26 @@ export interface SubscriptionPlan {
   enabled: boolean;
   monthly_fee_micro_usd: number;
   windows: SubscriptionWindowRule[];
+  is_user_configured: boolean;
   updated_at_ms: number;
+}
+
+export interface SubscriptionPlanTemplate {
+  template_id: string;
+  provider_id: string;
+  plan_name: string;
+  monthly_fee_micro_usd: number;
+  windows: SubscriptionWindowRule[];
+  description: string;
+}
+
+export interface ObservedRateLimitWindow {
+  provider_id: string;
+  window_name: string;
+  used_percent: number;
+  window_minutes: number | null;
+  resets_at_ms: number | null;
+  observed_at_ms: number;
 }
 
 export interface SubscriptionWindowStatus {
@@ -294,27 +325,21 @@ export interface ModelSpeedStats {
   avg_ttft_ms: number | null;
 }
 
-export interface ContextSpeedSample {
-  model_id: string;
+export interface ProviderSpeedStats {
   provider_id: string;
-  context_tokens: number;
-  output_tps: number;
-  duration_ms: number;
-  timestamp_ms: number;
-}
-
-export interface ContextDecayBin {
-  bin_label: string;
   sample_count: number;
-  avg_tps: number;
+  mean_tps: number;
   p50_tps: number;
+  p95_tps: number;
+  max_tps: number;
+  min_tps: number;
   avg_duration_ms: number;
+  avg_ttft_ms: number | null;
 }
 
 export interface SpeedLatencyReport {
+  providers: ProviderSpeedStats[];
   models: ModelSpeedStats[];
-  scatter_points: ContextSpeedSample[];
-  context_bins: ContextDecayBin[];
 }
 
 export interface TraySummary {
@@ -385,4 +410,16 @@ export interface SyncEnvelopeV1 {
   since_watermark_ms: number;
   hourly_deltas: SyncHourlyDelta[];
   subscription_snapshots: SyncSubscriptionSnapshot[];
+}
+
+export interface CatalogSyncResult {
+  rate_updated: boolean;
+  usd_to_cny_rate: string;
+  pricing_updated: boolean;
+  synced_models_count: number;
+  recomputed_events_count: number;
+  synced_at_ms: number;
+  rate_source: string | null;
+  pricing_source: string | null;
+  warning: string | null;
 }

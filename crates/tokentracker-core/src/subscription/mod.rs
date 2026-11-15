@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub use crate::domain::SubscriptionPlanTemplate;
 use crate::domain::{
     provider_ids, ObservedRateLimitWindow, QuotaUnit, SubscriptionPlan, SubscriptionWindowRule,
 };
@@ -44,189 +45,117 @@ pub struct SubscriptionPlanStatus {
     pub windows: Vec<SubscriptionWindowStatus>,
 }
 
-/// Built-in default subscription plans (`PLAN.md` §5.1, §5.2, §6.2.5).
-pub fn default_subscription_plans() -> Vec<SubscriptionPlan> {
+fn standard_two_windows(limit_5h_micro_usd: i64, limit_7d_micro_usd: i64) -> Vec<SubscriptionWindowRule> {
     vec![
-        SubscriptionPlan {
-            plan_id: "claude_pro".to_string(),
-            provider_id: provider_ids::CLAUDE_CODE.to_string(),
-            plan_name: "Claude Pro ($20/mo)".to_string(),
-            enabled: true,
-            monthly_fee_micro_usd: 20_000_000,
-            windows: vec![
-                SubscriptionWindowRule {
-                    window_id: "5h".to_string(),
-                    label: "5h 滚动窗口".to_string(),
-                    duration_hours: 5,
-                    rolling: true,
-                    unit: QuotaUnit::MicroUsd,
-                    limit_value: 15_000_000,
-                    warning_percent: 80,
-                    critical_percent: 95,
-                },
-                SubscriptionWindowRule {
-                    window_id: "7d".to_string(),
-                    label: "7d 周额度".to_string(),
-                    duration_hours: 168,
-                    rolling: true,
-                    unit: QuotaUnit::MicroUsd,
-                    limit_value: 75_000_000,
-                    warning_percent: 80,
-                    critical_percent: 95,
-                },
-            ],
-            updated_at_ms: 0,
+        SubscriptionWindowRule {
+            window_id: "5h".to_string(),
+            label: "5h 滚动窗口".to_string(),
+            duration_hours: 5,
+            rolling: true,
+            unit: QuotaUnit::MicroUsd,
+            limit_value: limit_5h_micro_usd,
+            warning_percent: 80,
+            critical_percent: 95,
         },
-        SubscriptionPlan {
-            plan_id: "claude_max_5x".to_string(),
-            provider_id: provider_ids::CLAUDE_CODE.to_string(),
-            plan_name: "Claude Max 5x ($100/mo)".to_string(),
-            enabled: false,
-            monthly_fee_micro_usd: 100_000_000,
-            windows: vec![
-                SubscriptionWindowRule {
-                    window_id: "5h".to_string(),
-                    label: "5h 滚动窗口".to_string(),
-                    duration_hours: 5,
-                    rolling: true,
-                    unit: QuotaUnit::MicroUsd,
-                    limit_value: 75_000_000,
-                    warning_percent: 80,
-                    critical_percent: 95,
-                },
-                SubscriptionWindowRule {
-                    window_id: "7d".to_string(),
-                    label: "7d 周额度".to_string(),
-                    duration_hours: 168,
-                    rolling: true,
-                    unit: QuotaUnit::MicroUsd,
-                    limit_value: 375_000_000,
-                    warning_percent: 80,
-                    critical_percent: 95,
-                },
-            ],
-            updated_at_ms: 0,
+        SubscriptionWindowRule {
+            window_id: "7d".to_string(),
+            label: "7d 周额度".to_string(),
+            duration_hours: 168,
+            rolling: true,
+            unit: QuotaUnit::MicroUsd,
+            limit_value: limit_7d_micro_usd,
+            warning_percent: 80,
+            critical_percent: 95,
         },
-        SubscriptionPlan {
-            plan_id: "claude_max_20x".to_string(),
-            provider_id: provider_ids::CLAUDE_CODE.to_string(),
-            plan_name: "Claude Max 20x ($200/mo)".to_string(),
-            enabled: false,
-            monthly_fee_micro_usd: 200_000_000,
-            windows: vec![
-                SubscriptionWindowRule {
-                    window_id: "5h".to_string(),
-                    label: "5h 滚动窗口".to_string(),
-                    duration_hours: 5,
-                    rolling: true,
-                    unit: QuotaUnit::MicroUsd,
-                    limit_value: 200_000_000,
-                    warning_percent: 80,
-                    critical_percent: 95,
-                },
-                SubscriptionWindowRule {
-                    window_id: "7d".to_string(),
-                    label: "7d 周额度".to_string(),
-                    duration_hours: 168,
-                    rolling: true,
-                    unit: QuotaUnit::MicroUsd,
-                    limit_value: 1_200_000_000,
-                    warning_percent: 80,
-                    critical_percent: 95,
-                },
-            ],
-            updated_at_ms: 0,
-        },
-        SubscriptionPlan {
-            plan_id: "codex_plus".to_string(),
-            provider_id: provider_ids::CODEX.to_string(),
-            plan_name: "ChatGPT Plus / Codex ($20/mo)".to_string(),
-            enabled: true,
-            monthly_fee_micro_usd: 20_000_000,
-            windows: vec![
-                SubscriptionWindowRule {
-                    window_id: "5h".to_string(),
-                    label: "5h 滚动窗口".to_string(),
-                    duration_hours: 5,
-                    rolling: true,
-                    unit: QuotaUnit::MicroUsd,
-                    limit_value: 18_000_000,
-                    warning_percent: 80,
-                    critical_percent: 95,
-                },
-                SubscriptionWindowRule {
-                    window_id: "7d".to_string(),
-                    label: "7d 周额度".to_string(),
-                    duration_hours: 168,
-                    rolling: true,
-                    unit: QuotaUnit::MicroUsd,
-                    limit_value: 90_000_000,
-                    warning_percent: 80,
-                    critical_percent: 95,
-                },
-            ],
-            updated_at_ms: 0,
-        },
-        SubscriptionPlan {
-            plan_id: "codex_pro".to_string(),
-            provider_id: provider_ids::CODEX.to_string(),
-            plan_name: "ChatGPT Pro / Codex ($200/mo)".to_string(),
-            enabled: false,
-            monthly_fee_micro_usd: 200_000_000,
-            windows: vec![
-                SubscriptionWindowRule {
-                    window_id: "5h".to_string(),
-                    label: "5h 滚动窗口".to_string(),
-                    duration_hours: 5,
-                    rolling: true,
-                    unit: QuotaUnit::MicroUsd,
-                    limit_value: 150_000_000,
-                    warning_percent: 80,
-                    critical_percent: 95,
-                },
-                SubscriptionWindowRule {
-                    window_id: "7d".to_string(),
-                    label: "7d 周额度".to_string(),
-                    duration_hours: 168,
-                    rolling: true,
-                    unit: QuotaUnit::MicroUsd,
-                    limit_value: 900_000_000,
-                    warning_percent: 80,
-                    critical_percent: 95,
-                },
-            ],
-            updated_at_ms: 0,
-        },
-        SubscriptionPlan {
-            plan_id: "antigravity_ai_pro".to_string(),
-            provider_id: provider_ids::ANTIGRAVITY.to_string(),
-            plan_name: "Google AI Pro / Antigravity ($19.99/mo)".to_string(),
-            enabled: true,
-            monthly_fee_micro_usd: 19_990_000,
-            windows: vec![
-                SubscriptionWindowRule {
-                    window_id: "5h".to_string(),
-                    label: "5h 滚动窗口".to_string(),
-                    duration_hours: 5,
-                    rolling: true,
-                    unit: QuotaUnit::MicroUsd,
-                    limit_value: 20_000_000,
-                    warning_percent: 80,
-                    critical_percent: 95,
-                },
-                SubscriptionWindowRule {
-                    window_id: "7d".to_string(),
-                    label: "7d 周额度".to_string(),
-                    duration_hours: 168,
-                    rolling: true,
-                    unit: QuotaUnit::MicroUsd,
-                    limit_value: 100_000_000,
-                    warning_percent: 80,
-                    critical_percent: 95,
-                },
-            ],
-            updated_at_ms: 0,
-        },
+    ]
+}
+
+fn template_entry(
+    template_id: &str,
+    provider_id: &str,
+    plan_name: &str,
+    monthly_fee_micro_usd: i64,
+    limit_5h_micro_usd: i64,
+    limit_7d_micro_usd: i64,
+    description: &str,
+) -> SubscriptionPlanTemplate {
+    SubscriptionPlanTemplate {
+        template_id: template_id.to_string(),
+        provider_id: provider_id.to_string(),
+        plan_name: plan_name.to_string(),
+        monthly_fee_micro_usd,
+        windows: standard_two_windows(limit_5h_micro_usd, limit_7d_micro_usd),
+        description: description.to_string(),
+    }
+}
+
+/// Optional reference subscription templates offered in the UI drawer for quick prefill.
+/// Never auto-seeded into SQLite on startup (`PLAN.md` §3.2 zero-assumption principle).
+pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
+    vec![
+        template_entry(
+            "claude_pro",
+            provider_ids::CLAUDE_CODE,
+            "Claude Pro ($20/mo)",
+            20_000_000,
+            15_000_000,
+            75_000_000,
+            "Anthropic Claude Pro 个人订阅（含 5h 滚动与 7d 周参考窗口）",
+        ),
+        template_entry(
+            "claude_max_5x",
+            provider_ids::CLAUDE_CODE,
+            "Claude Max 5x ($100/mo)",
+            100_000_000,
+            75_000_000,
+            375_000_000,
+            "Anthropic Claude Max 5x 高配额订阅（5 倍 Pro 参考额度）",
+        ),
+        template_entry(
+            "claude_max_20x",
+            provider_ids::CLAUDE_CODE,
+            "Claude Max 20x ($200/mo)",
+            200_000_000,
+            200_000_000,
+            1_200_000_000,
+            "Anthropic Claude Max 20x 重度编码订阅（20 倍 Pro 参考额度）",
+        ),
+        template_entry(
+            "codex_plus",
+            provider_ids::CODEX,
+            "ChatGPT Plus / Codex ($20/mo)",
+            20_000_000,
+            18_000_000,
+            90_000_000,
+            "OpenAI ChatGPT Plus（可自动对齐 Codex 日志官方 5h / 7d 限额）",
+        ),
+        template_entry(
+            "codex_pro",
+            provider_ids::CODEX,
+            "ChatGPT Pro / Codex ($200/mo)",
+            200_000_000,
+            150_000_000,
+            900_000_000,
+            "OpenAI ChatGPT Pro（可自动对齐 Codex 日志官方 5h / 7d 限额）",
+        ),
+        template_entry(
+            "google_ai_pro",
+            provider_ids::ANTIGRAVITY,
+            "Google AI Pro ($19.99/mo)",
+            19_990_000,
+            20_000_000,
+            100_000_000,
+            "Google AI Pro / Antigravity 个人订阅（19.99 USD/月参考窗口）",
+        ),
+        template_entry(
+            "google_ai_ultra",
+            provider_ids::ANTIGRAVITY,
+            "Google AI Ultra ($249.99/mo)",
+            249_990_000,
+            250_000_000,
+            1_250_000_000,
+            "Google AI Ultra / Antigravity 旗舰订阅（249.99 USD/月高额度窗口）",
+        ),
     ]
 }
 
@@ -400,13 +329,47 @@ pub fn evaluate_window(
 mod tests {
     use super::*;
 
+    fn plan_from_template(template_id: &str) -> SubscriptionPlan {
+        let tpl = subscription_plan_templates()
+            .into_iter()
+            .find(|t| t.template_id == template_id)
+            .expect("template exists");
+        SubscriptionPlan {
+            plan_id: tpl.template_id,
+            provider_id: tpl.provider_id,
+            plan_name: tpl.plan_name,
+            enabled: true,
+            monthly_fee_micro_usd: tpl.monthly_fee_micro_usd,
+            windows: tpl.windows,
+            is_user_configured: true,
+            updated_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn templates_cover_all_seven_reference_plans() {
+        let templates = subscription_plan_templates();
+        assert_eq!(templates.len(), 7);
+        let ids: Vec<&str> = templates.iter().map(|t| t.template_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "claude_pro",
+                "claude_max_5x",
+                "claude_max_20x",
+                "codex_plus",
+                "codex_pro",
+                "google_ai_pro",
+                "google_ai_ultra",
+            ]
+        );
+        assert_eq!(templates[5].monthly_fee_micro_usd, 19_990_000);
+        assert_eq!(templates[6].monthly_fee_micro_usd, 249_990_000);
+    }
+
     #[test]
     fn rolling_window_calculates_usage_countdown_and_projection() {
-        let plans = default_subscription_plans();
-        let pro = plans
-            .iter()
-            .find(|p| p.plan_id == "claude_pro")
-            .expect("claude_pro exists");
+        let pro = plan_from_template("claude_pro");
         let now_ms = 1_760_000_000_000i64;
         // 3 hours ago spent $6, 20 mins ago spent $6 -> total $12 / $15 = 80% warning!
         // Recent 1h burn rate = $6/hr, remaining = $3 -> 0.5h exhaustion!
@@ -430,7 +393,7 @@ mod tests {
             },
         ];
 
-        let status = evaluate_subscription_plan(pro, &samples, &[], now_ms);
+        let status = evaluate_subscription_plan(&pro, &samples, &[], now_ms);
         let w5 = &status.windows[0];
         assert!((w5.used_percent - 80.0).abs() < 0.01);
         assert_eq!(w5.alert_level, "warning");
@@ -444,11 +407,7 @@ mod tests {
 
     #[test]
     fn fresh_official_snapshot_overrides_local_percent_for_codex() {
-        let plans = default_subscription_plans();
-        let codex = plans
-            .iter()
-            .find(|p| p.plan_id == "codex_plus")
-            .expect("codex_plus exists");
+        let codex = plan_from_template("codex_plus");
         let now_ms = 1_760_000_000_000i64;
         let obs = vec![ObservedRateLimitWindow {
             provider_id: provider_ids::CODEX.to_string(),
@@ -459,7 +418,7 @@ mod tests {
             observed_at_ms: now_ms - 30_000,
         }];
 
-        let status = evaluate_subscription_plan(codex, &[], &obs, now_ms);
+        let status = evaluate_subscription_plan(&codex, &[], &obs, now_ms);
         let w5 = &status.windows[0];
         assert_eq!(w5.source, "official_log_snapshot");
         assert!((w5.used_percent - 42.5).abs() < 0.01);

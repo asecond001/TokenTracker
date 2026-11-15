@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ExternalLink, RefreshCw } from 'lucide-react';
 import { InlineProgressBar } from '../components/InlineProgressBar';
@@ -9,11 +10,37 @@ import {
   providerDisplayName,
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
-import { useWorkspaceStore } from '../stores/workspaceStore';
+import { syncDocumentAndNativeTheme, useWorkspaceStore } from '../stores/workspaceStore';
+import type { ThemeMode } from '../types/ipc';
+
+function normalizeThemeMode(raw: string | undefined | null): ThemeMode {
+  return raw === 'light' || raw === 'dark' || raw === 'system' ? raw : 'dark';
+}
 
 export function TrayPopupPage() {
   const queryClient = useQueryClient();
-  const { tzOffsetMinutes } = useWorkspaceStore();
+  const {
+    tzOffsetMinutes,
+    currency: storeCurrency,
+    usdToCnyRate: storeRate,
+    setTheme,
+    setCurrency,
+    setUsdToCnyRate,
+  } = useWorkspaceStore();
+
+  const { data: prefs } = useQuery({
+    queryKey: ['preferences'],
+    queryFn: () => ipc.getPreferences(),
+  });
+
+  useEffect(() => {
+    if (!prefs) return;
+    const nextTheme = normalizeThemeMode(prefs.theme);
+    setTheme(nextTheme);
+    syncDocumentAndNativeTheme(nextTheme);
+    setCurrency(prefs.currency);
+    setUsdToCnyRate(prefs.usd_to_cny_rate);
+  }, [prefs, setTheme, setCurrency, setUsdToCnyRate]);
 
   const { data: summary } = useQuery({
     queryKey: ['tray_summary', tzOffsetMinutes],
@@ -25,11 +52,12 @@ export function TrayPopupPage() {
     mutationFn: () => ipc.triggerScanNow(),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['tray_summary'] });
+      await queryClient.invalidateQueries({ queryKey: ['tray-summary'] });
     },
   });
 
-  const currency = summary?.currency ?? 'USD';
-  const rate = summary?.usd_to_cny_rate ?? '7.25';
+  const currency = prefs?.currency ?? summary?.currency ?? storeCurrency;
+  const rate = prefs?.usd_to_cny_rate ?? summary?.usd_to_cny_rate ?? storeRate;
 
   return (
     <div
@@ -47,7 +75,10 @@ export function TrayPopupPage() {
           style={{ borderBottom: '1px solid var(--border-subtle)' }}
         >
           <div className="flex items-center gap-2">
-            <span className="inline-block w-2 h-2 rounded-full collector-dot-live" style={{ backgroundColor: 'var(--accent-emerald)' }} />
+            <span
+              className="inline-block w-2 h-2 rounded-full collector-dot-live"
+              style={{ backgroundColor: 'var(--accent-emerald)' }}
+            />
             <span className="text-[12.5px] font-semibold">TokenTracker 实时摘要</span>
           </div>
           <span
@@ -133,9 +164,9 @@ export function TrayPopupPage() {
           type="button"
           onClick={() => scanMutation.mutate()}
           disabled={scanMutation.isPending}
-          className="flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 rounded text-[11.5px] cursor-pointer"
+          className="btn-interactive flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 rounded text-[11.5px] cursor-pointer disabled:opacity-50"
           style={{
-            backgroundColor: 'var(--bg-hover)',
+            backgroundColor: 'var(--bg-elevated)',
             color: 'var(--text-primary)',
             border: '1px solid var(--border-subtle)',
           }}
@@ -149,7 +180,7 @@ export function TrayPopupPage() {
           onClick={() => {
             void ipc.openMainWorkspace();
           }}
-          className="flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 rounded text-[11.5px] font-medium cursor-pointer"
+          className="flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 rounded text-[11.5px] font-medium hover:opacity-90 active:scale-[0.985] transition-all cursor-pointer"
           style={{
             backgroundColor: 'var(--accent-primary)',
             color: '#ffffff',

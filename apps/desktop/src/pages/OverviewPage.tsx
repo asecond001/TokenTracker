@@ -1,10 +1,15 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import type { EChartsOption } from 'echarts';
+import { AnimatedNumber } from '../components/AnimatedNumber';
 import { EChartBox } from '../components/EChartBox';
 import { InlineProgressBar } from '../components/InlineProgressBar';
+import { TimeRangeControl } from '../components/TimeRangeControl';
+import { useChartTheme } from '../lib/chartTheme';
 import {
+  TOKEN_TYPE_COLORS,
   formatCost,
+  formatExactInt,
   formatPercent,
   formatRelativeTime,
   formatTokens,
@@ -13,7 +18,10 @@ import {
   providerDisplayName,
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
-import { useWorkspaceStore } from '../stores/workspaceStore';
+import { computeTimeRange, useWorkspaceStore } from '../stores/workspaceStore';
+import type { AnalyticsFilter } from '../types/ipc';
+
+type OverviewChartDimension = 'provider' | 'token_type';
 
 function DeltaBadge({ pct }: { pct: number | null }) {
   if (pct === null || !Number.isFinite(pct)) {
@@ -36,16 +44,44 @@ function DeltaBadge({ pct }: { pct: number | null }) {
   );
 }
 
+function formatBucketLabel(tsMs: number, granularity: string | undefined): string {
+  const d = new Date(tsMs);
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  if (granularity === 'hourly') {
+    return `${mm}-${dd} ${String(d.getHours()).padStart(2, '0')}:00`;
+  }
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
 export function OverviewPage() {
-  const { timePreset, customStartDate, customEndDate, providerFilter, currency, usdToCnyRate, getFilter, setActivePage } =
-    useWorkspaceStore();
+  const {
+    timePreset,
+    customStartDate,
+    customEndDate,
+    providerFilter,
+    currency,
+    usdToCnyRate,
+    tzOffsetMinutes,
+    setActivePage,
+  } = useWorkspaceStore();
+  const chartTheme = useChartTheme();
+  const [chartDimension, setChartDimension] = useState<OverviewChartDimension>('provider');
   const [chartType, setChartType] = useState<'area' | 'bar'>('area');
 
-  const filter = useMemo(
-    () => getFilter(),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [timePreset, customStartDate, customEndDate, providerFilter]
-  );
+  const filter = useMemo<AnalyticsFilter>(() => {
+    const range = computeTimeRange(timePreset, {
+      start: customStartDate,
+      end: customEndDate,
+    });
+    return {
+      start_ms: range.start_ms,
+      end_ms: range.end_ms,
+      provider_id: providerFilter === 'all' ? null : providerFilter,
+      tz_offset_minutes: tzOffsetMinutes,
+      all_time: range.all_time,
+    };
+  }, [timePreset, customStartDate, customEndDate, providerFilter, tzOffsetMinutes]);
 
   const { data, isLoading } = useQuery({
     queryKey: ['overview', filter],
@@ -53,101 +89,144 @@ export function OverviewPage() {
     refetchInterval: 10_000,
   });
 
-  const chartOption = useMemo<EChartsOption>(() => {
-    const series = data?.series ?? [];
-    const xLabels = series.map((pt) => {
-      const d = new Date(pt.bucket_start_ms);
-      if (data?.series_granularity === 'hourly') {
-        return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:00`;
-      }
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    });
+  const costFormatter = useCallback(
+    (value: number) => formatCost(value, currency, usdToCnyRate),
+    [currency, usdToCnyRate]
+  );
 
+  const percentFormatter = useCallback((value: number) => formatPercent(value, true), []);
+
+  const showDeltas = timePreset !== 'all';
+  const activeProviderSeries = useMemo(
+    () =>
+      (data?.provider_series ?? []).filter(
+        (ps) => ps.total_tokens > 0 && ps.points.some((pt) => pt.tokens > 0)
+      ),
+    [data]
+  );
+
+  const hasChartData =
+    chartDimension === 'provider'
+      ? activeProviderSeries.length > 0
+      : (data?.series.length ?? 0) > 0 && (data?.total_tokens ?? 0) > 0;
+
+  const chartOption = useMemo<EChartsOption>(() => {
+    const bucketSeries = data?.series ?? [];
+    const bucketTimestamps =
+      bucketSeries.length > 0
+        ? bucketSeries.map((pt) => pt.bucket_start_ms)
+        : (activeProviderSeries[0]?.points.map((pt) => pt.bucket_start_ms) ?? []);
+    const xLabels = bucketTimestamps.map((ts) =>
+      formatBucketLabel(ts, data?.series_granularity)
+    );
     const isBar = chartType === 'bar';
+    const areaOpacity = chartTheme.isLight ? 0.55 : 0.42;
+
+    const tokenTypeCandidates = [
+      {
+        id: 'token-input',
+        name: 'Input',
+        color: TOKEN_TYPE_COLORS.input,
+        values: bucketSeries.map((p) => p.input_tokens),
+      },
+      {
+        id: 'token-output',
+        name: 'Output',
+        color: TOKEN_TYPE_COLORS.output,
+        values: bucketSeries.map((p) => p.output_tokens + p.reasoning_tokens),
+      },
+      {
+        id: 'token-cache-read',
+        name: 'Cache Read',
+        color: TOKEN_TYPE_COLORS.cache_read,
+        values: bucketSeries.map((p) => p.cache_read_tokens),
+      },
+      {
+        id: 'token-cache-write',
+        name: 'Cache Write',
+        color: TOKEN_TYPE_COLORS.cache_write,
+        values: bucketSeries.map((p) => p.cache_write_tokens),
+      },
+    ].filter((entry) => entry.values.some((v) => v > 0));
+
+    const seriesConfig: EChartsOption['series'] =
+      chartDimension === 'provider'
+        ? activeProviderSeries.map((ps) => {
+            const color = providerAccentColor(ps.key);
+            return {
+              id: `provider-${ps.key}`,
+              name: ps.label || providerDisplayName(ps.key),
+              type: isBar ? 'bar' : 'line',
+              stack: 'tokens',
+              smooth: !isBar,
+              showSymbol: false,
+              universalTransition: true,
+              emphasis: { focus: 'series' },
+              areaStyle: isBar ? undefined : { color, opacity: areaOpacity },
+              itemStyle: { color },
+              lineStyle: isBar ? undefined : { width: 0, opacity: 0 },
+              data: ps.points.map((pt) => pt.tokens),
+            };
+          })
+        : tokenTypeCandidates.map((entry) => ({
+            id: entry.id,
+            name: entry.name,
+            type: isBar ? 'bar' : 'line',
+            stack: 'tokens',
+            smooth: !isBar,
+            showSymbol: false,
+            universalTransition: true,
+            emphasis: { focus: 'series' },
+            areaStyle: isBar ? undefined : { color: entry.color, opacity: areaOpacity },
+            itemStyle: { color: entry.color },
+            lineStyle: isBar ? undefined : { width: 0, opacity: 0 },
+            data: entry.values,
+          }));
 
     return {
       backgroundColor: 'transparent',
+      animationDuration: 280,
+      animationDurationUpdate: 260,
       tooltip: {
         trigger: 'axis',
-        backgroundColor: '#161922',
-        borderColor: '#2d3343',
-        textStyle: { color: '#eceff4', fontSize: 12 },
+        backgroundColor: chartTheme.tooltipBg,
+        borderColor: chartTheme.tooltipBorder,
+        textStyle: { color: chartTheme.tooltipText, fontSize: 12 },
       },
       legend: {
         top: 0,
         right: 0,
-        textStyle: { color: '#98a2b3', fontSize: 11 },
+        textStyle: { color: chartTheme.textSecondary, fontSize: 11 },
         itemWidth: 10,
         itemHeight: 6,
       },
-      grid: { top: 32, right: 12, bottom: 24, left: 48, containLabel: false },
+      grid: { top: 32, right: 12, bottom: 24, left: 52, containLabel: false },
       xAxis: {
         type: 'category',
         data: xLabels,
-        axisLine: { lineStyle: { color: '#2b3040' } },
-        axisLabel: { color: '#6b7280', fontSize: 11 },
+        axisLine: { lineStyle: { color: chartTheme.axisLineColor } },
+        axisLabel: { color: chartTheme.textMuted, fontSize: 11 },
         axisTick: { show: false },
       },
       yAxis: {
         type: 'value',
-        splitLine: { lineStyle: { color: '#1f232e', type: 'dashed' } },
+        splitLine: { lineStyle: { color: chartTheme.splitLineColor, type: 'dashed' } },
         axisLabel: {
-          color: '#6b7280',
+          color: chartTheme.textMuted,
           fontSize: 11,
           formatter: (val: number) => formatTokens(val),
         },
       },
-      series: [
-        {
-          name: 'Input',
-          type: isBar ? 'bar' : 'line',
-          stack: 'tokens',
-          smooth: !isBar,
-          showSymbol: false,
-          areaStyle: isBar ? undefined : { opacity: 0.28 },
-          itemStyle: { color: '#6366f1' },
-          data: series.map((p) => p.input_tokens),
-        },
-        {
-          name: 'Output',
-          type: isBar ? 'bar' : 'line',
-          stack: 'tokens',
-          smooth: !isBar,
-          showSymbol: false,
-          areaStyle: isBar ? undefined : { opacity: 0.28 },
-          itemStyle: { color: '#10b981' },
-          data: series.map((p) => p.output_tokens + p.reasoning_tokens),
-        },
-        {
-          name: 'Cache Read',
-          type: isBar ? 'bar' : 'line',
-          stack: 'tokens',
-          smooth: !isBar,
-          showSymbol: false,
-          areaStyle: isBar ? undefined : { opacity: 0.22 },
-          itemStyle: { color: '#38bdf8' },
-          data: series.map((p) => p.cache_read_tokens),
-        },
-        {
-          name: 'Cache Write',
-          type: isBar ? 'bar' : 'line',
-          stack: 'tokens',
-          smooth: !isBar,
-          showSymbol: false,
-          areaStyle: isBar ? undefined : { opacity: 0.22 },
-          itemStyle: { color: '#f59e0b' },
-          data: series.map((p) => p.cache_write_tokens),
-        },
-      ],
+      series: seriesConfig,
     };
-  }, [data, chartType]);
+  }, [data, activeProviderSeries, chartDimension, chartType, chartTheme]);
 
   return (
     <div className="space-y-7">
       {/* Top Flat Single-Row 4-Metric Strip (Separated by 1px Vertical Hairlines — No Bento Cards) */}
       <section
         className="grid grid-cols-4 pb-6"
-        style={{ borderBottom: '1px solid var(--border-subtle)' }}
+        style={{ borderBottom: '1px solid var(--border-hairline)' }}
       >
         <div className="pr-5">
           <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
@@ -155,29 +234,35 @@ export function OverviewPage() {
           </div>
           <div className="mt-1.5 flex items-baseline gap-2.5">
             <span className="text-[24px] font-semibold tracking-tight tabular-nums">
-              {isLoading ? '…' : formatTokens(data?.total_tokens ?? 0)}
+              {isLoading && !data ? (
+                '…'
+              ) : (
+                <AnimatedNumber value={data?.total_tokens ?? 0} formatter={formatTokens} />
+              )}
             </span>
-            <DeltaBadge pct={data?.tokens_delta_pct ?? null} />
+            {showDeltas && <DeltaBadge pct={data?.tokens_delta_pct ?? null} />}
           </div>
           <div className="mt-1 text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-            {(data?.total_requests ?? 0).toLocaleString('en-US')} 次请求 / 步
+            {formatExactInt(data?.total_requests ?? 0)} 次请求 / 步
           </div>
         </div>
 
         <div
           className="px-5"
-          style={{ borderLeft: '1px solid var(--border-subtle)' }}
+          style={{ borderLeft: '1px solid var(--border-hairline)' }}
         >
           <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
             API 等效成本 ({currency})
           </div>
           <div className="mt-1.5 flex items-baseline gap-2.5">
             <span className="text-[24px] font-semibold tracking-tight tabular-nums">
-              {isLoading
-                ? '…'
-                : formatCost(data?.total_cost_micro_usd ?? 0, currency, usdToCnyRate)}
+              {isLoading && !data ? (
+                '…'
+              ) : (
+                <AnimatedNumber value={data?.total_cost_micro_usd ?? 0} formatter={costFormatter} />
+              )}
             </span>
-            <DeltaBadge pct={data?.cost_delta_pct ?? null} />
+            {showDeltas && <DeltaBadge pct={data?.cost_delta_pct ?? null} />}
           </div>
           <div className="mt-1 text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
             按官方公开百万 Token 定价折算
@@ -186,16 +271,20 @@ export function OverviewPage() {
 
         <div
           className="px-5"
-          style={{ borderLeft: '1px solid var(--border-subtle)' }}
+          style={{ borderLeft: '1px solid var(--border-hairline)' }}
         >
           <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
             平均缓存命中率
           </div>
           <div className="mt-1.5 flex items-baseline gap-2.5">
             <span className="text-[24px] font-semibold tracking-tight tabular-nums">
-              {isLoading ? '…' : formatPercent(data?.cache_hit_ratio ?? 0, true)}
+              {isLoading && !data ? (
+                '…'
+              ) : (
+                <AnimatedNumber value={data?.cache_hit_ratio ?? 0} formatter={percentFormatter} />
+              )}
             </span>
-            <DeltaBadge pct={data?.cache_delta_pct ?? null} />
+            {showDeltas && <DeltaBadge pct={data?.cache_delta_pct ?? null} />}
           </div>
           <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
             Cache Read / (Uncached + Cache)
@@ -204,21 +293,23 @@ export function OverviewPage() {
 
         <div
           className="pl-5"
-          style={{ borderLeft: '1px solid var(--border-subtle)' }}
+          style={{ borderLeft: '1px solid var(--border-hairline)' }}
         >
           <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
-            当前 / 今日峰值速度
+            平均生成速度
           </div>
           <div className="mt-1.5 flex items-baseline gap-2.5">
             <span className="text-[24px] font-semibold tracking-tight tabular-nums">
-              {isLoading
-                ? '…'
-                : formatTps(data?.latest_output_tps ?? data?.avg_output_tps ?? null)}
+              {isLoading && !data ? (
+                '…'
+              ) : (
+                <AnimatedNumber value={data?.avg_output_tps ?? 0} formatter={formatTps} />
+              )}
             </span>
-            <DeltaBadge pct={data?.tps_delta_pct ?? null} />
+            {showDeltas && <DeltaBadge pct={data?.tps_delta_pct ?? null} />}
           </div>
           <div className="mt-1 text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-            峰值 {formatTps(data?.peak_output_tps ?? 0)}
+            当前 {formatTps(data?.latest_output_tps)} · 峰值 {formatTps(data?.peak_output_tps ?? 0)}
           </div>
         </div>
       </section>
@@ -226,41 +317,87 @@ export function OverviewPage() {
       {/* Mid Full-Width Borderless Consumption Trend Chart */}
       <section
         className="pb-6"
-        style={{ borderBottom: '1px solid var(--border-subtle)' }}
+        style={{ borderBottom: '1px solid var(--border-hairline)' }}
       >
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
           <div>
             <h2 className="text-[13.5px] font-semibold">Token 构成趋势</h2>
             <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-              {data?.series_granularity === 'hourly' ? '按小时聚合桶' : '按天聚合桶'} ·
-              展示 Input、Output、Cache Read 与 Cache Write 分布
+              顶部指标同步跟随该时间窗 ·{' '}
+              {data?.series_granularity === 'hourly' ? '按小时聚合桶' : '按天聚合桶'} ·{' '}
+              {chartDimension === 'provider'
+                ? '按 Provider 堆叠展示 Token 消耗分布'
+                : '展示 Input、Output、Cache Read 与 Cache Write 分布'}
             </p>
           </div>
-          <div
-            className="flex items-center p-0.5 rounded"
-            style={{
-              backgroundColor: 'var(--bg-sidebar)',
-              border: '1px solid var(--border-subtle)',
-            }}
-          >
-            {(['area', 'bar'] as const).map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                onClick={() => setChartType(kind)}
-                className="px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
-                style={{
-                  backgroundColor: chartType === kind ? 'var(--bg-hover)' : 'transparent',
-                  color: chartType === kind ? 'var(--text-primary)' : 'var(--text-secondary)',
-                }}
-              >
-                {kind === 'area' ? '面积图' : '柱状图'}
-              </button>
-            ))}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <TimeRangeControl />
+
+            {/* Dimension Toggle */}
+            <div
+              className="flex items-center p-0.5 rounded"
+              style={{
+                backgroundColor: 'var(--bg-sidebar)',
+                border: '1px solid var(--border-hairline)',
+              }}
+            >
+              {(
+                [
+                  { id: 'provider', label: '按 Provider' },
+                  { id: 'token_type', label: '按 Token 类型' },
+                ] as const
+              ).map((dim) => {
+                const active = chartDimension === dim.id;
+                return (
+                  <button
+                    key={dim.id}
+                    type="button"
+                    data-active={active}
+                    onClick={() => setChartDimension(dim.id)}
+                    className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
+                    style={{
+                      color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      fontWeight: active ? 500 : 400,
+                    }}
+                  >
+                    {dim.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Chart Type Toggle */}
+            <div
+              className="flex items-center p-0.5 rounded"
+              style={{
+                backgroundColor: 'var(--bg-sidebar)',
+                border: '1px solid var(--border-hairline)',
+              }}
+            >
+              {(['area', 'bar'] as const).map((kind) => {
+                const active = chartType === kind;
+                return (
+                  <button
+                    key={kind}
+                    type="button"
+                    data-active={active}
+                    onClick={() => setChartType(kind)}
+                    className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
+                    style={{
+                      color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      fontWeight: active ? 500 : 400,
+                    }}
+                  >
+                    {kind === 'area' ? '面积图' : '柱状图'}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
 
-        {(data?.series.length ?? 0) === 0 ? (
+        {!hasChartData ? (
           <div
             className="h-[240px] flex flex-col items-center justify-center text-[12.5px] gap-2"
             style={{ color: 'var(--text-muted)' }}
@@ -269,7 +406,7 @@ export function OverviewPage() {
             <button
               type="button"
               onClick={() => setActivePage('sources')}
-              className="text-[12px] underline cursor-pointer"
+              className="btn-interactive px-2.5 py-1 rounded text-[12px] underline cursor-pointer"
               style={{ color: 'var(--accent-primary)' }}
             >
               前往数据源与合规检查路径或触发扫描
@@ -285,7 +422,7 @@ export function OverviewPage() {
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-[13.5px] font-semibold">Provider 运行与消耗汇总</h2>
           <span className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-            含今日、本月折算费用、缓存占比及主订阅窗口配额
+            含今日、本月折算费用、缓存占比及主订阅 / 官方限额快照
           </span>
         </div>
 
@@ -296,14 +433,14 @@ export function OverviewPage() {
                 className="text-[11px] font-medium uppercase tracking-wider"
                 style={{
                   color: 'var(--text-muted)',
-                  borderBottom: '1px solid var(--border-subtle)',
+                  borderBottom: '1px solid var(--border-hairline)',
                 }}
               >
                 <th className="py-2 pr-4">Provider</th>
                 <th className="py-2 px-3 text-right">今日用量 / 费用</th>
                 <th className="py-2 px-3 text-right">本月用量 / 费用</th>
                 <th className="py-2 px-3 text-right">缓存命中率</th>
-                <th className="py-2 px-3 w-[220px]">主订阅窗口配额</th>
+                <th className="py-2 px-3 w-[220px]">主订阅窗口 / 限额</th>
                 <th className="py-2 pl-3 text-right">最近活跃</th>
               </tr>
             </thead>
@@ -311,13 +448,13 @@ export function OverviewPage() {
               {(data?.providers ?? []).map((row) => (
                 <tr
                   key={row.provider_id}
-                  className="hover:bg-white/[0.02] transition-colors"
-                  style={{ borderBottom: '1px solid var(--border-subtle)' }}
+                  className="row-interactive"
+                  style={{ borderBottom: '1px solid var(--border-hairline)' }}
                 >
                   <td className="py-3 pr-4">
                     <div className="flex items-center gap-2">
                       <span
-                        className="inline-block w-2 h-2 rounded-full"
+                        className="inline-block w-2 h-2 rounded-full shrink-0"
                         style={{ backgroundColor: providerAccentColor(row.provider_id) }}
                       />
                       <span className="font-medium">{providerDisplayName(row.provider_id)}</span>
@@ -374,14 +511,20 @@ export function OverviewPage() {
                       </div>
                     ) : (
                       <span className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                        未启用订阅规则
+                        未配置订阅规则
                       </span>
                     )}
                   </td>
-                  <td className="py-3 pl-3 text-right text-[12px] tabular-nums" style={{ color: 'var(--text-secondary)' }}>
+                  <td
+                    className="py-3 pl-3 text-right text-[12px] tabular-nums"
+                    style={{ color: 'var(--text-secondary)' }}
+                  >
                     <div>{formatRelativeTime(row.last_sync_at_ms)}</div>
                     {row.last_error && (
-                      <div className="text-[10.5px] truncate max-w-[160px]" style={{ color: 'var(--accent-rose)' }}>
+                      <div
+                        className="text-[10.5px] truncate max-w-[160px]"
+                        style={{ color: 'var(--accent-rose)' }}
+                      >
                         {row.last_error}
                       </div>
                     )}

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   Minus,
@@ -10,12 +10,14 @@ import {
   Monitor,
 } from 'lucide-react';
 import { isTauriRuntime } from '../lib/ipc';
-import { useWorkspaceStore, type NavPage, type TimePreset } from '../stores/workspaceStore';
+import { useWorkspaceStore, type NavPage } from '../stores/workspaceStore';
 import type { CurrencyCode, ThemeMode } from '../types/ipc';
 
-interface TitleBarProps {
+export interface TitleBarProps {
   collectorWatching: boolean;
   isScanning: boolean;
+  livePulseSeq?: number;
+  hasBackdrop?: boolean;
   onScanNow: () => void;
   onPersistCurrency?: (currency: CurrencyCode) => void;
   onPersistTheme?: (theme: ThemeMode) => void;
@@ -32,14 +34,6 @@ const PAGE_TITLES: Record<NavPage, string> = {
   preferences: '偏好设置',
 };
 
-const TIME_PRESETS: Array<{ id: TimePreset; label: string }> = [
-  { id: 'today', label: '今天' },
-  { id: '7d', label: '7 天' },
-  { id: '30d', label: '30 天' },
-  { id: 'month', label: '本月' },
-  { id: 'custom', label: '自定义' },
-];
-
 const PROVIDER_FILTERS = [
   { id: 'all', label: '全部源' },
   { id: 'claude_code', label: 'Claude Code' },
@@ -47,29 +41,45 @@ const PROVIDER_FILTERS = [
   { id: 'antigravity', label: 'Antigravity' },
 ];
 
+const THEME_LABELS: Record<ThemeMode, string> = {
+  dark: '深色',
+  light: '浅色',
+  system: '跟随系统',
+};
+
 export function TitleBar({
   collectorWatching,
   isScanning,
+  livePulseSeq = 0,
+  hasBackdrop = false,
   onScanNow,
   onPersistCurrency,
   onPersistTheme,
 }: TitleBarProps) {
   const {
     activePage,
-    timePreset,
-    customStartDate,
-    customEndDate,
     providerFilter,
     currency,
     theme,
-    setTimePreset,
-    setCustomDateRange,
     setProviderFilter,
     setCurrency,
     setTheme,
   } = useWorkspaceStore();
 
-  const [showCustomPopover, setShowCustomPopover] = useState(false);
+  const [livePulseActive, setLivePulseActive] = useState(false);
+
+  useEffect(() => {
+    if (livePulseSeq <= 0) {
+      return;
+    }
+    setLivePulseActive(true);
+    const timer = window.setTimeout(() => {
+      setLivePulseActive(false);
+    }, 2400);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [livePulseSeq]);
 
   const handleMinimize = async () => {
     if (isTauriRuntime()) {
@@ -93,22 +103,46 @@ export function TitleBar({
     const order: ThemeMode[] = ['dark', 'light', 'system'];
     const idx = order.indexOf(theme);
     const next = order[(idx + 1) % order.length];
-    setTheme(next);
-    onPersistTheme?.(next);
+    if (onPersistTheme) {
+      onPersistTheme(next);
+    } else {
+      setTheme(next);
+    }
   };
 
   const handleCurrencyToggle = (next: CurrencyCode) => {
-    setCurrency(next);
-    onPersistCurrency?.(next);
+    if (onPersistCurrency) {
+      onPersistCurrency(next);
+    } else {
+      setCurrency(next);
+    }
   };
+
+  const borderToken = hasBackdrop ? 'var(--border-hairline)' : 'var(--border-subtle)';
+  const controlBgToken = hasBackdrop ? 'var(--bg-input)' : 'var(--bg-canvas)';
+
+  const dotClass = livePulseActive
+    ? 'live-pulse-dot'
+    : collectorWatching
+      ? 'collector-dot-live'
+      : '';
+  const dotColor =
+    livePulseActive || collectorWatching ? 'var(--accent-emerald)' : 'var(--accent-amber)';
+  const dotTitle = livePulseActive
+    ? '刚接收实时用量更新'
+    : collectorWatching
+      ? '正在实时只读监听本地日志'
+      : '增量扫描就绪';
 
   return (
     <header
-      className="relative flex items-center justify-between px-3 shrink-0 select-none"
+      className="relative z-20 flex items-center justify-between px-3 shrink-0 select-none"
       style={{
         height: '38px',
-        backgroundColor: 'var(--bg-sidebar)',
-        borderBottom: '1px solid var(--border-subtle)',
+        backgroundColor: hasBackdrop ? 'var(--bg-translucent-chrome)' : 'var(--bg-sidebar)',
+        backdropFilter: hasBackdrop ? 'blur(14px)' : undefined,
+        WebkitBackdropFilter: hasBackdrop ? 'blur(14px)' : undefined,
+        borderBottom: `1px solid ${borderToken}`,
       }}
     >
       {/* Left: Brand & Active Section Title (Draggable) */}
@@ -120,13 +154,16 @@ export function TitleBar({
           className="inline-flex items-center justify-center w-5 h-5 rounded text-[11px] font-semibold tracking-tight"
           style={{
             backgroundColor: 'var(--bg-elevated)',
-            border: '1px solid var(--border-strong)',
+            border: `1px solid ${hasBackdrop ? 'var(--border-hairline)' : 'var(--border-strong)'}`,
             color: 'var(--text-primary)',
           }}
         >
           TT
         </span>
-        <span className="text-[12.5px] font-semibold tracking-tight" style={{ color: 'var(--text-primary)' }}>
+        <span
+          className="text-[12.5px] font-semibold tracking-tight"
+          style={{ color: 'var(--text-primary)' }}
+        >
           TokenTracker
         </span>
         <span style={{ color: 'var(--text-muted)' }}>/</span>
@@ -140,87 +177,6 @@ export function TitleBar({
 
       {/* Center/Right Controls */}
       <div className="flex items-center gap-2">
-        {/* Global Time Range Segmented Control */}
-        <div
-          className="relative flex items-center p-0.5 rounded"
-          style={{
-            backgroundColor: 'var(--bg-canvas)',
-            border: '1px solid var(--border-subtle)',
-          }}
-        >
-          {TIME_PRESETS.map((preset) => {
-            const active = timePreset === preset.id;
-            return (
-              <button
-                key={preset.id}
-                type="button"
-                onClick={() => {
-                  if (preset.id === 'custom') {
-                    setShowCustomPopover((v) => !v);
-                    setTimePreset('custom');
-                  } else {
-                    setShowCustomPopover(false);
-                    setTimePreset(preset.id);
-                  }
-                }}
-                className="px-2 py-0.5 text-[11.5px] rounded-sm transition-colors cursor-pointer"
-                style={{
-                  backgroundColor: active ? 'var(--bg-hover)' : 'transparent',
-                  color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                  fontWeight: active ? 500 : 400,
-                }}
-              >
-                {preset.label}
-              </button>
-            );
-          })}
-
-          {showCustomPopover && (
-            <div
-              className="absolute right-0 top-8 z-50 flex items-center gap-2 p-2.5 rounded shadow-lg"
-              style={{
-                backgroundColor: 'var(--bg-elevated)',
-                border: '1px solid var(--border-strong)',
-              }}
-            >
-              <input
-                type="date"
-                value={customStartDate}
-                onChange={(e) => setCustomDateRange(e.target.value, customEndDate)}
-                className="px-2 py-1 text-[11.5px] rounded tabular-nums"
-                style={{
-                  backgroundColor: 'var(--bg-input)',
-                  border: '1px solid var(--border-subtle)',
-                  color: 'var(--text-primary)',
-                }}
-              />
-              <span style={{ color: 'var(--text-muted)' }}>至</span>
-              <input
-                type="date"
-                value={customEndDate}
-                onChange={(e) => setCustomDateRange(customStartDate, e.target.value)}
-                className="px-2 py-1 text-[11.5px] rounded tabular-nums"
-                style={{
-                  backgroundColor: 'var(--bg-input)',
-                  border: '1px solid var(--border-subtle)',
-                  color: 'var(--text-primary)',
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => setShowCustomPopover(false)}
-                className="px-2 py-1 text-[11.5px] rounded cursor-pointer"
-                style={{
-                  backgroundColor: 'var(--accent-primary)',
-                  color: '#ffffff',
-                }}
-              >
-                确定
-              </button>
-            </div>
-          )}
-        </div>
-
         {/* Provider Quick Filter */}
         <select
           aria-label="Provider 筛选"
@@ -228,8 +184,8 @@ export function TitleBar({
           onChange={(e) => setProviderFilter(e.target.value)}
           className="px-2 py-1 text-[11.5px] rounded outline-none cursor-pointer"
           style={{
-            backgroundColor: 'var(--bg-canvas)',
-            border: '1px solid var(--border-subtle)',
+            backgroundColor: controlBgToken,
+            border: `1px solid ${borderToken}`,
             color: 'var(--text-primary)',
           }}
         >
@@ -244,8 +200,8 @@ export function TitleBar({
         <div
           className="flex items-center p-0.5 rounded"
           style={{
-            backgroundColor: 'var(--bg-canvas)',
-            border: '1px solid var(--border-subtle)',
+            backgroundColor: controlBgToken,
+            border: `1px solid ${borderToken}`,
           }}
         >
           {(['USD', 'CNY'] as const).map((code) => {
@@ -254,10 +210,10 @@ export function TitleBar({
               <button
                 key={code}
                 type="button"
+                data-active={active ? 'true' : undefined}
                 onClick={() => handleCurrencyToggle(code)}
-                className="px-2 py-0.5 text-[11px] font-medium rounded-sm tabular-nums cursor-pointer"
+                className="seg-pill px-2 py-0.5 text-[11px] font-medium rounded-sm tabular-nums cursor-pointer"
                 style={{
-                  backgroundColor: active ? 'var(--bg-hover)' : 'transparent',
                   color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
                 }}
               >
@@ -267,31 +223,30 @@ export function TitleBar({
           })}
         </div>
 
-        {/* Collector Live Status Dot + Manual Refresh */}
+        {/* Collector Live Status Dot + Manual Refresh + Theme Cycle */}
         <div className="flex items-center gap-1.5 pl-1 pr-1.5">
           <span
-            title={collectorWatching ? '正在实时只读监听本地日志' : '增量扫描就绪'}
-            className={`inline-block w-2 h-2 rounded-full ${collectorWatching ? 'collector-dot-live' : ''}`}
-            style={{
-              backgroundColor: collectorWatching
-                ? 'var(--accent-emerald)'
-                : 'var(--accent-amber)',
-            }}
+            data-testid="titlebar-live-dot"
+            title={dotTitle}
+            className={`inline-block w-2 h-2 rounded-full ${dotClass}`}
+            style={{ backgroundColor: dotColor }}
           />
           <button
             type="button"
+            aria-label="立即增量扫描"
             title="立即增量扫描"
             onClick={onScanNow}
-            className="p-1 rounded hover:opacity-80 cursor-pointer"
+            className="btn-interactive p-1 rounded cursor-pointer"
             style={{ color: 'var(--text-secondary)' }}
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin' : ''}`} />
           </button>
           <button
             type="button"
-            title={`切换主题（当前: ${theme}）`}
+            aria-label="切换主题"
+            title={`切换主题（当前: ${THEME_LABELS[theme]}）`}
             onClick={cycleTheme}
-            className="p-1 rounded hover:opacity-80 cursor-pointer"
+            className="btn-interactive p-1 rounded cursor-pointer"
             style={{ color: 'var(--text-secondary)' }}
           >
             {theme === 'light' ? (
@@ -307,7 +262,7 @@ export function TitleBar({
         {/* Hairline Divider & Window Controls */}
         <div
           className="h-4 w-px mx-0.5"
-          style={{ backgroundColor: 'var(--border-subtle)' }}
+          style={{ backgroundColor: borderToken }}
         />
 
         <div className="flex items-center">
@@ -315,7 +270,7 @@ export function TitleBar({
             type="button"
             aria-label="最小化"
             onClick={handleMinimize}
-            className="inline-flex items-center justify-center w-7 h-7 rounded hover:bg-white/5 cursor-pointer"
+            className="btn-interactive inline-flex items-center justify-center w-7 h-7 rounded cursor-pointer"
             style={{ color: 'var(--text-secondary)' }}
           >
             <Minus className="w-3.5 h-3.5" />
@@ -324,7 +279,7 @@ export function TitleBar({
             type="button"
             aria-label="最大化或还原"
             onClick={handleToggleMaximize}
-            className="inline-flex items-center justify-center w-7 h-7 rounded hover:bg-white/5 cursor-pointer"
+            className="btn-interactive inline-flex items-center justify-center w-7 h-7 rounded cursor-pointer"
             style={{ color: 'var(--text-secondary)' }}
           >
             <Square className="w-3 h-3" />
@@ -333,8 +288,7 @@ export function TitleBar({
             type="button"
             aria-label="关闭窗口"
             onClick={handleClose}
-            className="inline-flex items-center justify-center w-7 h-7 rounded hover:bg-rose-500/80 hover:text-white cursor-pointer"
-            style={{ color: 'var(--text-secondary)' }}
+            className="inline-flex items-center justify-center w-7 h-7 rounded text-[var(--text-secondary)] hover:bg-rose-500/85 hover:text-white transition-colors cursor-pointer"
           >
             <X className="w-3.5 h-3.5" />
           </button>

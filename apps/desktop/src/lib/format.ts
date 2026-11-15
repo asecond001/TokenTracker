@@ -123,3 +123,11 @@ export function providerAccentColor(providerId: string): string {
       return '#38bdf8';
   }
 }
+
+export const TOKEN_TYPE_COLORS: Record<string, string> = {
+  input: '#0ea5e9',
+  output: '#22c55e',
+  cache_read: '#14b8a6',
+  cache_write: '#f97316',
+  reasoning: '#a855f7',
+};

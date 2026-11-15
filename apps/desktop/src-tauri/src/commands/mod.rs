@@ -1,6 +1,9 @@
+use std::ffi::OsStr;
+use std::path::PathBuf;
+
 use chrono::Utc;
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 use tokentracker_collectors::providers::official_api::{
     reconcile_official_usage_api, OfficialApiReconcileResult,
@@ -11,14 +14,109 @@ use tokentracker_core::analytics::{
     MonthlyReport, OverviewReport, SpeedLatencyReport, TraySummary, TrendsQuery, TrendsReport,
 };
 use tokentracker_core::domain::{
-    AppPreferences, DeviceRecord, IngestionCursor, ModelPricingEntry, ProviderConfig,
-    SubscriptionPlan, SyncEnvelopeV1,
+    AppPreferences, CatalogSyncResult, DeviceRecord, IngestionCursor, ModelPricingEntry,
+    ObservedRateLimitWindow, ProviderConfig, SubscriptionPlan, SubscriptionPlanTemplate,
+    SyncEnvelopeV1,
 };
-use tokentracker_core::subscription::SubscriptionPlanStatus;
+use tokentracker_core::subscription::{subscription_plan_templates, SubscriptionPlanStatus};
 use tokentracker_core::CoreError;
 
 use crate::state::AppState;
-use crate::tray::show_main_window;
+use crate::tray::{show_main_window, TRAY_POPUP_LABEL};
+
+const MAX_BG_IMAGE_BYTES: u64 = 15_728_640; // 15 MiB
+
+pub fn parse_tauri_theme(theme: &str) -> Option<tauri::Theme> {
+    match theme.trim().to_ascii_lowercase().as_str() {
+        "dark" => Some(tauri::Theme::Dark),
+        "light" => Some(tauri::Theme::Light),
+        _ => None,
+    }
+}
+
+pub fn apply_theme_to_app(app: &AppHandle, theme: &str) {
+    let target = parse_tauri_theme(theme);
+    app.set_theme(target);
+    for label in ["main", TRAY_POPUP_LABEL] {
+        if let Some(win) = app.get_webview_window(label) {
+            let _ = win.set_theme(target);
+        }
+    }
+}
+
+fn managed_backgrounds_dir(state: &AppState) -> PathBuf {
+    state
+        .db_path
+        .parent()
+        .map(|p| p.join("backgrounds"))
+        .unwrap_or_else(|| PathBuf::from("backgrounds"))
+}
+
+fn is_valid_managed_filename(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.contains(':')
+}
+
+fn detect_image_format(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some(("png", "image/png"))
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(("jpg", "image/jpeg"))
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some(("webp", "image/webp"))
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(("gif", "image/gif"))
+    } else if bytes.starts_with(b"BM") {
+        Some(("bmp", "image/bmp"))
+    } else {
+        None
+    }
+}
+
+fn encode_base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((triple >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(triple & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn cleanup_backgrounds_dir(dir: &PathBuf, keep_filename: Option<&str>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if let Some(keep) = keep_filename {
+            if entry.file_name() == OsStr::new(keep) {
+                continue;
+            }
+        }
+        let _ = std::fs::remove_file(path);
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct IpcError {
@@ -176,6 +274,18 @@ pub fn recompute_all_costs(state: State<'_, AppState>) -> Result<usize, IpcError
 }
 
 #[tauri::command]
+pub async fn sync_pricing_and_rate(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    force: bool,
+) -> Result<CatalogSyncResult, IpcError> {
+    state
+        .run_catalog_sync(&app, force)
+        .await
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
 pub fn get_subscriptions(
     state: State<'_, AppState>,
 ) -> Result<Vec<SubscriptionPlanStatus>, IpcError> {
@@ -194,6 +304,32 @@ pub fn upsert_subscription_plan(
     state
         .storage
         .upsert_subscription_plan(&plan)
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub fn delete_subscription_plan(
+    state: State<'_, AppState>,
+    plan_id: String,
+) -> Result<(), IpcError> {
+    state
+        .storage
+        .delete_subscription_plan(&plan_id)
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub fn get_subscription_templates() -> Result<Vec<SubscriptionPlanTemplate>, IpcError> {
+    Ok(subscription_plan_templates())
+}
+
+#[tauri::command]
+pub fn get_observed_rate_limits(
+    state: State<'_, AppState>,
+) -> Result<Vec<ObservedRateLimitWindow>, IpcError> {
+    state
+        .storage
+        .list_observed_rate_limits()
         .map_err(IpcError::from)
 }
 
@@ -319,7 +455,156 @@ pub async fn update_preferences(
         tracing::warn!("Autostart update warning: {err}");
     }
 
-    state.storage.get_preferences().map_err(IpcError::from)
+    let updated = state.storage.get_preferences()?;
+    apply_theme_to_app(&app, &updated.theme);
+    let _ = app.emit("preferences-updated", &updated);
+    Ok(updated)
+}
+
+#[tauri::command]
+pub fn import_background_image(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    source_path: String,
+) -> Result<String, IpcError> {
+    let trimmed = source_path.trim();
+    if trimmed.is_empty() {
+        return Err(IpcError::new(
+            "INVALID_PATH",
+            "Source image path cannot be empty.",
+        ));
+    }
+
+    let src = PathBuf::from(trimmed);
+    let meta = std::fs::metadata(&src).map_err(|e| {
+        IpcError::new(
+            "BG_IO_ERROR",
+            format!("Failed to inspect selected image: {e}"),
+        )
+    })?;
+    if !meta.is_file() {
+        return Err(IpcError::new(
+            "INVALID_PATH",
+            "Selected background path is not a file.",
+        ));
+    }
+    if meta.len() == 0 || meta.len() > MAX_BG_IMAGE_BYTES {
+        return Err(IpcError::new(
+            "INVALID_IMAGE_SIZE",
+            "Background image size must be between 1 byte and 15 MiB.",
+        ));
+    }
+
+    let bytes = std::fs::read(&src).map_err(|e| {
+        IpcError::new("BG_IO_ERROR", format!("Failed to read background image: {e}"))
+    })?;
+    if bytes.is_empty() || (bytes.len() as u64) > MAX_BG_IMAGE_BYTES {
+        return Err(IpcError::new(
+            "INVALID_IMAGE_SIZE",
+            "Background image size must be between 1 byte and 15 MiB.",
+        ));
+    }
+
+    let (ext, _mime) = detect_image_format(&bytes).ok_or_else(|| {
+        IpcError::new(
+            "UNSUPPORTED_IMAGE_FORMAT",
+            "Supported background image formats: PNG, JPEG, WEBP, GIF, BMP.",
+        )
+    })?;
+
+    let bg_dir = managed_backgrounds_dir(&state);
+    std::fs::create_dir_all(&bg_dir).map_err(|e| {
+        IpcError::new(
+            "BG_IO_ERROR",
+            format!("Failed to create backgrounds directory: {e}"),
+        )
+    })?;
+
+    let filename = format!("wallpaper_{}.{}", Utc::now().timestamp_millis(), ext);
+    let dest_path = bg_dir.join(&filename);
+    std::fs::write(&dest_path, &bytes).map_err(|e| {
+        IpcError::new(
+            "BG_IO_ERROR",
+            format!("Failed to save background image copy: {e}"),
+        )
+    })?;
+
+    cleanup_backgrounds_dir(&bg_dir, Some(&filename));
+
+    let mut prefs = state.storage.get_preferences()?;
+    prefs.bg_mode = "image".to_string();
+    prefs.bg_image_path = Some(filename.clone());
+    state.storage.update_preferences(&prefs)?;
+
+    let updated = state.storage.get_preferences()?;
+    let _ = app.emit("preferences-updated", &updated);
+    Ok(filename)
+}
+
+#[tauri::command]
+pub fn clear_background_image(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), IpcError> {
+    let bg_dir = managed_backgrounds_dir(&state);
+    cleanup_backgrounds_dir(&bg_dir, None);
+
+    let mut prefs = state.storage.get_preferences()?;
+    prefs.bg_image_path = None;
+    if prefs.bg_mode == "image" {
+        prefs.bg_mode = "none".to_string();
+    }
+    state.storage.update_preferences(&prefs)?;
+
+    let updated = state.storage.get_preferences()?;
+    let _ = app.emit("preferences-updated", &updated);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_background_image_data_url(
+    state: State<'_, AppState>,
+) -> Result<Option<String>, IpcError> {
+    let prefs = state.storage.get_preferences()?;
+    let Some(filename) = prefs
+        .bg_image_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    if !is_valid_managed_filename(filename) {
+        return Err(IpcError::new(
+            "INVALID_PATH",
+            "Invalid managed background image filename.",
+        ));
+    }
+
+    let full_path = managed_backgrounds_dir(&state).join(filename);
+    let bytes = match std::fs::read(&full_path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(IpcError::new(
+                "BG_IO_ERROR",
+                format!("Failed to read background image: {e}"),
+            ))
+        }
+    };
+
+    if bytes.is_empty() || (bytes.len() as u64) > MAX_BG_IMAGE_BYTES {
+        return Ok(None);
+    }
+    let Some((_, mime)) = detect_image_format(&bytes) else {
+        return Ok(None);
+    };
+
+    Ok(Some(format!(
+        "data:{mime};base64,{}",
+        encode_base64(&bytes)
+    )))
 }
 
 #[tauri::command]
@@ -370,4 +655,60 @@ pub fn open_main_workspace(app: AppHandle) {
 pub fn quit_application(app: AppHandle, state: State<'_, AppState>) {
     state.shutdown_background_services();
     app.exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_parsing_handles_dark_light_and_system() {
+        assert_eq!(parse_tauri_theme("dark"), Some(tauri::Theme::Dark));
+        assert_eq!(parse_tauri_theme(" LIGHT "), Some(tauri::Theme::Light));
+        assert_eq!(parse_tauri_theme("system"), None);
+        assert_eq!(parse_tauri_theme("auto"), None);
+    }
+
+    #[test]
+    fn managed_filename_validation_blocks_path_traversal() {
+        assert!(is_valid_managed_filename("wallpaper_1760000000000.png"));
+        assert!(!is_valid_managed_filename(""));
+        assert!(!is_valid_managed_filename("../wallpaper.png"));
+        assert!(!is_valid_managed_filename("sub/wallpaper.png"));
+        assert!(!is_valid_managed_filename("sub\\wallpaper.png"));
+        assert!(!is_valid_managed_filename("C:wallpaper.png"));
+    }
+
+    #[test]
+    fn image_magic_bytes_detect_supported_formats_and_reject_invalid() {
+        assert_eq!(
+            detect_image_format(b"\x89PNG\r\n\x1a\nxxxx"),
+            Some(("png", "image/png"))
+        );
+        assert_eq!(
+            detect_image_format(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some(("jpg", "image/jpeg"))
+        );
+        assert_eq!(
+            detect_image_format(b"RIFF\x00\x00\x00\x00WEBP"),
+            Some(("webp", "image/webp"))
+        );
+        assert_eq!(
+            detect_image_format(b"GIF89axxx"),
+            Some(("gif", "image/gif"))
+        );
+        assert_eq!(detect_image_format(b"BM\x00\x00"), Some(("bmp", "image/bmp")));
+        assert_eq!(detect_image_format(b"<svg></svg>"), None);
+    }
+
+    #[test]
+    fn base64_encoder_matches_rfc4648_test_vectors() {
+        assert_eq!(encode_base64(b""), "");
+        assert_eq!(encode_base64(b"f"), "Zg==");
+        assert_eq!(encode_base64(b"fo"), "Zm8=");
+        assert_eq!(encode_base64(b"foo"), "Zm9v");
+        assert_eq!(encode_base64(b"foob"), "Zm9vYg==");
+        assert_eq!(encode_base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(encode_base64(b"foobar"), "Zm9vYmFy");
+    }
 }

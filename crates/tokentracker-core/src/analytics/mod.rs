@@ -4,7 +4,7 @@ use chrono::{Datelike, FixedOffset, NaiveDate, TimeZone, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{provider_ids, CurrencyCode, ModelPricingEntry};
+use crate::domain::{provider_ids, CurrencyCode, ModelPricingEntry, ObservedRateLimitWindow};
 use crate::error::{CoreError, CoreResult};
 use crate::pricing::resolve_pricing;
 use crate::storage::repository::{
@@ -20,11 +20,14 @@ pub struct AnalyticsFilter {
     pub end_ms: i64,
     pub provider_id: Option<String>,
     pub tz_offset_minutes: i32,
+    #[serde(default)]
+    pub all_time: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrendGranularity {
+    Auto,
     FifteenMinutes,
     Hourly,
     Daily,
@@ -100,6 +103,7 @@ pub struct OverviewReport {
     pub tps_delta_pct: Option<f64>,
     pub series_granularity: String,
     pub series: Vec<TimeBucketPoint>,
+    pub provider_series: Vec<TrendSeries>,
     pub providers: Vec<ProviderSummaryRow>,
 }
 
@@ -134,6 +138,7 @@ pub struct TrendComparisonRow {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrendsReport {
+    pub effective_granularity: TrendGranularity,
     pub buckets: Vec<i64>,
     pub series: Vec<TrendSeries>,
     pub comparisons: Vec<TrendComparisonRow>,
@@ -221,29 +226,22 @@ pub struct ModelSpeedStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ContextSpeedSample {
-    pub model_id: String,
+pub struct ProviderSpeedStats {
     pub provider_id: String,
-    pub context_tokens: i64,
-    pub output_tps: f64,
-    pub duration_ms: i64,
-    pub timestamp_ms: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ContextDecayBin {
-    pub bin_label: String,
     pub sample_count: i64,
-    pub avg_tps: f64,
+    pub mean_tps: f64,
     pub p50_tps: f64,
+    pub p95_tps: f64,
+    pub max_tps: f64,
+    pub min_tps: f64,
     pub avg_duration_ms: f64,
+    pub avg_ttft_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpeedLatencyReport {
+    pub providers: Vec<ProviderSpeedStats>,
     pub models: Vec<ModelSpeedStats>,
-    pub scatter_points: Vec<ContextSpeedSample>,
-    pub context_bins: Vec<ContextDecayBin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -425,6 +423,115 @@ fn query_period_totals(
     }
 }
 
+fn resolve_effective_window(
+    conn: &Connection,
+    filter: &AnalyticsFilter,
+    provider: Option<&str>,
+    fallback_now_ms: i64,
+) -> CoreResult<(i64, i64)> {
+    if !filter.all_time {
+        let start = filter.start_ms.min(filter.end_ms);
+        return Ok((start, filter.end_ms));
+    }
+    let end_ms = if filter.end_ms > 0 {
+        filter.end_ms
+    } else {
+        fallback_now_ms
+    };
+    let min_ts: Option<i64> = if let Some(prov) = provider {
+        conn.query_row(
+            "SELECT MIN(timestamp_ms) FROM usage_events WHERE provider_id = ?1",
+            params![prov],
+            |r| r.get(0),
+        )?
+    } else {
+        conn.query_row("SELECT MIN(timestamp_ms) FROM usage_events", [], |r| r.get(0))?
+    };
+    let start_ms = min_ts
+        .unwrap_or_else(|| end_ms.saturating_sub(7 * DAY_MS))
+        .min(end_ms);
+    Ok((start_ms, end_ms))
+}
+
+fn resolve_trend_granularity(requested: TrendGranularity, span_ms: i64) -> TrendGranularity {
+    match requested {
+        TrendGranularity::Auto => {
+            if span_ms <= 2 * DAY_MS {
+                TrendGranularity::Hourly
+            } else if span_ms <= 90 * DAY_MS {
+                TrendGranularity::Daily
+            } else {
+                TrendGranularity::Weekly
+            }
+        }
+        other => other,
+    }
+}
+
+fn granularity_bucket_ms(granularity: TrendGranularity) -> i64 {
+    match granularity {
+        TrendGranularity::FifteenMinutes => 900_000,
+        TrendGranularity::Auto | TrendGranularity::Hourly => HOUR_MS,
+        TrendGranularity::Daily => DAY_MS,
+        TrendGranularity::Weekly => 7 * DAY_MS,
+    }
+}
+
+fn is_observed_window_fresh(obs: &ObservedRateLimitWindow, is_secondary: bool, now_ms: i64) -> bool {
+    match obs.resets_at_ms {
+        Some(reset_ms) => reset_ms > now_ms,
+        None => {
+            let fallback_ms = obs
+                .window_minutes
+                .map(|m| m.max(1) * 60_000)
+                .unwrap_or_else(|| if is_secondary { 7 * DAY_MS } else { 5 * HOUR_MS });
+            now_ms.saturating_sub(obs.observed_at_ms) < fallback_ms
+        }
+    }
+}
+
+fn fallback_observed_window_status(
+    observed: &[ObservedRateLimitWindow],
+    provider_id: &str,
+    now_ms: i64,
+) -> (Option<String>, Option<f64>) {
+    let mut best_primary: Option<(i64, f64)> = None;
+    let mut best_secondary: Option<(i64, f64)> = None;
+
+    for obs in observed {
+        if !obs.provider_id.eq_ignore_ascii_case(provider_id) {
+            continue;
+        }
+        let name = obs.window_name.to_ascii_lowercase();
+        let is_secondary = obs.window_minutes.is_some_and(|m| m >= 1_440)
+            || name.contains("secondary")
+            || name.contains("7d");
+        if !is_observed_window_fresh(obs, is_secondary, now_ms) {
+            continue;
+        }
+        let pct = if obs.used_percent.is_finite() {
+            obs.used_percent.clamp(0.0, 100.0)
+        } else {
+            continue;
+        };
+        if is_secondary {
+            if best_secondary.is_none_or(|(ts, _)| obs.observed_at_ms >= ts) {
+                best_secondary = Some((obs.observed_at_ms, pct));
+            }
+        } else if best_primary.is_none_or(|(ts, _)| obs.observed_at_ms >= ts) {
+            best_primary = Some((obs.observed_at_ms, pct));
+        }
+    }
+
+    if let Some((_, pct)) = best_primary {
+        (Some("5h 官方限额".to_string()), Some(pct))
+    } else if let Some((_, pct)) = best_secondary {
+        (Some("7d 官方限额".to_string()), Some(pct))
+    } else {
+        (None, None)
+    }
+}
+
 fn query_latest_tps(
     conn: &Connection,
     start_ms: i64,
@@ -437,7 +544,11 @@ fn query_latest_tps(
             SELECT output_tps FROM usage_events
             WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
               AND provider_id = ?3
-              AND output_tps IS NOT NULL AND output_tps > 0
+              AND output_tps IS NOT NULL
+              AND output_tps > 0.0
+              AND output_tps <= 800.0
+              AND (duration_ms IS NULL OR duration_ms >= 300)
+              AND (output_tokens + reasoning_tokens) >= 8
             ORDER BY timestamp_ms DESC LIMIT 1
             "#,
             params![start_ms, end_ms, prov],
@@ -448,7 +559,11 @@ fn query_latest_tps(
             r#"
             SELECT output_tps FROM usage_events
             WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
-              AND output_tps IS NOT NULL AND output_tps > 0
+              AND output_tps IS NOT NULL
+              AND output_tps > 0.0
+              AND output_tps <= 800.0
+              AND (duration_ms IS NULL OR duration_ms >= 300)
+              AND (output_tokens + reasoning_tokens) >= 8
             ORDER BY timestamp_ms DESC LIMIT 1
             "#,
             params![start_ms, end_ms],
@@ -467,14 +582,27 @@ impl Storage {
     pub fn query_overview(&self, filter: &AnalyticsFilter, now_ms: i64) -> CoreResult<OverviewReport> {
         self.with_conn(|conn| {
             let provider = normalized_provider_filter(&filter.provider_id);
-            let current = query_period_totals(conn, filter.start_ms, filter.end_ms, provider)?;
+            let (eff_start_ms, eff_end_ms) =
+                resolve_effective_window(conn, filter, provider, now_ms)?;
+            let current = query_period_totals(conn, eff_start_ms, eff_end_ms, provider)?;
 
-            let span = (filter.end_ms - filter.start_ms).max(HOUR_MS);
-            let prev_start = filter.start_ms.saturating_sub(span);
-            let prev_end = filter.start_ms.saturating_sub(1);
-            let previous = query_period_totals(conn, prev_start, prev_end, provider)?;
+            let span = (eff_end_ms - eff_start_ms).max(HOUR_MS);
+            let (tokens_delta_pct, cost_delta_pct, cache_delta_pct, tps_delta_pct) =
+                if filter.all_time {
+                    (None, None, None, None)
+                } else {
+                    let prev_start = eff_start_ms.saturating_sub(span);
+                    let prev_end = eff_start_ms.saturating_sub(1);
+                    let previous = query_period_totals(conn, prev_start, prev_end, provider)?;
+                    (
+                        pct_change(current.total_tokens() as f64, previous.total_tokens() as f64),
+                        pct_change(current.cost_micro_usd as f64, previous.cost_micro_usd as f64),
+                        pct_change(current.cache_hit_ratio(), previous.cache_hit_ratio()),
+                        pct_change(current.avg_tps(), previous.avg_tps()),
+                    )
+                };
 
-            let latest_output_tps = query_latest_tps(conn, filter.start_ms, filter.end_ms, provider)?;
+            let latest_output_tps = query_latest_tps(conn, eff_start_ms, eff_end_ms, provider)?;
 
             // Choose hourly series when range <= 48 hours, otherwise daily series
             let use_hourly = span <= 48 * HOUR_MS;
@@ -483,7 +611,7 @@ impl Storage {
             } else {
                 ("usage_daily_rollups", DAY_MS, "daily".to_string())
             };
-            let aligned_start = filter.start_ms.div_euclid(bucket_size) * bucket_size;
+            let aligned_start = eff_start_ms.div_euclid(bucket_size) * bucket_size;
 
             let sql = if provider.is_some() {
                 format!(
@@ -531,18 +659,111 @@ impl Storage {
             };
 
             if let Some(prov) = provider {
-                let rows = stmt.query_map(params![aligned_start, filter.end_ms, prov], map_point)?;
+                let rows = stmt.query_map(params![aligned_start, eff_end_ms, prov], map_point)?;
                 for row in rows {
                     series.push(row?);
                 }
             } else {
-                let rows = stmt.query_map(params![aligned_start, filter.end_ms], map_point)?;
+                let rows = stmt.query_map(params![aligned_start, eff_end_ms], map_point)?;
                 for row in rows {
                     series.push(row?);
                 }
             }
 
-            // Build per-provider summary rows including today & month spend + active subscription status
+            let prov_series_sql = if provider.is_some() {
+                format!(
+                    r#"
+                    SELECT bucket_start_ms, provider_id,
+                           SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + reasoning_tokens),
+                           SUM(estimated_cost_micro_usd),
+                           SUM(request_count)
+                    FROM {table_name}
+                    WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2 AND provider_id = ?3
+                    GROUP BY bucket_start_ms, provider_id
+                    ORDER BY bucket_start_ms ASC
+                    "#
+                )
+            } else {
+                format!(
+                    r#"
+                    SELECT bucket_start_ms, provider_id,
+                           SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + reasoning_tokens),
+                           SUM(estimated_cost_micro_usd),
+                           SUM(request_count)
+                    FROM {table_name}
+                    WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2
+                    GROUP BY bucket_start_ms, provider_id
+                    ORDER BY bucket_start_ms ASC
+                    "#
+                )
+            };
+
+            let mut prov_buckets: BTreeMap<String, BTreeMap<i64, (i64, i64, i64)>> =
+                BTreeMap::new();
+            let mut prov_stmt = conn.prepare(&prov_series_sql)?;
+            let map_prov_row =
+                |row: &rusqlite::Row<'_>| -> rusqlite::Result<(i64, String, i64, i64, i64)> {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                };
+            if let Some(prov) = provider {
+                let rows =
+                    prov_stmt.query_map(params![aligned_start, eff_end_ms, prov], map_prov_row)?;
+                for row in rows {
+                    let (b, pid, tok, cost, req) = row?;
+                    prov_buckets.entry(pid).or_default().insert(b, (tok, cost, req));
+                }
+            } else {
+                let rows =
+                    prov_stmt.query_map(params![aligned_start, eff_end_ms], map_prov_row)?;
+                for row in rows {
+                    let (b, pid, tok, cost, req) = row?;
+                    prov_buckets.entry(pid).or_default().insert(b, (tok, cost, req));
+                }
+            }
+
+            let aligned_buckets: Vec<i64> = series.iter().map(|p| p.bucket_start_ms).collect();
+            let mut provider_series: Vec<TrendSeries> = prov_buckets
+                .into_iter()
+                .map(|(pid, bucket_map)| {
+                    let mut total_tokens = 0i64;
+                    let mut total_cost = 0i64;
+                    let points = aligned_buckets
+                        .iter()
+                        .map(|&b| {
+                            let (t, c, r) = bucket_map.get(&b).copied().unwrap_or((0, 0, 0));
+                            total_tokens += t;
+                            total_cost += c;
+                            TrendPoint {
+                                bucket_start_ms: b,
+                                tokens: t,
+                                cost_micro_usd: c,
+                                requests: r,
+                            }
+                        })
+                        .collect();
+                    TrendSeries {
+                        label: format_dimension_label(StackDimension::Provider, &pid),
+                        key: pid,
+                        total_tokens,
+                        total_cost_micro_usd: total_cost,
+                        points,
+                    }
+                })
+                .filter(|s| s.total_tokens > 0)
+                .collect();
+            provider_series.sort_by(|a, b| {
+                b.total_tokens
+                    .cmp(&a.total_tokens)
+                    .then_with(|| a.key.cmp(&b.key))
+            });
+
+            // Build per-provider summary rows including today & month spend + active subscription or observed limit status
             let (today_start_ms, month_start_ms) =
                 local_day_bounds_ms(now_ms, filter.tz_offset_minutes);
 
@@ -570,24 +791,24 @@ impl Storage {
                         continue;
                     }
                 }
-                let period_t = query_period_totals(conn, filter.start_ms, filter.end_ms, Some(&pid))?;
+                let period_t = query_period_totals(conn, eff_start_ms, eff_end_ms, Some(&pid))?;
                 let today_t = query_period_totals(conn, today_start_ms, now_ms, Some(&pid))?;
                 let month_t = query_period_totals(conn, month_start_ms, now_ms, Some(&pid))?;
 
-                let active_plan = plans
-                    .iter()
-                    .find(|p| p.enabled && p.provider_id.eq_ignore_ascii_case(&pid));
-                let (active_window_label, active_window_used_percent) = if let Some(plan) = active_plan
-                {
-                    let samples = samples_map.get(&pid).map(Vec::as_slice).unwrap_or(&[]);
-                    let eval = evaluate_subscription_plan(plan, samples, &observed, now_ms);
-                    eval.windows
-                        .first()
-                        .map(|w| (Some(w.label.clone()), Some(w.used_percent)))
-                        .unwrap_or((None, None))
-                } else {
-                    (None, None)
-                };
+                let active_plan = plans.iter().find(|p| {
+                    p.enabled && p.is_user_configured && p.provider_id.eq_ignore_ascii_case(&pid)
+                });
+                let (active_window_label, active_window_used_percent) =
+                    if let Some(plan) = active_plan {
+                        let samples = samples_map.get(&pid).map(Vec::as_slice).unwrap_or(&[]);
+                        let eval = evaluate_subscription_plan(plan, samples, &observed, now_ms);
+                        eval.windows
+                            .first()
+                            .map(|w| (Some(w.label.clone()), Some(w.used_percent)))
+                            .unwrap_or_else(|| fallback_observed_window_status(&observed, &pid, now_ms))
+                    } else {
+                        fallback_observed_window_status(&observed, &pid, now_ms)
+                    };
 
                 prov_rows.push(ProviderSummaryRow {
                     provider_id: pid,
@@ -616,18 +837,13 @@ impl Storage {
                 latest_output_tps,
                 total_requests: current.requests,
                 observable_steps: current.observable_steps,
-                tokens_delta_pct: pct_change(
-                    current.total_tokens() as f64,
-                    previous.total_tokens() as f64,
-                ),
-                cost_delta_pct: pct_change(
-                    current.cost_micro_usd as f64,
-                    previous.cost_micro_usd as f64,
-                ),
-                cache_delta_pct: pct_change(current.cache_hit_ratio(), previous.cache_hit_ratio()),
-                tps_delta_pct: pct_change(current.avg_tps(), previous.avg_tps()),
+                tokens_delta_pct,
+                cost_delta_pct,
+                cache_delta_pct,
+                tps_delta_pct,
                 series_granularity,
                 series,
+                provider_series,
                 providers: prov_rows,
             })
         })
@@ -637,19 +853,25 @@ impl Storage {
         self.with_conn(|conn| {
             let filter = &query.filter;
             let provider = normalized_provider_filter(&filter.provider_id);
-            let span = (filter.end_ms - filter.start_ms).max(HOUR_MS);
-            let prev_start = filter.start_ms.saturating_sub(span);
-            let prev_end = filter.start_ms.saturating_sub(1);
+            let (eff_start_ms, eff_end_ms) =
+                resolve_effective_window(conn, filter, provider, Utc::now().timestamp_millis())?;
+            let span = (eff_end_ms - eff_start_ms).max(HOUR_MS);
+            let effective_granularity = resolve_trend_granularity(query.granularity, span);
 
             let current_rows = fetch_trend_rows(
                 conn,
-                filter.start_ms,
-                filter.end_ms,
+                eff_start_ms,
+                eff_end_ms,
                 provider,
-                query.granularity,
+                effective_granularity,
             )?;
-            let previous_rows =
-                fetch_trend_rows(conn, prev_start, prev_end, provider, query.granularity)?;
+            let previous_rows = if filter.all_time {
+                Vec::new()
+            } else {
+                let prev_start = eff_start_ms.saturating_sub(span);
+                let prev_end = eff_start_ms.saturating_sub(1);
+                fetch_trend_rows(conn, prev_start, prev_end, provider, effective_granularity)?
+            };
 
             let mut all_buckets = BTreeSet::new();
             // series_map[key][bucket] = (tokens, cost, requests)
@@ -717,6 +939,23 @@ impl Storage {
 
             accumulate(&current_rows, &mut all_buckets, &mut series_map, true);
 
+            // Generate continuous aligned buckets across the active window when data exists (capped at 2000).
+            if !all_buckets.is_empty() {
+                let bucket_step = granularity_bucket_ms(effective_granularity);
+                let first_b = eff_start_ms.div_euclid(bucket_step) * bucket_step;
+                let last_b = eff_end_ms.div_euclid(bucket_step) * bucket_step;
+                if last_b >= first_b && ((last_b - first_b) / bucket_step) < 2_000 {
+                    let mut b = first_b;
+                    while b <= last_b {
+                        all_buckets.insert(b);
+                        b = match b.checked_add(bucket_step) {
+                            Some(next) => next,
+                            None => break,
+                        };
+                    }
+                }
+            }
+
             let mut prev_map: BTreeMap<String, BTreeMap<i64, (i64, i64, i64)>> = BTreeMap::new();
             let mut dummy_buckets = BTreeSet::new();
             accumulate(&previous_rows, &mut dummy_buckets, &mut prev_map, false);
@@ -754,32 +993,42 @@ impl Storage {
                 }
 
                 let label = format_dimension_label(query.dimension, &key);
-                let (prev_tok, prev_cost) = prev_totals.get(&key).copied().unwrap_or((0, 0));
+                let (prev_tok, prev_cost, delta_pct) = if filter.all_time {
+                    (0, 0, None)
+                } else {
+                    let (pt, pc) = prev_totals.get(&key).copied().unwrap_or((0, 0));
+                    (pt, pc, pct_change(total_tokens as f64, pt as f64))
+                };
 
-                comparisons.push(TrendComparisonRow {
-                    key: key.clone(),
-                    label: label.clone(),
-                    current_tokens: total_tokens,
-                    previous_tokens: prev_tok,
-                    delta_pct: pct_change(total_tokens as f64, prev_tok as f64),
-                    current_cost_micro_usd: total_cost,
-                    previous_cost_micro_usd: prev_cost,
-                    requests: total_reqs,
-                });
+                if total_tokens > 0 || prev_tok > 0 {
+                    comparisons.push(TrendComparisonRow {
+                        key: key.clone(),
+                        label: label.clone(),
+                        current_tokens: total_tokens,
+                        previous_tokens: prev_tok,
+                        delta_pct,
+                        current_cost_micro_usd: total_cost,
+                        previous_cost_micro_usd: prev_cost,
+                        requests: total_reqs,
+                    });
+                }
 
-                series.push(TrendSeries {
-                    key,
-                    label,
-                    total_tokens,
-                    total_cost_micro_usd: total_cost,
-                    points,
-                });
+                if total_tokens > 0 {
+                    series.push(TrendSeries {
+                        key,
+                        label,
+                        total_tokens,
+                        total_cost_micro_usd: total_cost,
+                        points,
+                    });
+                }
             }
 
             series.sort_by_key(|a| std::cmp::Reverse(a.total_tokens));
             comparisons.sort_by_key(|a| std::cmp::Reverse(a.current_tokens));
 
             Ok(TrendsReport {
+                effective_granularity,
                 buckets,
                 series,
                 comparisons,
@@ -884,12 +1133,14 @@ impl Storage {
                 });
             }
 
-            // Active subscription monthly fee total
+            // Active user-configured subscription monthly fee total
             let plans = load_subscription_plans(conn)?;
             let subscription_monthly_fee_micro_usd: i64 = plans
                 .iter()
                 .filter(|p| {
                     p.enabled
+                        && p.is_user_configured
+                        && p.monthly_fee_micro_usd > 0
                         && provider.is_none_or(|pid| p.provider_id.eq_ignore_ascii_case(pid))
                 })
                 .map(|p| p.monthly_fee_micro_usd)
@@ -901,14 +1152,27 @@ impl Storage {
                 None
             };
 
-            // 365-day heatmap ending at the last day of the queried month (or end_ms)
-            let heatmap_start_ms = end_ms.saturating_sub(365 * DAY_MS);
-            let hm_rows = fetch_daily_rows(conn, heatmap_start_ms, end_ms, provider)?;
+            // 365-day heatmap ending at the last local day of the queried month, aligned via hourly rollups.
+            let end_date = next_month_date.pred_opt().unwrap_or(month_start_date);
+            let heatmap_start_date = end_date - chrono::Duration::days(364);
+            let heatmap_start_str = heatmap_start_date.format("%Y-%m-%d").to_string();
+            let end_date_str = end_date.format("%Y-%m-%d").to_string();
+            let heatmap_start_ms = heatmap_start_date
+                .and_hms_opt(0, 0, 0)
+                .and_then(|ndt| offset.from_local_datetime(&ndt).single())
+                .map(|d| d.timestamp_millis())
+                .unwrap_or_else(|| end_ms.saturating_sub(365 * DAY_MS));
+
+            let hm_rows = fetch_hourly_rows(conn, heatmap_start_ms, end_ms, provider)?;
             let mut hm_by_day: BTreeMap<String, DayAccum> = BTreeMap::new();
             for r in hm_rows {
                 let day_key = date_key_from_ms(r.bucket_start_ms, offset);
+                if day_key < heatmap_start_str || day_key > end_date_str {
+                    continue;
+                }
                 let acc = hm_by_day.entry(day_key).or_default();
                 acc.requests += r.requests;
+                acc.observable_steps += r.observable_steps;
                 acc.input += r.input_tokens;
                 acc.output += r.output_tokens;
                 acc.cache_read += r.cache_read_tokens;
@@ -916,11 +1180,11 @@ impl Storage {
                 acc.reasoning += r.reasoning_tokens;
                 acc.cost += r.cost_micro_usd;
                 let tok = r.total_tokens();
-                *acc.model_tokens.entry(r.model_id).or_default() += tok;
+                *acc.model_tokens.entry(r.model_id).or_default() += tok.max(r.requests).max(1);
             }
             let heatmap_365d = hm_by_day
                 .into_iter()
-                .map(|(date, acc)| {
+                .filter_map(|(date, acc)| {
                     let top_model = acc
                         .model_tokens
                         .into_iter()
@@ -931,13 +1195,16 @@ impl Storage {
                         + acc.cache_read
                         + acc.cache_write
                         + acc.reasoning;
-                    HeatmapDayCell {
+                    if total_tokens <= 0 && acc.requests <= 0 && acc.observable_steps <= 0 {
+                        return None;
+                    }
+                    Some(HeatmapDayCell {
                         date,
                         total_tokens,
                         cost_micro_usd: acc.cost,
-                        requests: acc.requests,
+                        requests: acc.requests.max(acc.observable_steps),
                         top_model,
-                    }
+                    })
                 })
                 .collect();
 
@@ -959,8 +1226,10 @@ impl Storage {
     pub fn query_models_pricing(&self, filter: &AnalyticsFilter) -> CoreResult<ModelStatsReport> {
         self.with_conn(|conn| {
             let provider = normalized_provider_filter(&filter.provider_id);
+            let (eff_start_ms, eff_end_ms) =
+                resolve_effective_window(conn, filter, provider, Utc::now().timestamp_millis())?;
             let catalog = load_pricing_catalog(conn)?;
-            let aligned_start = filter.start_ms.div_euclid(HOUR_MS) * HOUR_MS;
+            let aligned_start = eff_start_ms.div_euclid(HOUR_MS) * HOUR_MS;
 
             let sql = if provider.is_some() {
                 r#"
@@ -1044,7 +1313,7 @@ impl Storage {
             };
 
             if let Some(prov) = provider {
-                let iter = stmt.query_map(params![aligned_start, filter.end_ms, prov], |r| {
+                let iter = stmt.query_map(params![aligned_start, eff_end_ms, prov], |r| {
                     collect_row(r)
                 })?;
                 for item in iter {
@@ -1054,7 +1323,7 @@ impl Storage {
                     raw_rows.push(row);
                 }
             } else {
-                let iter = stmt.query_map(params![aligned_start, filter.end_ms], |r| {
+                let iter = stmt.query_map(params![aligned_start, eff_end_ms], |r| {
                     collect_row(r)
                 })?;
                 for item in iter {
@@ -1083,7 +1352,10 @@ impl Storage {
 
     pub fn query_subscriptions(&self, now_ms: i64) -> CoreResult<Vec<SubscriptionPlanStatus>> {
         self.with_conn(|conn| {
-            let plans = load_subscription_plans(conn)?;
+            let plans: Vec<_> = load_subscription_plans(conn)?
+                .into_iter()
+                .filter(|p| p.is_user_configured)
+                .collect();
             let observed = load_observed_rate_limits(conn)?;
             let samples_map = load_window_samples_map(conn, now_ms)?;
 
@@ -1102,36 +1374,40 @@ impl Storage {
     pub fn query_speed_latency(&self, filter: &AnalyticsFilter) -> CoreResult<SpeedLatencyReport> {
         self.with_conn(|conn| {
             let provider = normalized_provider_filter(&filter.provider_id);
+            let (eff_start_ms, eff_end_ms) =
+                resolve_effective_window(conn, filter, provider, Utc::now().timestamp_millis())?;
 
             struct RawSpeedEvent {
                 model_id: String,
                 provider_id: String,
-                context_tokens: i64,
                 output_tps: f64,
-                duration_ms: i64,
+                duration_ms: Option<i64>,
                 ttft_ms: Option<i64>,
-                timestamp_ms: i64,
             }
 
             let sql = if provider.is_some() {
                 r#"
-                SELECT model_id, provider_id,
-                       (input_tokens + cache_read_tokens + cache_write_tokens) AS context_tokens,
-                       output_tps, duration_ms, ttft_ms, timestamp_ms
+                SELECT model_id, provider_id, output_tps, duration_ms, ttft_ms
                 FROM usage_events
                 WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
                   AND provider_id = ?3
-                  AND output_tps IS NOT NULL AND output_tps > 0
+                  AND output_tps IS NOT NULL
+                  AND output_tps > 0.0
+                  AND output_tps <= 800.0
+                  AND (duration_ms IS NULL OR duration_ms >= 300)
+                  AND (output_tokens + reasoning_tokens) >= 8
                 ORDER BY timestamp_ms ASC
                 "#
             } else {
                 r#"
-                SELECT model_id, provider_id,
-                       (input_tokens + cache_read_tokens + cache_write_tokens) AS context_tokens,
-                       output_tps, duration_ms, ttft_ms, timestamp_ms
+                SELECT model_id, provider_id, output_tps, duration_ms, ttft_ms
                 FROM usage_events
                 WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
-                  AND output_tps IS NOT NULL AND output_tps > 0
+                  AND output_tps IS NOT NULL
+                  AND output_tps > 0.0
+                  AND output_tps <= 800.0
+                  AND (duration_ms IS NULL OR duration_ms >= 300)
+                  AND (output_tokens + reasoning_tokens) >= 8
                 ORDER BY timestamp_ms ASC
                 "#
             };
@@ -1143,37 +1419,39 @@ impl Storage {
                 Ok(RawSpeedEvent {
                     model_id: row.get(0)?,
                     provider_id: row.get(1)?,
-                    context_tokens: row.get(2)?,
-                    output_tps: row.get(3)?,
-                    duration_ms: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
-                    ttft_ms: row.get(5)?,
-                    timestamp_ms: row.get(6)?,
+                    output_tps: row.get(2)?,
+                    duration_ms: row.get(3)?,
+                    ttft_ms: row.get(4)?,
                 })
             };
 
             if let Some(prov) = provider {
-                let rows = stmt.query_map(params![filter.start_ms, filter.end_ms, prov], map_fn)?;
+                let rows = stmt.query_map(params![eff_start_ms, eff_end_ms, prov], map_fn)?;
                 for r in rows {
                     events.push(r?);
                 }
             } else {
-                let rows = stmt.query_map(params![filter.start_ms, filter.end_ms], map_fn)?;
+                let rows = stmt.query_map(params![eff_start_ms, eff_end_ms], map_fn)?;
                 for r in rows {
                     events.push(r?);
                 }
             }
 
-            // Group by (model_id, provider_id)
+            // Aggregate per-provider speed & latency stats
+            let mut by_provider: BTreeMap<String, Vec<&RawSpeedEvent>> = BTreeMap::new();
             let mut by_model: BTreeMap<(String, String), Vec<&RawSpeedEvent>> = BTreeMap::new();
             for ev in &events {
+                by_provider
+                    .entry(ev.provider_id.clone())
+                    .or_default()
+                    .push(ev);
                 by_model
                     .entry((ev.model_id.clone(), ev.provider_id.clone()))
                     .or_default()
                     .push(ev);
             }
 
-            let mut models = Vec::new();
-            for ((model_id, provider_id), group) in by_model {
+            let compute_group_metrics = |group: &[&RawSpeedEvent]| {
                 let mut tps_vals: Vec<f64> = group.iter().map(|e| e.output_tps).collect();
                 tps_vals.sort_by(|a, b| a.total_cmp(b));
                 let n = tps_vals.len();
@@ -1183,19 +1461,79 @@ impl Storage {
                 let min_tps = tps_vals.first().copied().unwrap_or(0.0);
                 let max_tps = tps_vals.last().copied().unwrap_or(0.0);
                 let latest_tps = group.last().map(|e| e.output_tps).unwrap_or(0.0);
-                let avg_duration_ms = group.iter().map(|e| e.duration_ms as f64).sum::<f64>() / n as f64;
-
+                let durations: Vec<i64> = group.iter().filter_map(|e| e.duration_ms).collect();
+                let avg_duration_ms = if durations.is_empty() {
+                    0.0
+                } else {
+                    durations.iter().sum::<i64>() as f64 / durations.len() as f64
+                };
                 let ttfts: Vec<i64> = group.iter().filter_map(|e| e.ttft_ms).collect();
                 let avg_ttft_ms = if ttfts.is_empty() {
                     None
                 } else {
                     Some(ttfts.iter().sum::<i64>() as f64 / ttfts.len() as f64)
                 };
+                (
+                    n as i64,
+                    mean_tps,
+                    p50_tps,
+                    p95_tps,
+                    max_tps,
+                    min_tps,
+                    latest_tps,
+                    avg_duration_ms,
+                    avg_ttft_ms,
+                )
+            };
 
+            let mut providers = Vec::with_capacity(by_provider.len());
+            for (provider_id, group) in by_provider {
+                let (
+                    sample_count,
+                    mean_tps,
+                    p50_tps,
+                    p95_tps,
+                    max_tps,
+                    min_tps,
+                    _latest_tps,
+                    avg_duration_ms,
+                    avg_ttft_ms,
+                ) = compute_group_metrics(&group);
+                providers.push(ProviderSpeedStats {
+                    provider_id,
+                    sample_count,
+                    mean_tps,
+                    p50_tps,
+                    p95_tps,
+                    max_tps,
+                    min_tps,
+                    avg_duration_ms,
+                    avg_ttft_ms,
+                });
+            }
+            providers.sort_by(|a, b| {
+                b.sample_count
+                    .cmp(&a.sample_count)
+                    .then_with(|| a.provider_id.cmp(&b.provider_id))
+            });
+
+            let mut models = Vec::with_capacity(by_model.len());
+            for ((model_id, provider_id), group) in by_model {
+                let (
+                    sample_count,
+                    mean_tps,
+                    p50_tps,
+                    p95_tps,
+                    max_tps,
+                    min_tps,
+                    latest_tps,
+                    avg_duration_ms,
+                    avg_ttft_ms,
+                ) = compute_group_metrics(&group);
                 models.push(ModelSpeedStats {
                     model_id,
                     provider_id,
-                    sample_count: n as i64,
+                    sample_count,
                     mean_tps,
                     p50_tps,
                     p95_tps,
@@ -1206,68 +1544,13 @@ impl Storage {
                     avg_ttft_ms,
                 });
             }
-            models.sort_by_key(|a| std::cmp::Reverse(a.sample_count));
+            models.sort_by(|a, b| {
+                b.sample_count
+                    .cmp(&a.sample_count)
+                    .then_with(|| a.model_id.cmp(&b.model_id))
+            });
 
-            // Downsample scatter points deterministically to <= 400 points
-            let step = (events.len() / 400).max(1);
-            let scatter_points: Vec<ContextSpeedSample> = events
-                .iter()
-                .step_by(step)
-                .take(400)
-                .map(|e| ContextSpeedSample {
-                    model_id: e.model_id.clone(),
-                    provider_id: e.provider_id.clone(),
-                    context_tokens: e.context_tokens,
-                    output_tps: e.output_tps,
-                    duration_ms: e.duration_ms,
-                    timestamp_ms: e.timestamp_ms,
-                })
-                .collect();
-
-            // Context bins: 0-8k, 8k-32k, 32k-128k, 128k-256k, 256k+
-            let bin_defs = [
-                ("0-8k", 0i64, 8_000i64),
-                ("8k-32k", 8_000, 32_000),
-                ("32k-128k", 32_000, 128_000),
-                ("128k-256k", 128_000, 256_000),
-                ("256k+", 256_000, i64::MAX),
-            ];
-            let mut context_bins = Vec::with_capacity(bin_defs.len());
-            for (label, min_c, max_c) in bin_defs {
-                let mut bin_tps = Vec::new();
-                let mut dur_sum = 0.0f64;
-                for e in &events {
-                    if e.context_tokens >= min_c && e.context_tokens < max_c {
-                        bin_tps.push(e.output_tps);
-                        dur_sum += e.duration_ms as f64;
-                    }
-                }
-                let count = bin_tps.len() as i64;
-                if count > 0 {
-                    bin_tps.sort_by(|a, b| a.total_cmp(b));
-                    context_bins.push(ContextDecayBin {
-                        bin_label: label.to_string(),
-                        sample_count: count,
-                        avg_tps: bin_tps.iter().sum::<f64>() / count as f64,
-                        p50_tps: percentile_sorted(&bin_tps, 0.50),
-                        avg_duration_ms: dur_sum / count as f64,
-                    });
-                } else {
-                    context_bins.push(ContextDecayBin {
-                        bin_label: label.to_string(),
-                        sample_count: 0,
-                        avg_tps: 0.0,
-                        p50_tps: 0.0,
-                        avg_duration_ms: 0.0,
-                    });
-                }
-            }
-
-            Ok(SpeedLatencyReport {
-                models,
-                scatter_points,
-                context_bins,
-            })
+            Ok(SpeedLatencyReport { providers, models })
         })
     }
 
@@ -1284,7 +1567,7 @@ impl Storage {
 
             let subscriptions = plans
                 .into_iter()
-                .filter(|p| p.enabled)
+                .filter(|p| p.enabled && p.is_user_configured)
                 .map(|plan| {
                     let samples = samples_map
                         .get(&plan.provider_id)
@@ -1416,7 +1699,9 @@ fn fetch_trend_rows(
     provider: Option<&str>,
     granularity: TrendGranularity,
 ) -> CoreResult<Vec<RawTrendRow>> {
-    match granularity {
+    let resolved = resolve_trend_granularity(granularity, (end_ms - start_ms).max(HOUR_MS));
+    match resolved {
+        TrendGranularity::Auto => unreachable!("resolve_trend_granularity resolves Auto"),
         TrendGranularity::FifteenMinutes => {
             const BUCKET_15M: i64 = 900_000;
             let sql = if provider.is_some() {
@@ -1677,6 +1962,7 @@ mod tests {
             end_ms: base_ts + 4 * HOUR_MS,
             provider_id: None,
             tz_offset_minutes: 480,
+            all_time: false,
         };
         let ov = storage
             .query_overview(&filter, base_ts + 2 * HOUR_MS)
@@ -1684,6 +1970,11 @@ mod tests {
         assert_eq!(ov.total_requests, 2);
         assert_eq!(ov.total_tokens, 685_000);
         assert!(ov.total_cost_micro_usd > 0);
+        assert_eq!(ov.provider_series.len(), 2);
+        assert_eq!(
+            ov.provider_series[0].points.len(),
+            ov.series.len()
+        );
 
         let monthly = storage
             .query_monthly(&MonthlyQuery {
@@ -1695,6 +1986,9 @@ mod tests {
             .expect("monthly");
         assert_eq!(monthly.month_total_tokens, 685_000);
         assert_eq!(monthly.api_equivalent_cost_micro_usd, ov.total_cost_micro_usd);
+        // Zero user-configured plans => zero fee & None ROI
+        assert_eq!(monthly.subscription_monthly_fee_micro_usd, 0);
+        assert!(monthly.roi_multiplier.is_none());
         let csv = export_monthly_csv(&monthly);
         assert!(csv.contains("2026-11-10"));
 
@@ -1703,7 +1997,308 @@ mod tests {
         assert_eq!(models.total_cost_micro_usd, ov.total_cost_micro_usd);
 
         let speed = storage.query_speed_latency(&filter).expect("speed");
+        assert_eq!(speed.providers.len(), 2);
         assert_eq!(speed.models.len(), 2);
-        assert_eq!(speed.scatter_points.len(), 2);
+    }
+
+    #[test]
+    fn all_time_trends_auto_observed_fallback_and_speed_outliers() {
+        let storage = Storage::open_in_memory().expect("db");
+        let base_ts = seed_sample_events(&storage);
+        let dev = storage.local_device().expect("device").device_id;
+
+        // Add an unphysical TPS outlier (> 800) and a short-duration step (< 300ms) + a valid observed limit
+        let outliers = vec![
+            NormalizedUsageEvent {
+                event_id: compute_event_id("claude_code", "s-out", "m-fast", base_ts + 120_000),
+                device_id: dev.clone(),
+                provider_id: "claude_code".to_string(),
+                session_id: "s-out".to_string(),
+                project_label: "app".to_string(),
+                model_id: "claude-sonnet-4-5".to_string(),
+                timestamp_ms: base_ts + 120_000,
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(150),
+                ttft_ms: None,
+                output_tps: Some(3_333.3),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+            NormalizedUsageEvent {
+                event_id: compute_event_id("codex", "s-old", "m-old", base_ts - 5 * DAY_MS),
+                device_id: dev,
+                provider_id: "codex".to_string(),
+                session_id: "s-old".to_string(),
+                project_label: "cli".to_string(),
+                model_id: "gpt-5-codex".to_string(),
+                timestamp_ms: base_ts - 5 * DAY_MS,
+                input_tokens: 10_000,
+                output_tokens: 5_000,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(2_000),
+                ttft_ms: Some(200),
+                output_tps: Some(60.0),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+        ];
+        let observed = vec![ObservedRateLimitWindow {
+            provider_id: "codex".to_string(),
+            window_name: "primary".to_string(),
+            used_percent: 42.5,
+            window_minutes: Some(300),
+            resets_at_ms: Some(base_ts + 4 * HOUR_MS),
+            observed_at_ms: base_ts,
+        }];
+        storage
+            .ingest_events_with_cursor(&outliers, None, &observed)
+            .expect("ingest outliers");
+
+        let all_time_filter = AnalyticsFilter {
+            start_ms: base_ts,
+            end_ms: base_ts + 2 * HOUR_MS,
+            provider_id: None,
+            tz_offset_minutes: 480,
+            all_time: true,
+        };
+        let ov = storage
+            .query_overview(&all_time_filter, base_ts + HOUR_MS)
+            .expect("all_time overview");
+        assert!(ov.tokens_delta_pct.is_none());
+        assert!(ov.cost_delta_pct.is_none());
+        assert!(ov.cache_delta_pct.is_none());
+        assert!(ov.tps_delta_pct.is_none());
+        let codex_row = ov
+            .providers
+            .iter()
+            .find(|p| p.provider_id == "codex")
+            .expect("codex row");
+        assert_eq!(codex_row.active_window_label.as_deref(), Some("5h 官方限额"));
+        assert_eq!(codex_row.active_window_used_percent, Some(42.5));
+
+        let trends = storage
+            .query_trends(&TrendsQuery {
+                filter: all_time_filter.clone(),
+                granularity: TrendGranularity::Auto,
+                dimension: StackDimension::Provider,
+            })
+            .expect("all_time trends");
+        assert_eq!(trends.effective_granularity, TrendGranularity::Daily);
+        assert!(trends.buckets.len() >= 5);
+        assert!(trends.comparisons.iter().all(|c| c.delta_pct.is_none() && c.previous_tokens == 0));
+
+        let speed = storage
+            .query_speed_latency(&all_time_filter)
+            .expect("speed filtered");
+        assert!(speed.providers.iter().all(|p| p.max_tps <= 800.0));
+        assert!(speed.models.iter().all(|m| m.max_tps <= 800.0));
+    }
+
+    #[test]
+    fn heatmap_365d_aligns_with_daily_ledger_and_includes_observable_only() {
+        let storage = Storage::open_in_memory().expect("db");
+        let dev = storage.local_device().expect("device").device_id;
+
+        // 2026-11-15T23:30:00Z:
+        //   - UTC+8 (+480): 2026-11-16 07:30 (+8) -> must appear in 2026-11-16
+        //   - UTC-5 (-300): 2026-11-15 18:30 (-5) -> must appear in 2026-11-15
+        let cross_boundary_ts = Utc
+            .with_ymd_and_hms(2026, 11, 15, 23, 30, 0)
+            .single()
+            .expect("ts")
+            .timestamp_millis();
+
+        // Observable-only Antigravity event on 2026-11-12T10:00:00Z with 0 tokens
+        let obs_ts = Utc
+            .with_ymd_and_hms(2026, 11, 12, 10, 0, 0)
+            .single()
+            .expect("ts")
+            .timestamp_millis();
+
+        let events = vec![
+            NormalizedUsageEvent {
+                event_id: compute_event_id("claude_code", "s-tz", "m1", cross_boundary_ts),
+                device_id: dev.clone(),
+                provider_id: "claude_code".to_string(),
+                session_id: "s-tz".to_string(),
+                project_label: "app".to_string(),
+                model_id: "claude-sonnet-4-5".to_string(),
+                timestamp_ms: cross_boundary_ts,
+                input_tokens: 12_000,
+                output_tokens: 3_000,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(1_000),
+                ttft_ms: None,
+                output_tps: Some(30.0),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+            NormalizedUsageEvent {
+                event_id: compute_event_id("antigravity", "s-obs", "m2", obs_ts),
+                device_id: dev,
+                provider_id: "antigravity".to_string(),
+                session_id: "s-obs".to_string(),
+                project_label: "agt".to_string(),
+                model_id: "antigravity-default".to_string(),
+                timestamp_ms: obs_ts,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: true,
+                duration_ms: None,
+                ttft_ms: None,
+                output_tps: None,
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+        ];
+        storage
+            .ingest_events_with_cursor(&events, None, &[])
+            .expect("ingest");
+
+        // Verify UTC+8
+        let m_plus8 = storage
+            .query_monthly(&MonthlyQuery {
+                year: 2026,
+                month: 11,
+                provider_id: None,
+                tz_offset_minutes: 480,
+            })
+            .expect("monthly +8");
+        assert_eq!(m_plus8.daily_ledger.len(), 2);
+        assert_eq!(m_plus8.heatmap_365d.len(), 2);
+        for ledger in &m_plus8.daily_ledger {
+            let cell = m_plus8
+                .heatmap_365d
+                .iter()
+                .find(|c| c.date == ledger.date)
+                .expect("matching heatmap date");
+            assert_eq!(cell.total_tokens, ledger.total_tokens);
+            assert_eq!(cell.requests, ledger.requests);
+        }
+        assert!(m_plus8.heatmap_365d.iter().any(|c| c.date == "2026-11-16"));
+        let obs_cell = m_plus8
+            .heatmap_365d
+            .iter()
+            .find(|c| c.date == "2026-11-12")
+            .expect("observable-only day present in heatmap");
+        assert_eq!(obs_cell.total_tokens, 0);
+        assert_eq!(obs_cell.requests, 1);
+
+        // Verify UTC-5
+        let m_minus5 = storage
+            .query_monthly(&MonthlyQuery {
+                year: 2026,
+                month: 11,
+                provider_id: None,
+                tz_offset_minutes: -300,
+            })
+            .expect("monthly -5");
+        assert!(m_minus5
+            .heatmap_365d
+            .iter()
+            .any(|c| c.date == "2026-11-15" && c.total_tokens == 15_000));
+    }
+
+    #[test]
+    fn overview_and_trends_exclude_zero_token_series() {
+        let storage = Storage::open_in_memory().expect("db");
+        let dev = storage.local_device().expect("device").device_id;
+        let ts = Utc
+            .with_ymd_and_hms(2026, 11, 10, 12, 0, 0)
+            .single()
+            .expect("ts")
+            .timestamp_millis();
+
+        // Ingest claude_code with real tokens (0 reasoning, 0 cache_write) + antigravity observable_only (0 tokens)
+        let events = vec![
+            NormalizedUsageEvent {
+                event_id: compute_event_id("claude_code", "s1", "m1", ts),
+                device_id: dev.clone(),
+                provider_id: "claude_code".to_string(),
+                session_id: "s1".to_string(),
+                project_label: "app".to_string(),
+                model_id: "claude-sonnet-4-5".to_string(),
+                timestamp_ms: ts,
+                input_tokens: 1_000,
+                output_tokens: 200,
+                cache_read_tokens: 500,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(1_000),
+                ttft_ms: None,
+                output_tps: Some(20.0),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+            NormalizedUsageEvent {
+                event_id: compute_event_id("antigravity", "s2", "m2", ts + 1_000),
+                device_id: dev,
+                provider_id: "antigravity".to_string(),
+                session_id: "s2".to_string(),
+                project_label: "agt".to_string(),
+                model_id: "antigravity-default".to_string(),
+                timestamp_ms: ts + 1_000,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: true,
+                duration_ms: None,
+                ttft_ms: None,
+                output_tps: None,
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+        ];
+        storage
+            .ingest_events_with_cursor(&events, None, &[])
+            .expect("ingest");
+
+        let filter = AnalyticsFilter {
+            start_ms: ts - HOUR_MS,
+            end_ms: ts + HOUR_MS,
+            provider_id: None,
+            tz_offset_minutes: 480,
+            all_time: false,
+        };
+        let ov = storage.query_overview(&filter, ts + HOUR_MS).expect("overview");
+        assert_eq!(ov.provider_series.len(), 1);
+        assert_eq!(ov.provider_series[0].key, "claude_code");
+
+        let prov_trends = storage
+            .query_trends(&TrendsQuery {
+                filter: filter.clone(),
+                granularity: TrendGranularity::Hourly,
+                dimension: StackDimension::Provider,
+            })
+            .expect("provider trends");
+        assert_eq!(prov_trends.series.len(), 1);
+        assert_eq!(prov_trends.series[0].key, "claude_code");
+
+        let tok_trends = storage
+            .query_trends(&TrendsQuery {
+                filter,
+                granularity: TrendGranularity::Hourly,
+                dimension: StackDimension::TokenType,
+            })
+            .expect("token type trends");
+        assert!(tok_trends.series.iter().all(|s| s.total_tokens > 0));
+        assert!(tok_trends.series.iter().all(|s| s.key != "reasoning"));
     }
 }

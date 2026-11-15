@@ -8,7 +8,7 @@ use tauri::{
 use crate::state::AppState;
 
 const TRAY_ID: &str = "tokentracker-tray";
-const TRAY_POPUP_LABEL: &str = "tray-popup";
+pub const TRAY_POPUP_LABEL: &str = "tray-popup";
 const MENU_OPEN: &str = "tray_open_main";
 const MENU_SCAN: &str = "tray_scan_now";
 const MENU_QUIT: &str = "tray_quit";
@@ -76,16 +76,9 @@ pub fn show_main_window(app: &AppHandle) {
     }
 }
 
-pub fn toggle_tray_popup(app: &AppHandle, click_pos: Option<PhysicalPosition<f64>>) {
-    if let Some(popup) = app.get_webview_window(TRAY_POPUP_LABEL) {
-        if popup.is_visible().unwrap_or(false) {
-            let _ = popup.hide();
-            return;
-        }
-        position_tray_popup(&popup, click_pos);
-        let _ = popup.show();
-        let _ = popup.set_focus();
-        return;
+fn ensure_tray_popup(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+    if let Some(existing) = app.get_webview_window(TRAY_POPUP_LABEL) {
+        return Some(existing);
     }
 
     let builder = WebviewWindowBuilder::new(
@@ -101,13 +94,33 @@ pub fn toggle_tray_popup(app: &AppHandle, click_pos: Option<PhysicalPosition<f64
     .skip_taskbar(true)
     .visible(false);
 
-    if let Ok(popup) = builder.build() {
-        let popup_clone = popup.clone();
-        popup.on_window_event(move |ev| {
-            if let WindowEvent::Focused(false) = ev {
-                let _ = popup_clone.hide();
-            }
-        });
+    let popup = builder.build().ok()?;
+    let popup_clone = popup.clone();
+    popup.on_window_event(move |ev| {
+        if let WindowEvent::Focused(false) = ev {
+            let _ = popup_clone.hide();
+        }
+    });
+
+    if let Ok(prefs) = app.state::<AppState>().storage.get_preferences() {
+        let _ = popup.set_theme(crate::commands::parse_tauri_theme(&prefs.theme));
+    }
+    Some(popup)
+}
+
+pub fn toggle_tray_popup(app: &AppHandle, click_pos: Option<PhysicalPosition<f64>>) {
+    if let Some(popup) = app.get_webview_window(TRAY_POPUP_LABEL) {
+        if popup.is_visible().unwrap_or(false) {
+            let _ = popup.hide();
+            return;
+        }
+        position_tray_popup(&popup, click_pos);
+        let _ = popup.show();
+        let _ = popup.set_focus();
+        return;
+    }
+
+    if let Some(popup) = ensure_tray_popup(app) {
         position_tray_popup(&popup, click_pos);
         let _ = popup.show();
         let _ = popup.set_focus();

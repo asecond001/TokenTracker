@@ -1,4 +1,4 @@
-interface InlineProgressBarProps {
+export interface InlineProgressBarProps {
   percent: number;
   alertLevel?: string;
   heightPx?: number;
@@ -25,14 +25,17 @@ export function InlineProgressBar({
       className="w-full overflow-hidden rounded-full"
       style={{
         height: `${heightPx}px`,
-        backgroundColor: showTrack ? 'var(--border-subtle)' : 'transparent',
+        backgroundColor: showTrack ? 'var(--border-hairline)' : 'transparent',
+        transition: 'background-color 180ms cubic-bezier(0.16, 1, 0.3, 1)',
       }}
     >
       <div
-        className="h-full rounded-full transition-[width] duration-300"
+        className="h-full rounded-full"
         style={{
           width: `${clamped}%`,
           backgroundColor: fillColor,
+          transition:
+            'width 280ms cubic-bezier(0.16, 1, 0.3, 1), background-color 220ms cubic-bezier(0.16, 1, 0.3, 1)',
         }}
       />
     </div>

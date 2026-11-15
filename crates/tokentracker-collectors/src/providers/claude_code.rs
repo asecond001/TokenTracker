@@ -120,24 +120,50 @@ impl ProviderLogParser for ClaudeCodeParser {
             return None;
         }
 
-        let duration_ms = ctx.last_prompt_ts_ms.take().and_then(|prev| {
-            let delta = ts_ms - prev;
-            if delta > 0 && delta <= 600_000 {
+        let message_id = message
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let (duration_ms, ttft_ms) = if let Some(msg_id) = message_id {
+            let turn = ctx.resolve_message_turn(msg_id, ts_ms);
+            let anchor = turn.turn_prompt_ts_ms.unwrap_or(turn.first_chunk_ts_ms);
+            let delta = ts_ms - anchor;
+            let dur = if delta > 0 && delta <= 600_000 {
                 Some(delta)
             } else {
                 None
-            }
-        });
+            };
+            let ttft = turn.turn_prompt_ts_ms.and_then(|p| {
+                let d = turn.first_chunk_ts_ms - p;
+                if d > 0 && d <= 600_000 {
+                    Some(d)
+                } else {
+                    None
+                }
+            });
+            (dur, ttft)
+        } else {
+            let dur = ctx
+                .last_prompt_ts_ms
+                .take()
+                .and_then(|prev| {
+                    let delta = ts_ms - prev;
+                    if delta > 0 && delta <= 600_000 {
+                        Some(delta)
+                    } else {
+                        None
+                    }
+                });
+            (dur, None)
+        };
         let effective_output = output_tokens + reasoning_tokens;
         let output_tps = compute_tps(effective_output, duration_ms);
 
         // Prefer Anthropic's globally unique `message.id` so multi-block assistant records
         // referencing the same API response collapse idempotently rather than double-counting.
-        let step_key = message
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
+        let step_key = message_id
             .map(|id| (id.to_string(), 0i64))
             .unwrap_or_else(|| {
                 let uuid = val
@@ -171,7 +197,7 @@ impl ProviderLogParser for ClaudeCodeParser {
                 reasoning_tokens,
                 observable_only: false,
                 duration_ms,
-                ttft_ms: None,
+                ttft_ms,
                 output_tps,
                 estimated_cost_micro_usd: 0,
                 cache_saved_micro_usd: 0,
@@ -267,3 +293,80 @@ pub fn default_claude_stats_cache_path() -> Option<PathBuf> {
 // Keep unused `File` import warning away on non-windows or ensure clean imports
 #[allow(dead_code)]
 fn _touch_file_type(_: Option<File>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn compute_tps_rejects_sub_300ms_small_outputs_and_spikes() {
+        assert_eq!(compute_tps(500, Some(100)), None);
+        assert_eq!(compute_tps(7, Some(1_000)), None);
+        assert_eq!(compute_tps(5_000, Some(1_000)), None);
+        let ok = compute_tps(120, Some(2_000)).expect("valid tps");
+        assert!((ok - 60.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn multi_chunk_streaming_preserves_turn_duration_and_ttft() {
+        let parser = ClaudeCodeParser;
+        let path = Path::new("C:/tmp/.claude/projects/alpha/sess-stream.jsonl");
+        let mut ctx = parser.init_context(path, "dev-1");
+
+        let prompt = r#"{"type":"user","timestamp":"2026-11-10T10:00:00.000Z","message":{"role":"user","content":"hi"}}"#;
+        let chunk1 = r#"{"type":"assistant","timestamp":"2026-11-10T10:00:00.250Z","message":{"id":"msg_stream_1","model":"claude-sonnet-4-5","usage":{"input_tokens":1000,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        let chunk2 = r#"{"type":"assistant","timestamp":"2026-11-10T10:00:02.000Z","message":{"id":"msg_stream_1","model":"claude-sonnet-4-5","usage":{"input_tokens":1000,"output_tokens":160,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+
+        assert!(parser.parse_line(prompt, &mut ctx).is_none());
+        let e1 = parser
+            .parse_line(chunk1, &mut ctx)
+            .and_then(|r| r.event)
+            .expect("chunk1");
+        assert_eq!(e1.duration_ms, Some(250));
+        assert_eq!(e1.ttft_ms, Some(250));
+        // chunk1 duration < 300ms => output_tps rejected
+        assert_eq!(e1.output_tps, None);
+
+        let e2 = parser
+            .parse_line(chunk2, &mut ctx)
+            .and_then(|r| r.event)
+            .expect("chunk2");
+        assert_eq!(e2.duration_ms, Some(2_000));
+        assert_eq!(e2.ttft_ms, Some(250));
+        let tps = e2.output_tps.expect("chunk2 tps");
+        assert!((tps - 80.0).abs() < 1e-6);
+
+        let collapsed = parser.finalize_batch(vec![e1, e2]);
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0].output_tokens, 160);
+        assert_eq!(collapsed[0].duration_ms, Some(2_000));
+        assert_eq!(collapsed[0].ttft_ms, Some(250));
+        assert!((collapsed[0].output_tps.expect("final tps") - 80.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn multi_chunk_without_prompt_uses_first_chunk_anchor_and_rejects_fast_tail() {
+        let parser = ClaudeCodeParser;
+        let path = Path::new("C:/tmp/.claude/projects/alpha/sess-noprompt.jsonl");
+        let mut ctx = parser.init_context(path, "dev-1");
+
+        let chunk1 = r#"{"type":"assistant","timestamp":"2026-11-10T10:00:01.000Z","message":{"id":"msg_np","model":"claude-sonnet-4-5","usage":{"input_tokens":500,"output_tokens":5}}}"#;
+        let fast_chunk = r#"{"type":"assistant","timestamp":"2026-11-10T10:00:01.100Z","message":{"id":"msg_np","model":"claude-sonnet-4-5","usage":{"input_tokens":500,"output_tokens":80}}}"#;
+        let final_chunk = r#"{"type":"assistant","timestamp":"2026-11-10T10:00:03.000Z","message":{"id":"msg_np","model":"claude-sonnet-4-5","usage":{"input_tokens":500,"output_tokens":120}}}"#;
+
+        let e1 = parser.parse_line(chunk1, &mut ctx).and_then(|r| r.event).expect("c1");
+        assert_eq!(e1.duration_ms, None);
+        assert_eq!(e1.output_tps, None);
+
+        let e2 = parser.parse_line(fast_chunk, &mut ctx).and_then(|r| r.event).expect("c2");
+        assert_eq!(e2.duration_ms, Some(100));
+        assert_eq!(e2.output_tps, None);
+
+        let e3 = parser.parse_line(final_chunk, &mut ctx).and_then(|r| r.event).expect("c3");
+        assert_eq!(e3.duration_ms, Some(2_000));
+        assert_eq!(e3.ttft_ms, None);
+        let tps = e3.output_tps.expect("final tps");
+        assert!((tps - 60.0).abs() < 1e-6);
+    }
+}

@@ -84,7 +84,10 @@ export function DataSourcesPage() {
     await queryClient.invalidateQueries({ queryKey: ['provider_configs'] });
     await queryClient.invalidateQueries({ queryKey: ['ingestion_cursors'] });
     await queryClient.invalidateQueries({ queryKey: ['overview'] });
+    await queryClient.invalidateQueries({ queryKey: ['subscriptions'] });
+    await queryClient.invalidateQueries({ queryKey: ['observed_rate_limits'] });
     await queryClient.invalidateQueries({ queryKey: ['tray_summary'] });
+    await queryClient.invalidateQueries({ queryKey: ['tray-summary'] });
   };
 
   const updateProviderMutation = useMutation({
@@ -261,7 +264,7 @@ export function DataSourcesPage() {
           type="button"
           onClick={() => scanMutation.mutate()}
           disabled={scanMutation.isPending}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium cursor-pointer disabled:opacity-50"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
           style={{
             backgroundColor: 'var(--accent-primary)',
             color: '#ffffff',
@@ -276,9 +279,9 @@ export function DataSourcesPage() {
 
       {notice && (
         <div
-          className="px-3 py-2 text-[12px] flex items-center justify-between"
+          className="px-3 py-2 text-[12px] rounded flex items-center justify-between"
           style={{
-            borderBottom: '1px solid var(--border-subtle)',
+            border: '1px solid var(--border-subtle)',
             backgroundColor: 'var(--bg-elevated)',
             color: 'var(--accent-emerald)',
           }}
@@ -287,7 +290,7 @@ export function DataSourcesPage() {
           <button
             type="button"
             onClick={() => setNotice(null)}
-            className="text-[11px] cursor-pointer"
+            className="btn-interactive px-1.5 py-0.5 rounded text-[11px] cursor-pointer"
             style={{ color: 'var(--text-muted)' }}
           >
             关闭
@@ -297,9 +300,9 @@ export function DataSourcesPage() {
 
       {errorMsg && (
         <div
-          className="px-3 py-2 text-[12px] flex items-center justify-between"
+          className="px-3 py-2 text-[12px] rounded flex items-center justify-between"
           style={{
-            borderBottom: '1px solid var(--border-subtle)',
+            border: '1px solid var(--accent-rose)',
             backgroundColor: 'var(--bg-elevated)',
             color: 'var(--accent-rose)',
           }}
@@ -308,7 +311,7 @@ export function DataSourcesPage() {
           <button
             type="button"
             onClick={() => setErrorMsg(null)}
-            className="text-[11px] cursor-pointer"
+            className="btn-interactive px-1.5 py-0.5 rounded text-[11px] cursor-pointer"
             style={{ color: 'var(--text-muted)' }}
           >
             关闭
@@ -338,7 +341,7 @@ export function DataSourcesPage() {
                 style={{ borderBottom: '1px solid var(--border-subtle)' }}
               >
                 <div className="flex flex-wrap items-center justify-between gap-4">
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex flex-wrap items-center gap-2.5">
                     <span
                       className="inline-block w-2 h-2 rounded-full"
                       style={{ backgroundColor: providerAccentColor(cfg.provider_id) }}
@@ -350,6 +353,7 @@ export function DataSourcesPage() {
                       className="text-[11px] px-1.5 py-0.5 rounded tabular-nums"
                       style={{
                         backgroundColor: 'var(--bg-hover)',
+                        border: '1px solid var(--border-hairline)',
                         color: cfg.enabled ? 'var(--accent-emerald)' : 'var(--text-muted)',
                       }}
                     >
@@ -432,7 +436,7 @@ export function DataSourcesPage() {
                           <button
                             type="button"
                             onClick={() => handleRemoveCustomPath(cfg, customPath)}
-                            className="inline-flex items-center gap-1 text-[11px] shrink-0 cursor-pointer hover:opacity-80"
+                            className="btn-interactive inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] shrink-0 cursor-pointer"
                             style={{ color: 'var(--accent-rose)' }}
                           >
                             <Trash2 className="w-3 h-3" />
@@ -446,7 +450,7 @@ export function DataSourcesPage() {
                   <div className="flex flex-wrap items-center gap-2">
                     <input
                       type="text"
-                      placeholder="添加自定义日志目录或文件路径（如 C:\\Users\\...\\logs）"
+                      placeholder="添加自定义日志目录或文件路径（如 C:\Users\...\logs）"
                       value={pathDrafts[cfg.provider_id] ?? ''}
                       onChange={(e) =>
                         setPathDrafts((prev) => ({
@@ -454,6 +458,12 @@ export function DataSourcesPage() {
                           [cfg.provider_id]: e.target.value,
                         }))
                       }
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleAddCustomPath(cfg, pathDrafts[cfg.provider_id] ?? '');
+                        }
+                      }}
                       className="flex-1 min-w-[260px] px-2.5 py-1 text-[11.5px] rounded outline-none"
                       style={{
                         backgroundColor: 'var(--bg-input)',
@@ -466,9 +476,8 @@ export function DataSourcesPage() {
                       onClick={() =>
                         handleAddCustomPath(cfg, pathDrafts[cfg.provider_id] ?? '')
                       }
-                      className="px-2.5 py-1 text-[11.5px] rounded cursor-pointer"
+                      className="btn-interactive bg-[var(--bg-elevated)] px-2.5 py-1 text-[11.5px] rounded cursor-pointer"
                       style={{
-                        backgroundColor: 'var(--bg-hover)',
                         color: 'var(--text-primary)',
                         border: '1px solid var(--border-subtle)',
                       }}
@@ -478,9 +487,8 @@ export function DataSourcesPage() {
                     <button
                       type="button"
                       onClick={() => handleBrowseFolder(cfg)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 text-[11.5px] rounded cursor-pointer"
+                      className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1 px-2.5 py-1 text-[11.5px] rounded cursor-pointer"
                       style={{
-                        backgroundColor: 'var(--bg-hover)',
                         color: 'var(--text-primary)',
                         border: '1px solid var(--border-subtle)',
                       }}
@@ -508,6 +516,7 @@ export function DataSourcesPage() {
                         className="px-1.5 py-0.5 rounded text-[10.5px]"
                         style={{
                           backgroundColor: 'var(--bg-hover)',
+                          border: '1px solid var(--border-hairline)',
                           color: cfg.has_credential
                             ? 'var(--accent-emerald)'
                             : 'var(--text-muted)',
@@ -548,9 +557,8 @@ export function DataSourcesPage() {
                           })
                         }
                         disabled={saveApiKeyMutation.isPending}
-                        className="px-2.5 py-1 rounded cursor-pointer"
+                        className="btn-interactive bg-[var(--bg-elevated)] px-2.5 py-1 rounded cursor-pointer disabled:opacity-50"
                         style={{
-                          backgroundColor: 'var(--bg-hover)',
                           color: 'var(--text-primary)',
                           border: '1px solid var(--border-subtle)',
                         }}
@@ -563,7 +571,7 @@ export function DataSourcesPage() {
                             type="button"
                             onClick={() => reconcileMutation.mutate(cfg.provider_id)}
                             disabled={reconcileMutation.isPending}
-                            className="px-2.5 py-1 rounded cursor-pointer"
+                            className="px-2.5 py-1 rounded cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
                             style={{
                               backgroundColor: 'var(--accent-primary)',
                               color: '#ffffff',
@@ -573,8 +581,9 @@ export function DataSourcesPage() {
                           </button>
                           <button
                             type="button"
+                            disabled={deleteApiKeyMutation.isPending}
                             onClick={() => deleteApiKeyMutation.mutate(cfg.provider_id)}
-                            className="px-2 py-1 rounded cursor-pointer"
+                            className="btn-interactive px-2 py-1 rounded cursor-pointer disabled:opacity-50"
                             style={{ color: 'var(--accent-rose)' }}
                           >
                             清除密钥
@@ -586,7 +595,11 @@ export function DataSourcesPage() {
                     {reconcile && (
                       <div
                         className="w-full px-2.5 py-1.5 rounded text-[11px] tabular-nums flex flex-wrap items-center gap-4"
-                        style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}
+                        style={{
+                          backgroundColor: 'var(--bg-elevated)',
+                          border: '1px solid var(--border-hairline)',
+                          color: 'var(--text-secondary)',
+                        }}
                       >
                         <span>端点: {reconcile.endpoint}</span>
                         <span>时间桶: {reconcile.buckets_received}</span>
@@ -626,6 +639,7 @@ export function DataSourcesPage() {
                 className="text-[11px] px-1.5 py-0.5 rounded tabular-nums"
                 style={{
                   backgroundColor: 'var(--bg-hover)',
+                  border: '1px solid var(--border-hairline)',
                   color: bootstrap?.otlp_running
                     ? 'var(--accent-emerald)'
                     : 'var(--text-muted)',
@@ -658,21 +672,33 @@ export function DataSourcesPage() {
                 }}
               />
             </label>
-            <button
-              type="button"
-              onClick={() => handleToggleOtlp(!(bootstrap?.preferences.otlp_enabled ?? false))}
-              disabled={updateOtlpPrefsMutation.isPending}
-              className="px-3 py-1 rounded text-[12px] font-medium cursor-pointer"
-              style={{
-                backgroundColor: bootstrap?.preferences.otlp_enabled
-                  ? 'var(--bg-hover)'
-                  : 'var(--accent-primary)',
-                color: bootstrap?.preferences.otlp_enabled ? 'var(--accent-rose)' : '#ffffff',
-                border: '1px solid var(--border-subtle)',
-              }}
-            >
-              {bootstrap?.preferences.otlp_enabled ? '停止 OTLP 接收' : '开启本地 OTLP'}
-            </button>
+            {bootstrap?.preferences.otlp_enabled ? (
+              <button
+                type="button"
+                onClick={() => handleToggleOtlp(false)}
+                disabled={updateOtlpPrefsMutation.isPending}
+                className="btn-interactive bg-[var(--bg-elevated)] px-3 py-1 rounded text-[12px] font-medium cursor-pointer disabled:opacity-50"
+                style={{
+                  color: 'var(--accent-rose)',
+                  border: '1px solid var(--border-subtle)',
+                }}
+              >
+                停止 OTLP 接收
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => handleToggleOtlp(true)}
+                disabled={updateOtlpPrefsMutation.isPending}
+                className="px-3 py-1 rounded text-[12px] font-medium cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
+                style={{
+                  backgroundColor: 'var(--accent-primary)',
+                  color: '#ffffff',
+                }}
+              >
+                开启本地 OTLP
+              </button>
+            )}
           </div>
         </div>
 
@@ -683,15 +709,17 @@ export function DataSourcesPage() {
             border: '1px solid var(--border-subtle)',
           }}
         >
-          <pre className="m-0 text-[11.5px] font-mono select-text whitespace-pre-wrap" style={{ color: 'var(--text-secondary)' }}>
+          <pre
+            className="m-0 text-[11.5px] font-mono select-text whitespace-pre-wrap"
+            style={{ color: 'var(--text-secondary)' }}
+          >
             {otlpEnvSnippet}
           </pre>
           <button
             type="button"
             onClick={handleCopyOtlpSnippet}
-            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded shrink-0 cursor-pointer"
+            className="btn-interactive bg-[var(--bg-canvas)] inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded shrink-0 cursor-pointer"
             style={{
-              backgroundColor: 'var(--bg-hover)',
               color: 'var(--text-primary)',
               border: '1px solid var(--border-subtle)',
             }}
@@ -749,8 +777,8 @@ export function DataSourcesPage() {
                 cursors.map((c) => (
                   <tr
                     key={c.source_path}
-                    className="hover:bg-white/[0.02]"
-                    style={{ borderBottom: '1px solid var(--border-subtle)' }}
+                    className="row-interactive"
+                    style={{ borderBottom: '1px solid var(--border-hairline)' }}
                   >
                     <td className="py-2 pr-3 font-medium whitespace-nowrap">
                       {providerDisplayName(c.provider_id)}

@@ -2,16 +2,32 @@ import { useEffect, useRef } from 'react';
 import * as echarts from 'echarts';
 import type { EChartsOption } from 'echarts';
 
-interface EChartBoxProps {
+export interface EChartBoxProps {
   option: EChartsOption;
   height?: number;
   className?: string;
+  notMerge?: boolean;
+  lazyUpdate?: boolean;
+}
+
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
 }
 
 /**
  * Full-width borderless ECharts container with automatic resize & theme-aware sizing.
  */
-export function EChartBox({ option, height = 260, className = '' }: EChartBoxProps) {
+export function EChartBox({
+  option,
+  height = 260,
+  className = '',
+  notMerge = false,
+  lazyUpdate = true,
+}: EChartBoxProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<echarts.ECharts | null>(null);
 
@@ -22,23 +38,90 @@ export function EChartBox({ option, height = 260, className = '' }: EChartBoxPro
     const chart = echarts.init(el, undefined, { renderer: 'canvas' });
     chartRef.current = chart;
 
-    const ro = new ResizeObserver(() => {
-      chart.resize();
-    });
-    ro.observe(el);
+    let rafId: number | null = null;
+    const scheduleResize = () => {
+      if (typeof requestAnimationFrame !== 'function') {
+        if (!chart.isDisposed() && el.clientWidth > 0 && el.clientHeight > 0) {
+          chart.resize();
+        }
+        return;
+      }
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+      }
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        if (!chart.isDisposed() && el.clientWidth > 0 && el.clientHeight > 0) {
+          chart.resize();
+        }
+      });
+    };
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver((entries) => {
+        const entry = entries[0];
+        if (!entry) return;
+        const { width, height: rectHeight } = entry.contentRect;
+        if (width <= 0 || rectHeight <= 0) return;
+        scheduleResize();
+      });
+      ro.observe(el);
+    } else if (typeof window !== 'undefined') {
+      window.addEventListener('resize', scheduleResize);
+    }
 
     return () => {
-      ro.disconnect();
-      chart.dispose();
+      if (rafId !== null && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(rafId);
+      }
+      if (ro) {
+        ro.disconnect();
+      } else if (typeof window !== 'undefined') {
+        window.removeEventListener('resize', scheduleResize);
+      }
+      if (!chart.isDisposed()) {
+        chart.dispose();
+      }
       chartRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    if (chartRef.current) {
-      chartRef.current.setOption(option, { notMerge: true });
+    const chart = chartRef.current;
+    if (!chart || chart.isDisposed()) return;
+
+    const reducedMotion = prefersReducedMotion();
+    const nextOption: EChartsOption = reducedMotion
+      ? {
+          ...option,
+          animation: false,
+          animationDuration: 0,
+          animationDurationUpdate: 0,
+        }
+      : {
+          animationDuration: 280,
+          animationDurationUpdate: 260,
+          animationEasing: 'cubicOut',
+          animationEasingUpdate: 'cubicOut',
+          ...option,
+        };
+
+    chart.setOption(nextOption, {
+      notMerge,
+      lazyUpdate,
+      replaceMerge: notMerge ? undefined : ['series'],
+    });
+  }, [option, notMerge, lazyUpdate]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const el = containerRef.current;
+    if (!chart || !el || chart.isDisposed()) return;
+    if (el.clientWidth > 0 && el.clientHeight > 0) {
+      chart.resize();
     }
-  }, [option]);
+  }, [height]);
 
   return (
     <div

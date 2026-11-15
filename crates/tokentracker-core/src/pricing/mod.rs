@@ -1,6 +1,12 @@
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::{Decimal, RoundingStrategy};
 
+pub mod remote_sync;
+pub use remote_sync::{
+    compute_catalog_hash, format_exchange_rate, parse_litellm_catalog, parse_models_dev_catalog,
+    parse_remote_exchange_rate_json,
+};
+
 use crate::domain::{provider_ids, CurrencyCode, ModelPricingEntry, NormalizedUsageEvent};
 use crate::error::{CoreError, CoreResult};
 
@@ -60,6 +66,7 @@ pub fn default_pricing_catalog() -> Vec<ModelPricingEntry> {
         entry("gpt-4o", provider_ids::CODEX, 2.50, 10.0, 1.25, 0.0, 10.0),
         entry("_default_codex", provider_ids::CODEX, 1.25, 10.0, 0.125, 0.0, 10.0),
         // Google Gemini / Antigravity models
+        entry("gemini-3.1-pro", provider_ids::ANTIGRAVITY, 2.0, 12.0, 0.20, 0.0, 12.0),
         entry("gemini-3-pro", provider_ids::ANTIGRAVITY, 2.0, 12.0, 0.20, 0.0, 12.0),
         entry("gemini-3-flash", provider_ids::ANTIGRAVITY, 0.50, 3.0, 0.05, 0.0, 3.0),
         entry("gemini-2.5-pro", provider_ids::ANTIGRAVITY, 1.25, 10.0, 0.125, 0.0, 10.0),
@@ -67,6 +74,14 @@ pub fn default_pricing_catalog() -> Vec<ModelPricingEntry> {
         entry("antigravity-planner", provider_ids::ANTIGRAVITY, 1.25, 10.0, 0.125, 0.0, 10.0),
         entry("antigravity-default", provider_ids::ANTIGRAVITY, 1.25, 10.0, 0.125, 0.0, 10.0),
         entry("_default_antigravity", provider_ids::ANTIGRAVITY, 1.25, 10.0, 0.125, 0.0, 10.0),
+        // Public multi-vendor baseline models (used after remote sync or direct model queries)
+        entry("deepseek-chat", "deepseek", 0.28, 0.42, 0.028, 0.0, 0.42),
+        entry("deepseek-reasoner", "deepseek", 0.55, 2.19, 0.14, 0.0, 2.19),
+        entry("_default_deepseek", "deepseek", 0.28, 0.42, 0.028, 0.0, 0.42),
+        entry("kimi-k2", "kimi_code", 0.60, 2.50, 0.15, 0.0, 2.50),
+        entry("_default_kimi_code", "kimi_code", 0.60, 2.50, 0.15, 0.0, 2.50),
+        entry("minimax-m2", "minimax_code", 0.30, 1.20, 0.03, 0.0, 1.20),
+        entry("_default_minimax_code", "minimax_code", 0.30, 1.20, 0.03, 0.0, 1.20),
     ]
 }
 

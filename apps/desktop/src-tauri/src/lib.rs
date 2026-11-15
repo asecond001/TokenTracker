@@ -59,8 +59,12 @@ pub fn run() {
             commands::upsert_model_pricing_override,
             commands::delete_model_pricing_override,
             commands::recompute_all_costs,
+            commands::sync_pricing_and_rate,
             commands::get_subscriptions,
             commands::upsert_subscription_plan,
+            commands::delete_subscription_plan,
+            commands::get_subscription_templates,
+            commands::get_observed_rate_limits,
             commands::get_speed_latency,
             commands::get_tray_summary,
             commands::get_provider_configs,
@@ -72,6 +76,9 @@ pub fn run() {
             commands::reconcile_provider_official_api,
             commands::get_preferences,
             commands::update_preferences,
+            commands::import_background_image,
+            commands::clear_background_image,
+            commands::get_background_image_data_url,
             commands::export_monthly_report,
             commands::preview_sync_envelope_v1,
             commands::open_main_workspace,
@@ -83,6 +90,9 @@ pub fn run() {
                 return Err(err.into());
             }
             let state = app.state::<AppState>();
+            if let Ok(prefs) = state.storage.get_preferences() {
+                commands::apply_theme_to_app(app.handle(), &prefs.theme);
+            }
             state.start_background_services(app.handle().clone());
             Ok(())
         })

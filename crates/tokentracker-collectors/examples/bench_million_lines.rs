@@ -111,6 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         end_ms: i64::MAX / 2,
         provider_id: None,
         tz_offset_minutes: 480,
+        all_time: false,
     };
     let overview = storage.query_overview(&filter, 1_760_100_000_000)?;
     let query_elapsed = query_start.elapsed();

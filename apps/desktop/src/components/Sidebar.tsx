@@ -8,12 +8,14 @@ import {
   LayoutDashboard,
   Settings,
 } from 'lucide-react';
+import { AnimatedNumber } from './AnimatedNumber';
 import { formatCost } from '../lib/format';
 import { useWorkspaceStore, type NavPage } from '../stores/workspaceStore';
 import type { TraySummary } from '../types/ipc';
 
-interface SidebarProps {
+export interface SidebarProps {
   traySummary?: TraySummary;
+  hasBackdrop?: boolean;
 }
 
 const ANALYTICS_NAV: Array<{ id: NavPage; label: string; icon: typeof LayoutDashboard }> = [
@@ -30,8 +32,10 @@ const SYSTEM_NAV: Array<{ id: NavPage; label: string; icon: typeof Database }> =
   { id: 'preferences', label: '偏好设置', icon: Settings },
 ];
 
-export function Sidebar({ traySummary }: SidebarProps) {
+export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
   const { activePage, setActivePage, currency, usdToCnyRate } = useWorkspaceStore();
+
+  const borderToken = hasBackdrop ? 'var(--border-hairline)' : 'var(--border-subtle)';
 
   const renderItem = (item: { id: NavPage; label: string; icon: typeof LayoutDashboard }) => {
     const active = activePage === item.id;
@@ -40,10 +44,10 @@ export function Sidebar({ traySummary }: SidebarProps) {
       <button
         key={item.id}
         type="button"
+        data-selected={active ? 'true' : undefined}
         onClick={() => setActivePage(item.id)}
-        className="w-full flex items-center gap-2.5 px-2.5 py-1.5 text-left rounded text-[12.5px] transition-colors cursor-pointer"
+        className="row-interactive w-full flex items-center gap-2.5 px-2.5 py-1.5 text-left rounded text-[12.5px] cursor-pointer"
         style={{
-          backgroundColor: active ? 'var(--bg-hover)' : 'transparent',
           color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
           fontWeight: active ? 500 : 400,
         }}
@@ -61,11 +65,13 @@ export function Sidebar({ traySummary }: SidebarProps) {
 
   return (
     <aside
-      className="flex flex-col justify-between shrink-0 h-full"
+      className="relative z-10 flex flex-col justify-between shrink-0 h-full"
       style={{
         width: '208px',
-        backgroundColor: 'var(--bg-sidebar)',
-        borderRight: '1px solid var(--border-subtle)',
+        backgroundColor: hasBackdrop ? 'var(--bg-translucent-chrome)' : 'var(--bg-sidebar)',
+        backdropFilter: hasBackdrop ? 'blur(14px)' : undefined,
+        WebkitBackdropFilter: hasBackdrop ? 'blur(14px)' : undefined,
+        borderRight: `1px solid ${borderToken}`,
       }}
     >
       <div className="p-2.5 space-y-5 overflow-y-auto">
@@ -81,10 +87,13 @@ export function Sidebar({ traySummary }: SidebarProps) {
 
         <div>
           <div
-            className="px-2.5 pb-1.5 text-[10.5px] font-semibold uppercase tracking-wider"
+            className="px-2.5 pb-1.5 flex items-center justify-between text-[10.5px] font-semibold uppercase tracking-wider"
             style={{ color: 'var(--text-muted)' }}
           >
-            系统配置
+            <span>系统配置</span>
+            <span className="font-mono text-[10px] font-normal lowercase tabular-nums">
+              v0.1.1
+            </span>
           </div>
           <nav className="space-y-0.5">{SYSTEM_NAV.map(renderItem)}</nav>
         </div>
@@ -93,12 +102,15 @@ export function Sidebar({ traySummary }: SidebarProps) {
       {/* Bottom Pinned 1-Line Live Summary */}
       <div
         className="px-3 py-2.5 flex items-center justify-between text-[11.5px] tabular-nums"
-        style={{ borderTop: '1px solid var(--border-subtle)' }}
+        style={{ borderTop: `1px solid ${borderToken}` }}
       >
         <span style={{ color: 'var(--text-secondary)' }}>
           今日{' '}
           <strong style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
-            {formatCost(traySummary?.today_cost_micro_usd ?? 0, currency, usdToCnyRate)}
+            <AnimatedNumber
+              value={traySummary?.today_cost_micro_usd ?? 0}
+              formatter={(microUsd) => formatCost(microUsd, currency, usdToCnyRate)}
+            />
           </strong>
         </span>
         <span style={{ color: 'var(--text-muted)' }}>

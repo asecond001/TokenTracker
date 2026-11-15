@@ -267,7 +267,20 @@ pub struct SubscriptionPlan {
     pub enabled: bool,
     pub monthly_fee_micro_usd: i64,
     pub windows: Vec<SubscriptionWindowRule>,
+    #[serde(default)]
+    pub is_user_configured: bool,
     pub updated_at_ms: i64,
+}
+
+/// Reference template used only to prefill a user-configured subscription form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionPlanTemplate {
+    pub template_id: String,
+    pub provider_id: String,
+    pub plan_name: String,
+    pub monthly_fee_micro_usd: i64,
+    pub windows: Vec<SubscriptionWindowRule>,
+    pub description: String,
 }
 
 /// Official rate limit window snapshot parsed from provider local logs (e.g. Codex).
@@ -281,8 +294,28 @@ pub struct ObservedRateLimitWindow {
     pub observed_at_ms: i64,
 }
 
+fn default_bg_mode() -> String {
+    "none".to_string()
+}
+
+fn default_bg_preset_id() -> String {
+    "aurora_slate".to_string()
+}
+
+fn default_bg_opacity() -> f64 {
+    0.18
+}
+
+fn default_bg_blur_px() -> i64 {
+    16
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Persisted desktop/workspace user preferences.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppPreferences {
     pub currency: CurrencyCode,
     pub usd_to_cny_rate: String,
@@ -292,6 +325,24 @@ pub struct AppPreferences {
     pub otlp_enabled: bool,
     pub otlp_port: u16,
     pub device_display_name: String,
+    #[serde(default = "default_bg_mode")]
+    pub bg_mode: String,
+    #[serde(default)]
+    pub bg_image_path: Option<String>,
+    #[serde(default = "default_bg_preset_id")]
+    pub bg_preset_id: String,
+    #[serde(default = "default_bg_opacity")]
+    pub bg_opacity: f64,
+    #[serde(default = "default_bg_blur_px")]
+    pub bg_blur_px: i64,
+    #[serde(default = "default_true")]
+    pub auto_sync_pricing: bool,
+    #[serde(default = "default_true")]
+    pub exchange_rate_auto: bool,
+    #[serde(default)]
+    pub last_rate_sync_at_ms: Option<i64>,
+    #[serde(default)]
+    pub last_pricing_sync_at_ms: Option<i64>,
     pub updated_at_ms: i64,
 }
 
@@ -306,7 +357,30 @@ impl Default for AppPreferences {
             otlp_enabled: false,
             otlp_port: 4318,
             device_display_name: "win-workstation".to_string(),
+            bg_mode: default_bg_mode(),
+            bg_image_path: None,
+            bg_preset_id: default_bg_preset_id(),
+            bg_opacity: default_bg_opacity(),
+            bg_blur_px: default_bg_blur_px(),
+            auto_sync_pricing: true,
+            exchange_rate_auto: true,
+            last_rate_sync_at_ms: None,
+            last_pricing_sync_at_ms: None,
             updated_at_ms: 0,
         }
     }
+}
+
+/// Result summary returned after synchronizing remote USD->CNY rate and public model pricing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSyncResult {
+    pub rate_updated: bool,
+    pub usd_to_cny_rate: String,
+    pub pricing_updated: bool,
+    pub synced_models_count: usize,
+    pub recomputed_events_count: usize,
+    pub synced_at_ms: i64,
+    pub rate_source: Option<String>,
+    pub pricing_source: Option<String>,
+    pub warning: Option<String>,
 }

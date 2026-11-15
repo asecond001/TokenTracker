@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   createColumnHelper,
@@ -10,14 +10,69 @@ import {
 } from '@tanstack/react-table';
 import { save } from '@tauri-apps/plugin-dialog';
 import type { EChartsOption } from 'echarts';
-import { ChevronLeft, ChevronRight, Download } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, Download } from 'lucide-react';
+import { AnimatedNumber } from '../components/AnimatedNumber';
 import { EChartBox } from '../components/EChartBox';
+import { useChartTheme } from '../lib/chartTheme';
 import { formatCost, formatExactInt, formatTokens } from '../lib/format';
 import { ipc, isTauriRuntime } from '../lib/ipc';
 import { useWorkspaceStore } from '../stores/workspaceStore';
-import type { MonthlyDailyLedgerRow } from '../types/ipc';
+import type { HeatmapDayCell, MonthlyDailyLedgerRow } from '../types/ipc';
 
 const colHelper = createColumnHelper<MonthlyDailyLedgerRow>();
+
+export function computeHeatmapIntensityLevels(cells: HeatmapDayCell[]): Map<string, number> {
+  const levels = new Map<string, number>();
+  const positiveTokens = cells
+    .filter((c) => c.total_tokens > 0)
+    .map((c) => c.total_tokens)
+    .sort((a, b) => a - b);
+
+  const pickQuantile = (p: number): number => {
+    if (positiveTokens.length === 0) return 0;
+    const idx = Math.min(
+      positiveTokens.length - 1,
+      Math.max(0, Math.floor((positiveTokens.length - 1) * p))
+    );
+    return positiveTokens[idx];
+  };
+
+  const q25 = pickQuantile(0.25);
+  const q50 = pickQuantile(0.5);
+  const q75 = pickQuantile(0.75);
+  const uniformPositive = positiveTokens.length > 0 && q75 <= q25;
+
+  for (const c of cells) {
+    if (c.total_tokens <= 0) {
+      levels.set(c.date, c.requests > 0 ? 1 : 0);
+      continue;
+    }
+    if (uniformPositive) {
+      levels.set(c.date, 3);
+      continue;
+    }
+    if (c.total_tokens <= q25) {
+      levels.set(c.date, 1);
+    } else if (c.total_tokens <= q50) {
+      levels.set(c.date, 2);
+    } else if (c.total_tokens <= q75) {
+      levels.set(c.date, 3);
+    } else {
+      levels.set(c.date, 4);
+    }
+  }
+
+  return levels;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
 
 export function MonthlyPage() {
   const now = new Date();
@@ -25,8 +80,10 @@ export function MonthlyPage() {
   const [month, setMonth] = useState(now.getMonth() + 1);
   const [sorting, setSorting] = useState<SortingState>([{ id: 'date', desc: true }]);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const [roiExpanded, setRoiExpanded] = useState(true);
 
   const { providerFilter, currency, usdToCnyRate, tzOffsetMinutes } = useWorkspaceStore();
+  const chartTheme = useChartTheme();
 
   const query = useMemo(
     () => ({
@@ -42,6 +99,11 @@ export function MonthlyPage() {
     queryKey: ['monthly', query],
     queryFn: () => ipc.getMonthly(query),
   });
+
+  const costFormatter = useCallback(
+    (value: number) => formatCost(value, currency, usdToCnyRate),
+    [currency, usdToCnyRate]
+  );
 
   const shiftMonth = (delta: number) => {
     const d = new Date(year, month - 1 + delta, 1);
@@ -89,9 +151,10 @@ export function MonthlyPage() {
       startDateObj.getMonth() + 1
     ).padStart(2, '0')}-${String(startDateObj.getDate()).padStart(2, '0')}`;
 
-    const maxTok = Math.max(1, ...cells.map((c) => c.total_tokens));
+    const intensityLevels = computeHeatmapIntensityLevels(cells);
     const seriesData = cells.map((c) => [
       c.date,
+      intensityLevels.get(c.date) ?? 0,
       c.total_tokens,
       c.cost_micro_usd,
       c.top_model ?? '—',
@@ -100,25 +163,35 @@ export function MonthlyPage() {
 
     return {
       backgroundColor: 'transparent',
+      animationDuration: 280,
+      animationDurationUpdate: 260,
       tooltip: {
         position: 'top',
-        backgroundColor: '#161922',
-        borderColor: '#2d3343',
-        textStyle: { color: '#eceff4', fontSize: 12 },
+        backgroundColor: chartTheme.tooltipBg,
+        borderColor: chartTheme.tooltipBorder,
+        textStyle: { color: chartTheme.tooltipText, fontSize: 12 },
         formatter: (params: unknown) => {
-          const p = params as { value?: [string, number, number, string, number] };
+          const p = params as {
+            value?: [string, number, number, number, string, number];
+          };
           if (!p.value) return '';
-          const [date, tok, costMicro, topModel, reqs] = p.value;
-          return `${date}<br/>Token: <b>${formatTokens(tok)}</b> (${reqs} 次)<br/>折算费用: <b>${formatCost(costMicro, currency, usdToCnyRate)}</b><br/>主用模型: ${topModel}`;
+          const [date, , tok, costMicro, topModel, reqs] = p.value;
+          const tokenText =
+            tok === 0 && reqs > 0 ? '0 (仅可观测步数)' : formatTokens(tok);
+          return `${escapeHtml(date)}<br/>Token: <b>${tokenText}</b> (${formatExactInt(reqs)} 次)<br/>折算费用: <b>${formatCost(costMicro, currency, usdToCnyRate)}</b><br/>主用模型: ${escapeHtml(topModel)}`;
         },
       },
       visualMap: {
-        min: 0,
-        max: maxTok,
+        type: 'piecewise',
+        dimension: 1,
         show: false,
-        inRange: {
-          color: ['#1a1e28', '#1e3a5f', '#2563eb', '#10b981', '#34d399'],
-        },
+        pieces: [
+          { value: 0, color: chartTheme.heatmapEmptyColor },
+          { value: 1, color: chartTheme.heatmapRamp[0] },
+          { value: 2, color: chartTheme.heatmapRamp[1] },
+          { value: 3, color: chartTheme.heatmapRamp[2] },
+          { value: 4, color: chartTheme.heatmapRamp[3] },
+        ],
       },
       calendar: {
         top: 24,
@@ -129,23 +202,24 @@ export function MonthlyPage() {
         range: [startDay, endDay],
         splitLine: { show: false },
         itemStyle: {
-          color: '#141720',
+          color: chartTheme.heatmapEmptyColor,
           borderWidth: 2,
-          borderColor: '#0c0d10',
+          borderColor: chartTheme.heatmapBorderColor,
         },
         yearLabel: { show: false },
-        monthLabel: { color: '#6b7280', fontSize: 10 },
-        dayLabel: { color: '#6b7280', fontSize: 10, firstDay: 1 },
+        monthLabel: { color: chartTheme.textMuted, fontSize: 10 },
+        dayLabel: { color: chartTheme.textMuted, fontSize: 10, firstDay: 1 },
       },
       series: [
         {
+          id: 'monthly-heatmap-365d',
           type: 'heatmap',
           coordinateSystem: 'calendar',
           data: seriesData,
         },
       ],
     };
-  }, [data, year, month, currency, usdToCnyRate]);
+  }, [data, year, month, currency, usdToCnyRate, chartTheme]);
 
   const columns = useMemo(
     () => [
@@ -217,6 +291,7 @@ export function MonthlyPage() {
 
   const apiVal = data?.api_equivalent_cost_micro_usd ?? 0;
   const subFee = data?.subscription_monthly_fee_micro_usd ?? 0;
+  const hasUserSubscriptionFee = subFee > 0;
   const maxVal = Math.max(1, apiVal, subFee);
   const apiBarWidth = (apiVal / maxVal) * 100;
   const feeBarWidth = (subFee / maxVal) * 100;
@@ -226,12 +301,12 @@ export function MonthlyPage() {
       {/* Header + Month Picker + Export */}
       <section
         className="flex flex-wrap items-center justify-between gap-4 pb-5"
-        style={{ borderBottom: '1px solid var(--border-subtle)' }}
+        style={{ borderBottom: '1px solid var(--border-hairline)' }}
       >
         <div>
           <h1 className="text-[16px] font-semibold tracking-tight">月度账单与活跃热力图</h1>
           <p className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
-            对比当月按量 API 公开定价等效价值与固定订阅月费支出，并支持标准报表导出
+            汇总当月按量 API 等效价值、Token 消耗与 365 天活跃分布，支持 CSV / JSON 标准报表导出
           </p>
         </div>
 
@@ -240,13 +315,13 @@ export function MonthlyPage() {
             className="flex items-center rounded"
             style={{
               backgroundColor: 'var(--bg-sidebar)',
-              border: '1px solid var(--border-subtle)',
+              border: '1px solid var(--border-hairline)',
             }}
           >
             <button
               type="button"
               onClick={() => shiftMonth(-1)}
-              className="p-1.5 hover:bg-white/5 cursor-pointer"
+              className="btn-interactive p-1.5 rounded-l cursor-pointer"
               aria-label="上一个月"
             >
               <ChevronLeft className="w-3.5 h-3.5" />
@@ -257,7 +332,7 @@ export function MonthlyPage() {
             <button
               type="button"
               onClick={() => shiftMonth(1)}
-              className="p-1.5 hover:bg-white/5 cursor-pointer"
+              className="btn-interactive p-1.5 rounded-r cursor-pointer"
               aria-label="下一个月"
             >
               <ChevronRight className="w-3.5 h-3.5" />
@@ -267,9 +342,9 @@ export function MonthlyPage() {
           <button
             type="button"
             onClick={() => void handleExport('csv')}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] rounded cursor-pointer hover:bg-white/5"
+            className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] rounded cursor-pointer"
             style={{
-              border: '1px solid var(--border-subtle)',
+              border: '1px solid var(--border-hairline)',
               color: 'var(--text-primary)',
             }}
           >
@@ -279,9 +354,9 @@ export function MonthlyPage() {
           <button
             type="button"
             onClick={() => void handleExport('json')}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] rounded cursor-pointer hover:bg-white/5"
+            className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] rounded cursor-pointer"
             style={{
-              border: '1px solid var(--border-subtle)',
+              border: '1px solid var(--border-hairline)',
               color: 'var(--text-primary)',
             }}
           >
@@ -304,70 +379,90 @@ export function MonthlyPage() {
         </div>
       )}
 
-      {/* Monthly ROI Horizontal Comparison Bar */}
+      {/* Objective Top 4-Metric Strip (Zero-Assumption: No Subscription Fee / ROI Prominence Here) */}
       <section
-        className="pb-6 space-y-4"
-        style={{ borderBottom: '1px solid var(--border-subtle)' }}
+        className="grid grid-cols-4 pb-6"
+        style={{ borderBottom: '1px solid var(--border-hairline)' }}
       >
-        <div className="flex flex-wrap items-baseline justify-between gap-4">
-          <div className="flex items-baseline gap-6 tabular-nums">
-            <div>
-              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                当月 API 等效价值
-              </div>
-              <div className="text-[22px] font-semibold">
-                {isLoading ? '…' : formatCost(apiVal, currency, usdToCnyRate)}
-              </div>
-            </div>
-            <div style={{ color: 'var(--text-muted)' }}>vs</div>
-            <div>
-              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                已启用订阅月费总支出
-              </div>
-              <div className="text-[22px] font-semibold" style={{ color: 'var(--text-secondary)' }}>
-                {isLoading ? '…' : formatCost(subFee, currency, usdToCnyRate)}
-              </div>
-            </div>
+        <div className="pr-5">
+          <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+            当月按量 API 等效价值 ({currency})
           </div>
-
-          <div className="text-right tabular-nums">
-            <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-              订阅回本效率 / 缓存节省
-            </div>
-            <div className="text-[14px] font-semibold" style={{ color: 'var(--accent-emerald)' }}>
-              {data?.roi_multiplier !== null && data?.roi_multiplier !== undefined
-                ? `等效产出 ${data.roi_multiplier.toFixed(2)}x 订阅月费`
-                : '按量计费模式'}
-              {' · '}
-              <span style={{ color: 'var(--text-secondary)', fontWeight: 400 }}>
-                缓存节省 {formatCost(data?.month_cache_saved_micro_usd ?? 0, currency, usdToCnyRate)}
-              </span>
-            </div>
+          <div className="mt-1.5 text-[24px] font-semibold tracking-tight tabular-nums">
+            {isLoading && !data ? (
+              '…'
+            ) : (
+              <AnimatedNumber value={apiVal} formatter={costFormatter} />
+            )}
+          </div>
+          <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            按官方公开百万 Token 定价折算
           </div>
         </div>
 
-        <div className="space-y-2">
-          <div className="flex items-center gap-3">
-            <span className="w-24 text-[11.5px]" style={{ color: 'var(--text-secondary)' }}>
-              API 等效产出
-            </span>
-            <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ backgroundColor: 'var(--border-subtle)' }}>
-              <div
-                className="h-full rounded-full"
-                style={{ width: `${apiBarWidth}%`, backgroundColor: 'var(--accent-emerald)' }}
-              />
-            </div>
+        <div
+          className="px-5"
+          style={{ borderLeft: '1px solid var(--border-hairline)' }}
+        >
+          <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+            当月总 Token
           </div>
-          <div className="flex items-center gap-3">
-            <span className="w-24 text-[11.5px]" style={{ color: 'var(--text-secondary)' }}>
-              订阅月费基准
-            </span>
-            <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ backgroundColor: 'var(--border-subtle)' }}>
-              <div
-                className="h-full rounded-full"
-                style={{ width: `${feeBarWidth}%`, backgroundColor: 'var(--accent-primary)' }}
+          <div className="mt-1.5 text-[24px] font-semibold tracking-tight tabular-nums">
+            {isLoading && !data ? (
+              '…'
+            ) : (
+              <AnimatedNumber value={data?.month_total_tokens ?? 0} formatter={formatTokens} />
+            )}
+          </div>
+          <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            Input、Output 与缓存汇总
+          </div>
+        </div>
+
+        <div
+          className="px-5"
+          style={{ borderLeft: '1px solid var(--border-hairline)' }}
+        >
+          <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+            缓存节省金额 ({currency})
+          </div>
+          <div
+            className="mt-1.5 text-[24px] font-semibold tracking-tight tabular-nums"
+            style={{ color: 'var(--accent-emerald)' }}
+          >
+            {isLoading && !data ? (
+              '…'
+            ) : (
+              <AnimatedNumber
+                value={data?.month_cache_saved_micro_usd ?? 0}
+                formatter={costFormatter}
               />
-            </div>
+            )}
+          </div>
+          <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            Prompt Cache 命中净减免估算
+          </div>
+        </div>
+
+        <div
+          className="pl-5"
+          style={{ borderLeft: '1px solid var(--border-hairline)' }}
+        >
+          <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+            有效请求数
+          </div>
+          <div className="mt-1.5 text-[24px] font-semibold tracking-tight tabular-nums">
+            {isLoading && !data ? (
+              '…'
+            ) : (
+              <AnimatedNumber
+                value={data?.month_total_requests ?? 0}
+                formatter={formatExactInt}
+              />
+            )}
+          </div>
+          <div className="mt-1 text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+            {data?.daily_ledger.length ?? 0} 个活跃记账日
           </div>
         </div>
       </section>
@@ -375,13 +470,34 @@ export function MonthlyPage() {
       {/* 365-Day Calendar Activity Heatmap */}
       <section
         className="pb-6"
-        style={{ borderBottom: '1px solid var(--border-subtle)' }}
+        style={{ borderBottom: '1px solid var(--border-hairline)' }}
       >
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-[13.5px] font-semibold">365 天活跃度热力图</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+          <div className="flex items-center gap-3">
+            <h2 className="text-[13.5px] font-semibold">365 天活跃度热力图</h2>
+            <div
+              data-testid="heatmap-legend"
+              className="inline-flex items-center gap-1 text-[10.5px]"
+              style={{ color: 'var(--text-muted)' }}
+              aria-label="热力图活跃等级图例"
+            >
+              <span>少</span>
+              {[chartTheme.heatmapEmptyColor, ...chartTheme.heatmapRamp].map((color, idx) => (
+                <span
+                  key={idx}
+                  className="inline-block w-2.5 h-2.5 rounded-[2px]"
+                  style={{
+                    backgroundColor: color,
+                    border: '1px solid var(--border-hairline)',
+                  }}
+                />
+              ))}
+              <span>多</span>
+            </div>
+          </div>
           <span className="text-[11.5px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
             本月累计 {formatTokens(data?.month_total_tokens ?? 0)} ·{' '}
-            {(data?.month_total_requests ?? 0).toLocaleString('en-US')} 次请求
+            {formatExactInt(data?.month_total_requests ?? 0)} 次请求
           </span>
         </div>
         <EChartBox option={heatmapOption} height={155} />
@@ -404,7 +520,7 @@ export function MonthlyPage() {
                     className="text-[11px] font-medium uppercase tracking-wider"
                     style={{
                       color: 'var(--text-muted)',
-                      borderBottom: '1px solid var(--border-subtle)',
+                      borderBottom: '1px solid var(--border-hairline)',
                     }}
                   >
                     {hg.headers.map((header) => (
@@ -432,8 +548,8 @@ export function MonthlyPage() {
                 {table.getRowModel().rows.map((row) => (
                   <tr
                     key={row.id}
-                    className="hover:bg-white/[0.02]"
-                    style={{ borderBottom: '1px solid var(--border-subtle)' }}
+                    className="row-interactive"
+                    style={{ borderBottom: '1px solid var(--border-hairline)' }}
                   >
                     {row.getVisibleCells().map((cell) => (
                       <td
@@ -454,6 +570,96 @@ export function MonthlyPage() {
           </div>
         )}
       </section>
+
+      {/* Secondary Collapsible Subscription ROI Reference (Only When User Configured Monthly Fee > 0) */}
+      {hasUserSubscriptionFee && (
+        <section
+          className="pt-5"
+          style={{ borderTop: '1px solid var(--border-hairline)' }}
+        >
+          <button
+            type="button"
+            onClick={() => setRoiExpanded((prev) => !prev)}
+            className="row-interactive w-full flex items-center justify-between py-2 px-1 rounded cursor-pointer text-left"
+          >
+            <div className="flex items-center gap-2">
+              {roiExpanded ? (
+                <ChevronDown className="w-3.5 h-3.5" style={{ color: 'var(--text-muted)' }} />
+              ) : (
+                <ChevronRight className="w-3.5 h-3.5" style={{ color: 'var(--text-muted)' }} />
+              )}
+              <span className="text-[12.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                订阅回本参考（基于您录入的订阅月费计算）
+              </span>
+            </div>
+
+            <div className="flex items-center gap-4 text-[12px] tabular-nums">
+              <span style={{ color: 'var(--text-muted)' }}>
+                已录入月费 {formatCost(subFee, currency, usdToCnyRate)}
+              </span>
+              {data?.roi_multiplier !== null && data?.roi_multiplier !== undefined && (
+                <span className="font-medium" style={{ color: 'var(--accent-emerald)' }}>
+                  等效产出 {data.roi_multiplier.toFixed(2)}x
+                </span>
+              )}
+            </div>
+          </button>
+
+          {roiExpanded && (
+            <div className="mt-3 pl-6 pr-1 space-y-2.5">
+              <div className="flex items-center gap-3">
+                <span className="w-28 text-[11.5px]" style={{ color: 'var(--text-secondary)' }}>
+                  当月 API 等效产出
+                </span>
+                <div
+                  className="flex-1 h-1.5 rounded-full overflow-hidden"
+                  style={{ backgroundColor: 'var(--border-hairline)' }}
+                >
+                  <div
+                    className="h-full rounded-full"
+                    style={{
+                      width: `${apiBarWidth}%`,
+                      backgroundColor: 'var(--accent-emerald)',
+                      transition: 'width 280ms cubic-bezier(0.16, 1, 0.3, 1)',
+                    }}
+                  />
+                </div>
+                <span
+                  className="w-24 text-right text-[11.5px] tabular-nums"
+                  style={{ color: 'var(--text-primary)' }}
+                >
+                  {formatCost(apiVal, currency, usdToCnyRate)}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <span className="w-28 text-[11.5px]" style={{ color: 'var(--text-secondary)' }}>
+                  订阅月费基准
+                </span>
+                <div
+                  className="flex-1 h-1.5 rounded-full overflow-hidden"
+                  style={{ backgroundColor: 'var(--border-hairline)' }}
+                >
+                  <div
+                    className="h-full rounded-full"
+                    style={{
+                      width: `${feeBarWidth}%`,
+                      backgroundColor: 'var(--accent-primary)',
+                      transition: 'width 280ms cubic-bezier(0.16, 1, 0.3, 1)',
+                    }}
+                  />
+                </div>
+                <span
+                  className="w-24 text-right text-[11.5px] tabular-nums"
+                  style={{ color: 'var(--text-secondary)' }}
+                >
+                  {formatCost(subFee, currency, usdToCnyRate)}
+                </span>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }

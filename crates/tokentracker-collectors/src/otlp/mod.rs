@@ -352,14 +352,7 @@ pub fn parse_otlp_logs_json(payload: &Value, device_id: &str) -> Vec<NormalizedU
                     .get("duration_ms")
                     .and_then(|s| s.parse::<i64>().ok())
                     .filter(|&d| d > 0);
-                let output_tps = duration_ms.and_then(|dur| {
-                    let eff = output + reasoning;
-                    if eff > 0 && dur > 0 {
-                        Some(eff as f64 / (dur as f64 / 1000.0))
-                    } else {
-                        None
-                    }
-                });
+                let output_tps = crate::providers::compute_tps(output + reasoning, duration_ms);
 
                 let cost_micro_usd = attrs
                     .get("cost_usd")

@@ -1,13 +1,15 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 use tokentracker_collectors::{
-    start_loopback_otlp_server, CollectorCoordinator, CredentialManager, OsKeyringStore,
-    OtlpServerHandle,
+    start_loopback_otlp_server, sync_catalog_and_rate, CollectorCoordinator, CredentialManager,
+    OsKeyringStore, OtlpServerHandle,
 };
-use tokentracker_core::Storage;
+use tokentracker_core::domain::CatalogSyncResult;
+use tokentracker_core::{CoreResult, Storage};
 
 /// Resolve `%LOCALAPPDATA%\TokenTracker\tokentracker.db` (PLAN.md §4).
 pub fn default_db_path() -> PathBuf {
@@ -32,6 +34,7 @@ pub struct AppState {
     pub credentials: Arc<dyn CredentialManager>,
     pub otlp_handle: Mutex<Option<OtlpServerHandle>>,
     pub watcher_shutdown_tx: Mutex<Option<watch::Sender<bool>>>,
+    pub catalog_sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -49,21 +52,60 @@ impl AppState {
             credentials,
             otlp_handle: Mutex::new(None),
             watcher_shutdown_tx: Mutex::new(None),
+            catalog_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
+    }
+
+    pub async fn run_catalog_sync(&self, app: &AppHandle, force: bool) -> CoreResult<CatalogSyncResult> {
+        run_catalog_sync_shared(&self.storage, &self.catalog_sync_lock, app, force).await
     }
 
     pub fn start_background_services(&self, app_handle: AppHandle) {
         let (tx, rx) = watch::channel(false);
+        let mut catalog_rx = tx.subscribe();
+        let watcher_app = app_handle.clone();
         let coord = self.coordinator.clone();
         tauri::async_runtime::spawn(async move {
             coord
                 .run_background_watcher_with_hook(rx, move |report| {
                     if report.events_inserted > 0 {
-                        let _ = app_handle.emit("usage-updated", report);
+                        let _ = watcher_app.emit("usage-updated", report);
                     }
                 })
                 .await;
         });
+
+        let sync_storage = self.storage.clone();
+        let sync_lock = self.catalog_sync_lock.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                _ = catalog_rx.changed() => {
+                    return;
+                }
+            }
+
+            let _ = run_catalog_sync_shared(&sync_storage, &sync_lock, &app_handle, false).await;
+
+            let mut interval = tokio::time::interval(Duration::from_secs(6 * 3_600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Consume immediate initial tick since startup sync just ran
+            interval.tick().await;
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let _ = run_catalog_sync_shared(&sync_storage, &sync_lock, &app_handle, false).await;
+                    }
+                    _ = catalog_rx.changed() => {
+                        if *catalog_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
         if let Ok(mut guard) = self.watcher_shutdown_tx.lock() {
             *guard = Some(tx);
         }
@@ -157,4 +199,23 @@ impl AppState {
             }
         }
     }
+}
+
+pub async fn run_catalog_sync_shared(
+    storage: &Storage,
+    lock: &tokio::sync::Mutex<()>,
+    app: &AppHandle,
+    force: bool,
+) -> CoreResult<CatalogSyncResult> {
+    let _guard = lock.lock().await;
+    let res = sync_catalog_and_rate(storage, force).await?;
+    if res.rate_updated {
+        if let Ok(prefs) = storage.get_preferences() {
+            let _ = app.emit("preferences-updated", &prefs);
+        }
+    }
+    if res.rate_updated || res.pricing_updated {
+        let _ = app.emit("usage-updated", &res);
+    }
+    Ok(res)
 }

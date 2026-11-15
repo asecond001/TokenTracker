@@ -5,6 +5,8 @@
   "windows": ["main", "tray-popup"],
   "permissions": [
     "core:default",
+    "core:app:allow-set-app-theme",
+    "core:window:allow-set-theme",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",

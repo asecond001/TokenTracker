@@ -1,4 +1,6 @@
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { create } from 'zustand';
+import { isTauriRuntime } from '../lib/ipc';
 import type { AnalyticsFilter, CurrencyCode, ThemeMode } from '../types/ipc';
 
 export type NavPage =
@@ -11,7 +13,88 @@ export type NavPage =
   | 'sources'
   | 'preferences';
 
-export type TimePreset = 'today' | '7d' | '30d' | 'month' | 'custom';
+export type TimePreset = 'today' | '7d' | '30d' | 'month' | 'all' | 'custom';
+export type ResolvedTheme = 'dark' | 'light';
+
+export interface CustomTimeRange {
+  start?: string;
+  end?: string;
+}
+
+export interface ComputedTimeRange {
+  start_ms: number;
+  end_ms: number;
+  all_time: boolean;
+}
+
+export function resolveThemeMode(mode: ThemeMode | string): ResolvedTheme {
+  if (mode === 'light') {
+    return 'light';
+  }
+  if (
+    mode === 'system' &&
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function'
+  ) {
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  }
+  return 'dark';
+}
+
+function applyDomAndNativeTheme(mode: ThemeMode, resolved: ResolvedTheme): void {
+  if (typeof document !== 'undefined') {
+    document.documentElement.dataset.theme = resolved;
+  }
+  if (isTauriRuntime()) {
+    try {
+      const nativeTheme = mode === 'system' ? null : mode;
+      void Promise.resolve(getCurrentWindow().setTheme(nativeTheme)).catch(() => {});
+    } catch {
+      // Ignore if Tauri native window handle is unavailable (e.g. unit tests)
+    }
+  }
+}
+
+export function syncDocumentAndNativeTheme(mode: ThemeMode): ResolvedTheme {
+  const resolved = resolveThemeMode(mode);
+  applyDomAndNativeTheme(mode, resolved);
+  if (useWorkspaceStore.getState().resolvedTheme !== resolved) {
+    useWorkspaceStore.setState({ resolvedTheme: resolved });
+  }
+  return resolved;
+}
+
+export function computeTimeRange(
+  preset: TimePreset,
+  customRange?: CustomTimeRange
+): ComputedTimeRange {
+  const now = new Date();
+  const endMs = now.getTime();
+
+  switch (preset) {
+    case 'today': {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+      return { start_ms: d.getTime(), end_ms: endMs, all_time: false };
+    }
+    case '7d':
+      return { start_ms: endMs - 7 * 86_400_000, end_ms: endMs, all_time: false };
+    case '30d':
+      return { start_ms: endMs - 30 * 86_400_000, end_ms: endMs, all_time: false };
+    case 'month': {
+      const d = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+      return { start_ms: d.getTime(), end_ms: endMs, all_time: false };
+    }
+    case 'all':
+      return { start_ms: 0, end_ms: endMs, all_time: true };
+    case 'custom': {
+      const s = customRange?.start ? new Date(`${customRange.start}T00:00:00`) : new Date(NaN);
+      const e = customRange?.end ? new Date(`${customRange.end}T23:59:59.999`) : new Date(NaN);
+      const startMs = Number.isNaN(s.getTime()) ? endMs - 7 * 86_400_000 : s.getTime();
+      const resolvedEndMs = Number.isNaN(e.getTime()) ? endMs : e.getTime();
+      return { start_ms: startMs, end_ms: resolvedEndMs, all_time: false };
+    }
+  }
+}
 
 interface WorkspaceState {
   activePage: NavPage;
@@ -22,6 +105,7 @@ interface WorkspaceState {
   currency: CurrencyCode;
   usdToCnyRate: string;
   theme: ThemeMode;
+  resolvedTheme: ResolvedTheme;
   tzOffsetMinutes: number;
 
   setActivePage: (page: NavPage) => void;
@@ -53,6 +137,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   currency: 'USD',
   usdToCnyRate: '7.25',
   theme: 'dark',
+  resolvedTheme: 'dark',
   tzOffsetMinutes: new Date().getTimezoneOffset() * -1,
 
   setActivePage: (activePage) => set({ activePage }),
@@ -62,46 +147,25 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   setProviderFilter: (providerFilter) => set({ providerFilter }),
   setCurrency: (currency) => set({ currency }),
   setUsdToCnyRate: (usdToCnyRate) => set({ usdToCnyRate }),
-  setTheme: (theme) => set({ theme }),
+  setTheme: (theme) => {
+    const resolvedTheme = resolveThemeMode(theme);
+    applyDomAndNativeTheme(theme, resolvedTheme);
+    set({ theme, resolvedTheme });
+  },
 
   getFilter: () => {
     const state = get();
-    const now = new Date();
-    const endMs = now.getTime();
-    let startMs: number;
-    let resolvedEndMs = endMs;
-
-    switch (state.timePreset) {
-      case 'today': {
-        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-        startMs = d.getTime();
-        break;
-      }
-      case '7d':
-        startMs = endMs - 7 * 86_400_000;
-        break;
-      case '30d':
-        startMs = endMs - 30 * 86_400_000;
-        break;
-      case 'month': {
-        const d = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-        startMs = d.getTime();
-        break;
-      }
-      case 'custom': {
-        const s = new Date(`${state.customStartDate}T00:00:00`);
-        const e = new Date(`${state.customEndDate}T23:59:59.999`);
-        startMs = Number.isNaN(s.getTime()) ? endMs - 7 * 86_400_000 : s.getTime();
-        resolvedEndMs = Number.isNaN(e.getTime()) ? endMs : e.getTime();
-        break;
-      }
-    }
+    const range = computeTimeRange(state.timePreset, {
+      start: state.customStartDate,
+      end: state.customEndDate,
+    });
 
     return {
-      start_ms: startMs,
-      end_ms: resolvedEndMs,
+      start_ms: range.start_ms,
+      end_ms: range.end_ms,
       provider_id: state.providerFilter === 'all' ? null : state.providerFilter,
       tz_offset_minutes: state.tzOffsetMinutes,
+      all_time: range.all_time,
     };
   },
 }));

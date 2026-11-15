@@ -3,12 +3,14 @@ import type {
   AnalyticsFilter,
   AppPreferences,
   BootstrapState,
+  CatalogSyncResult,
   ExportReportResult,
   IngestionCursor,
   ModelPricingEntry,
   ModelStatsReport,
   MonthlyQuery,
   MonthlyReport,
+  ObservedRateLimitWindow,
   OfficialApiReconcileResult,
   OverviewReport,
   ProviderConfig,
@@ -16,6 +18,7 @@ import type {
   SpeedLatencyReport,
   SubscriptionPlan,
   SubscriptionPlanStatus,
+  SubscriptionPlanTemplate,
   SyncEnvelopeV1,
   TraySummary,
   TrendsQuery,
@@ -46,8 +49,225 @@ function defaultPreviewPreferences(now: number): AppPreferences {
     otlp_enabled: false,
     otlp_port: 4318,
     device_display_name: 'win-workstation',
+    bg_mode: 'none',
+    bg_image_path: null,
+    bg_preset_id: 'aurora_slate',
+    bg_opacity: 0.18,
+    bg_blur_px: 16,
+    auto_sync_pricing: true,
+    exchange_rate_auto: true,
+    last_rate_sync_at_ms: null,
+    last_pricing_sync_at_ms: null,
     updated_at_ms: now,
   };
+}
+
+function previewSubscriptionTemplates(): SubscriptionPlanTemplate[] {
+  return [
+    {
+      template_id: 'claude_pro',
+      provider_id: 'claude_code',
+      plan_name: 'Claude Pro ($20/mo)',
+      monthly_fee_micro_usd: 20_000_000,
+      description: 'Anthropic Claude Pro 个人订阅（含 5h 滚动与 7d 周参考窗口）',
+      windows: [
+        {
+          window_id: '5h',
+          label: '5h 滚动窗口',
+          duration_hours: 5,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 15_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+        {
+          window_id: '7d',
+          label: '7d 周额度',
+          duration_hours: 168,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 75_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+      ],
+    },
+    {
+      template_id: 'claude_max_5x',
+      provider_id: 'claude_code',
+      plan_name: 'Claude Max 5x ($100/mo)',
+      monthly_fee_micro_usd: 100_000_000,
+      description: 'Anthropic Claude Max 5x 高配额订阅（5 倍 Pro 参考额度）',
+      windows: [
+        {
+          window_id: '5h',
+          label: '5h 滚动窗口',
+          duration_hours: 5,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 75_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+        {
+          window_id: '7d',
+          label: '7d 周额度',
+          duration_hours: 168,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 375_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+      ],
+    },
+    {
+      template_id: 'claude_max_20x',
+      provider_id: 'claude_code',
+      plan_name: 'Claude Max 20x ($200/mo)',
+      monthly_fee_micro_usd: 200_000_000,
+      description: 'Anthropic Claude Max 20x 重度编码订阅（20 倍 Pro 参考额度）',
+      windows: [
+        {
+          window_id: '5h',
+          label: '5h 滚动窗口',
+          duration_hours: 5,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 200_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+        {
+          window_id: '7d',
+          label: '7d 周额度',
+          duration_hours: 168,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 1_200_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+      ],
+    },
+    {
+      template_id: 'codex_plus',
+      provider_id: 'codex',
+      plan_name: 'ChatGPT Plus / Codex ($20/mo)',
+      monthly_fee_micro_usd: 20_000_000,
+      description: 'OpenAI ChatGPT Plus（可自动对齐 Codex 日志官方 5h / 7d 限额）',
+      windows: [
+        {
+          window_id: '5h',
+          label: '5h 滚动窗口',
+          duration_hours: 5,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 18_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+        {
+          window_id: '7d',
+          label: '7d 周额度',
+          duration_hours: 168,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 90_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+      ],
+    },
+    {
+      template_id: 'codex_pro',
+      provider_id: 'codex',
+      plan_name: 'ChatGPT Pro / Codex ($200/mo)',
+      monthly_fee_micro_usd: 200_000_000,
+      description: 'OpenAI ChatGPT Pro（可自动对齐 Codex 日志官方 5h / 7d 限额）',
+      windows: [
+        {
+          window_id: '5h',
+          label: '5h 滚动窗口',
+          duration_hours: 5,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 150_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+        {
+          window_id: '7d',
+          label: '7d 周额度',
+          duration_hours: 168,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 900_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+      ],
+    },
+    {
+      template_id: 'google_ai_pro',
+      provider_id: 'antigravity',
+      plan_name: 'Google AI Pro ($19.99/mo)',
+      monthly_fee_micro_usd: 19_990_000,
+      description: 'Google AI Pro / Antigravity 个人订阅（19.99 USD/月参考窗口）',
+      windows: [
+        {
+          window_id: '5h',
+          label: '5h 滚动窗口',
+          duration_hours: 5,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 20_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+        {
+          window_id: '7d',
+          label: '7d 周额度',
+          duration_hours: 168,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 100_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+      ],
+    },
+    {
+      template_id: 'google_ai_ultra',
+      provider_id: 'antigravity',
+      plan_name: 'Google AI Ultra ($249.99/mo)',
+      monthly_fee_micro_usd: 249_990_000,
+      description: 'Google AI Ultra / Antigravity 旗舰订阅（249.99 USD/月高额度窗口）',
+      windows: [
+        {
+          window_id: '5h',
+          label: '5h 滚动窗口',
+          duration_hours: 5,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 250_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+        {
+          window_id: '7d',
+          label: '7d 周额度',
+          duration_hours: 168,
+          rolling: true,
+          unit: 'micro_usd',
+          limit_value: 1_250_000_000,
+          warning_percent: 80,
+          critical_percent: 95,
+        },
+      ],
+    },
+  ];
 }
 
 /**
@@ -141,12 +361,18 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
             requests: 0,
           },
         ],
+        provider_series: [],
         providers: [],
       };
       return data as T;
     }
     case 'get_trends':
-      return { buckets: [], series: [], comparisons: [] } as T;
+      return {
+        buckets: [],
+        series: [],
+        comparisons: [],
+        effective_granularity: 'daily',
+      } as T;
     case 'get_monthly':
       return {
         year: new Date().getFullYear(),
@@ -170,9 +396,12 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
     case 'get_subscriptions':
     case 'get_provider_configs':
     case 'get_ingestion_cursors':
+    case 'get_observed_rate_limits':
       return [] as T;
+    case 'get_subscription_templates':
+      return previewSubscriptionTemplates() as T;
     case 'get_speed_latency':
-      return { models: [], scatter_points: [], context_bins: [] } as T;
+      return { providers: [], models: [] } as T;
     case 'get_tray_summary':
       return {
         today_tokens: 0,
@@ -189,6 +418,13 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
       return defaultPreviewPreferences(now) as T;
     case 'update_preferences':
       return ((args?.prefs as AppPreferences | undefined) ?? defaultPreviewPreferences(now)) as T;
+    case 'get_background_image_data_url':
+      return null as T;
+    case 'import_background_image':
+      return ((args?.sourcePath as string | undefined) || 'preview-wallpaper.png') as T;
+    case 'delete_subscription_plan':
+    case 'clear_background_image':
+      return undefined as T;
     case 'trigger_scan_now':
       return {
         files_scanned: 0,
@@ -196,6 +432,18 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
         events_deduplicated: 0,
         errors: [],
         scanned_at_ms: now,
+      } as T;
+    case 'sync_pricing_and_rate':
+      return {
+        rate_updated: false,
+        usd_to_cny_rate: '7.25',
+        pricing_updated: false,
+        synced_models_count: 0,
+        recomputed_events_count: 0,
+        synced_at_ms: now,
+        rate_source: null,
+        pricing_source: null,
+        warning: null,
       } as T;
     case 'preview_sync_envelope_v1':
       return {
@@ -254,10 +502,22 @@ export const ipc = {
 
   recomputeAllCosts: (): Promise<number> => callIpc('recompute_all_costs'),
 
+  syncPricingAndRate: (force = false): Promise<CatalogSyncResult> =>
+    callIpc('sync_pricing_and_rate', { force }),
+
   getSubscriptions: (): Promise<SubscriptionPlanStatus[]> => callIpc('get_subscriptions'),
 
   upsertSubscriptionPlan: (plan: SubscriptionPlan): Promise<void> =>
     callIpc('upsert_subscription_plan', { plan }),
+
+  deleteSubscriptionPlan: (planId: string): Promise<void> =>
+    callIpc('delete_subscription_plan', { planId }),
+
+  getSubscriptionTemplates: (): Promise<SubscriptionPlanTemplate[]> =>
+    callIpc('get_subscription_templates'),
+
+  getObservedRateLimits: (): Promise<ObservedRateLimitWindow[]> =>
+    callIpc('get_observed_rate_limits'),
 
   getSpeedLatency: (filter: AnalyticsFilter): Promise<SpeedLatencyReport> =>
     callIpc('get_speed_latency', { filter }),
@@ -290,6 +550,14 @@ export const ipc = {
 
   updatePreferences: (prefs: AppPreferences): Promise<AppPreferences> =>
     callIpc('update_preferences', { prefs }),
+
+  importBackgroundImage: (sourcePath: string): Promise<string> =>
+    callIpc('import_background_image', { sourcePath }),
+
+  clearBackgroundImage: (): Promise<void> => callIpc('clear_background_image'),
+
+  getBackgroundImageDataUrl: (): Promise<string | null> =>
+    callIpc('get_background_image_data_url'),
 
   exportMonthlyReport: (
     query: MonthlyQuery,

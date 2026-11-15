@@ -1,10 +1,15 @@
 use chrono::Utc;
 use rusqlite::{params, Connection};
 
-use crate::domain::{provider_ids, AppPreferences, CollectionMode};
+use crate::domain::{
+    provider_ids, AppPreferences, CollectionMode, QuotaUnit, SubscriptionPlan,
+    SubscriptionWindowRule,
+};
 use crate::error::CoreResult;
 use crate::pricing::default_pricing_catalog;
-use crate::subscription::default_subscription_plans;
+use crate::storage::repository::{rebuild_rollup_from_events, DAY_MS, HOUR_MS};
+
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -185,7 +190,234 @@ pub fn run_migrations(conn: &mut Connection) -> CoreResult<()> {
         tx.commit()?;
     }
 
+    if current_version < 2 {
+        migrate_v1_to_v2(conn, now_ms)?;
+    }
+
+    if current_version < 3 {
+        migrate_v2_to_v3(conn, now_ms)?;
+    }
+
     seed_defaults(conn, now_ms)?;
+    Ok(())
+}
+
+fn legacy_default_windows(limit_5h: i64, limit_7d: i64) -> Vec<SubscriptionWindowRule> {
+    vec![
+        SubscriptionWindowRule {
+            window_id: "5h".to_string(),
+            label: "5h 滚动窗口".to_string(),
+            duration_hours: 5,
+            rolling: true,
+            unit: QuotaUnit::MicroUsd,
+            limit_value: limit_5h,
+            warning_percent: 80,
+            critical_percent: 95,
+        },
+        SubscriptionWindowRule {
+            window_id: "7d".to_string(),
+            label: "7d 周额度".to_string(),
+            duration_hours: 168,
+            rolling: true,
+            unit: QuotaUnit::MicroUsd,
+            limit_value: limit_7d,
+            warning_percent: 80,
+            critical_percent: 95,
+        },
+    ]
+}
+
+fn legacy_v1_default_subscription_plans() -> Vec<SubscriptionPlan> {
+    vec![
+        SubscriptionPlan {
+            plan_id: "claude_pro".to_string(),
+            provider_id: provider_ids::CLAUDE_CODE.to_string(),
+            plan_name: "Claude Pro ($20/mo)".to_string(),
+            enabled: true,
+            monthly_fee_micro_usd: 20_000_000,
+            windows: legacy_default_windows(15_000_000, 75_000_000),
+            is_user_configured: false,
+            updated_at_ms: 0,
+        },
+        SubscriptionPlan {
+            plan_id: "claude_max_5x".to_string(),
+            provider_id: provider_ids::CLAUDE_CODE.to_string(),
+            plan_name: "Claude Max 5x ($100/mo)".to_string(),
+            enabled: false,
+            monthly_fee_micro_usd: 100_000_000,
+            windows: legacy_default_windows(75_000_000, 375_000_000),
+            is_user_configured: false,
+            updated_at_ms: 0,
+        },
+        SubscriptionPlan {
+            plan_id: "claude_max_20x".to_string(),
+            provider_id: provider_ids::CLAUDE_CODE.to_string(),
+            plan_name: "Claude Max 20x ($200/mo)".to_string(),
+            enabled: false,
+            monthly_fee_micro_usd: 200_000_000,
+            windows: legacy_default_windows(200_000_000, 1_200_000_000),
+            is_user_configured: false,
+            updated_at_ms: 0,
+        },
+        SubscriptionPlan {
+            plan_id: "codex_plus".to_string(),
+            provider_id: provider_ids::CODEX.to_string(),
+            plan_name: "ChatGPT Plus / Codex ($20/mo)".to_string(),
+            enabled: true,
+            monthly_fee_micro_usd: 20_000_000,
+            windows: legacy_default_windows(18_000_000, 90_000_000),
+            is_user_configured: false,
+            updated_at_ms: 0,
+        },
+        SubscriptionPlan {
+            plan_id: "codex_pro".to_string(),
+            provider_id: provider_ids::CODEX.to_string(),
+            plan_name: "ChatGPT Pro / Codex ($200/mo)".to_string(),
+            enabled: false,
+            monthly_fee_micro_usd: 200_000_000,
+            windows: legacy_default_windows(150_000_000, 900_000_000),
+            is_user_configured: false,
+            updated_at_ms: 0,
+        },
+        SubscriptionPlan {
+            plan_id: "antigravity_ai_pro".to_string(),
+            provider_id: provider_ids::ANTIGRAVITY.to_string(),
+            plan_name: "Google AI Pro / Antigravity ($19.99/mo)".to_string(),
+            enabled: true,
+            monthly_fee_micro_usd: 19_990_000,
+            windows: legacy_default_windows(20_000_000, 100_000_000),
+            is_user_configured: false,
+            updated_at_ms: 0,
+        },
+    ]
+}
+
+fn migrate_v1_to_v2(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+
+    // 1. Upgrade subscription_plans: remove untouched v0.1.0 auto-seeded presets and mark any
+    //    customized or user-created rows as `is_user_configured = 1`.
+    tx.execute_batch(
+        "ALTER TABLE subscription_plans ADD COLUMN is_user_configured INTEGER NOT NULL DEFAULT 0;",
+    )?;
+
+    let min_device_created_ms: i64 = tx.query_row(
+        "SELECT COALESCE(MIN(created_at_ms), 0) FROM devices",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let legacy_defaults = legacy_v1_default_subscription_plans();
+    let mut untouched_plan_ids: Vec<String> = Vec::new();
+    {
+        let mut stmt = tx.prepare(
+            r#"
+            SELECT plan_id, provider_id, plan_name, enabled, monthly_fee_micro_usd, windows_json, updated_at_ms
+            FROM subscription_plans
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? != 0,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (plan_id, provider_id, plan_name, enabled, fee, windows_json, updated_at_ms) =
+                row?;
+            let within_seed_window = (updated_at_ms - min_device_created_ms).abs() <= 5_000;
+            if !within_seed_window {
+                continue;
+            }
+            let Ok(parsed_windows) = serde_json::from_str::<Vec<SubscriptionWindowRule>>(&windows_json)
+            else {
+                continue;
+            };
+            let matches_untouched_default = legacy_defaults.iter().any(|def| {
+                def.plan_id == plan_id
+                    && def.provider_id == provider_id
+                    && def.plan_name == plan_name
+                    && def.enabled == enabled
+                    && def.monthly_fee_micro_usd == fee
+                    && def.windows == parsed_windows
+            });
+            if matches_untouched_default {
+                untouched_plan_ids.push(plan_id);
+            }
+        }
+    }
+
+    for plan_id in &untouched_plan_ids {
+        tx.execute(
+            "DELETE FROM subscription_plans WHERE plan_id = ?1",
+            params![plan_id],
+        )?;
+    }
+    tx.execute("UPDATE subscription_plans SET is_user_configured = 1", [])?;
+
+    // 2. Extend app_preferences with custom background configuration columns.
+    tx.execute_batch(
+        r#"
+        ALTER TABLE app_preferences ADD COLUMN bg_mode TEXT NOT NULL DEFAULT 'none';
+        ALTER TABLE app_preferences ADD COLUMN bg_image_path TEXT;
+        ALTER TABLE app_preferences ADD COLUMN bg_preset_id TEXT NOT NULL DEFAULT 'aurora_slate';
+        ALTER TABLE app_preferences ADD COLUMN bg_opacity REAL NOT NULL DEFAULT 0.18;
+        ALTER TABLE app_preferences ADD COLUMN bg_blur_px INTEGER NOT NULL DEFAULT 16;
+        "#,
+    )?;
+
+    // 3. Clean historical distorted TPS outliers and atomically rebuild hourly/daily rollups.
+    tx.execute(
+        r#"
+        UPDATE usage_events
+        SET output_tps = NULL
+        WHERE output_tps IS NOT NULL
+          AND (
+            (duration_ms IS NOT NULL AND duration_ms < 300)
+            OR (output_tokens + reasoning_tokens) < 8
+            OR output_tps > 800.0
+            OR output_tps <= 0.0
+          )
+        "#,
+        [],
+    )?;
+
+    tx.execute("DELETE FROM usage_hourly_rollups", [])?;
+    tx.execute("DELETE FROM usage_daily_rollups", [])?;
+    rebuild_rollup_from_events(&tx, "usage_hourly_rollups", HOUR_MS, now_ms)?;
+    rebuild_rollup_from_events(&tx, "usage_daily_rollups", DAY_MS, now_ms)?;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![2i64, now_ms],
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v2_to_v3(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        r#"
+        ALTER TABLE app_preferences ADD COLUMN auto_sync_pricing INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE app_preferences ADD COLUMN exchange_rate_auto INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE app_preferences ADD COLUMN last_rate_sync_at_ms INTEGER;
+        ALTER TABLE app_preferences ADD COLUMN last_pricing_sync_at_ms INTEGER;
+        ALTER TABLE app_preferences ADD COLUMN pricing_catalog_hash TEXT;
+        "#,
+    )?;
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![3i64, now_ms],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -237,34 +469,18 @@ fn seed_defaults(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
         )?;
     }
 
-    // 4. Seed default subscription plans if none exist
-    for plan in default_subscription_plans() {
-        let windows_json = serde_json::to_string(&plan.windows)?;
-        tx.execute(
-            r#"
-            INSERT OR IGNORE INTO subscription_plans
-                (plan_id, provider_id, plan_name, enabled, monthly_fee_micro_usd, windows_json, updated_at_ms)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            "#,
-            params![
-                plan.plan_id,
-                plan.provider_id,
-                plan.plan_name,
-                i64::from(plan.enabled),
-                plan.monthly_fee_micro_usd,
-                windows_json,
-                now_ms,
-            ],
-        )?;
-    }
-
-    // 5. Seed default preferences row (id = 1)
+    // 4. Seed default preferences row (id = 1); fresh installs deliberately start with ZERO
+    //    auto-seeded subscription plans.
     let prefs = AppPreferences::default();
     tx.execute(
         r#"
         INSERT OR IGNORE INTO app_preferences
-            (id, currency, usd_to_cny_rate, theme, minimize_to_tray, launch_at_startup, otlp_enabled, otlp_port, device_display_name, updated_at_ms)
-        VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            (id, currency, usd_to_cny_rate, theme, minimize_to_tray, launch_at_startup,
+             otlp_enabled, otlp_port, device_display_name,
+             bg_mode, bg_image_path, bg_preset_id, bg_opacity, bg_blur_px,
+             auto_sync_pricing, exchange_rate_auto, last_rate_sync_at_ms, last_pricing_sync_at_ms,
+             updated_at_ms)
+        VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
         "#,
         params![
             prefs.currency.as_str(),
@@ -275,6 +491,15 @@ fn seed_defaults(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
             i64::from(prefs.otlp_enabled),
             i64::from(prefs.otlp_port),
             prefs.device_display_name,
+            prefs.bg_mode,
+            prefs.bg_image_path,
+            prefs.bg_preset_id,
+            prefs.bg_opacity,
+            prefs.bg_blur_px,
+            i64::from(prefs.auto_sync_pricing),
+            i64::from(prefs.exchange_rate_auto),
+            prefs.last_rate_sync_at_ms,
+            prefs.last_pricing_sync_at_ms,
             now_ms,
         ],
     )?;

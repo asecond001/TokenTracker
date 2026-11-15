@@ -90,6 +90,7 @@ fn replays_claude_codex_and_antigravity_fixtures_accurately() {
         end_ms: i64::MAX / 2,
         provider_id: None,
         tz_offset_minutes: 480,
+        all_time: false,
     };
     let ov = storage.query_overview(&filter, 1_800_000_000_000).expect("overview");
     assert_eq!(ov.total_requests, 6);
@@ -160,6 +161,7 @@ fn incremental_tailer_handles_partial_lines_concurrent_writers_truncation_and_ro
         end_ms: i64::MAX / 2,
         provider_id: None,
         tz_offset_minutes: 480,
+        all_time: false,
     };
     let ov = storage.query_overview(&filter, 1_800_000_000_000).expect("ov");
     assert_eq!(ov.total_requests, 3);
@@ -253,6 +255,7 @@ async fn loopback_otlp_server_receives_and_persists_metrics_and_logs() {
         end_ms: i64::MAX / 2,
         provider_id: Some(provider_ids::CLAUDE_CODE.to_string()),
         tz_offset_minutes: 480,
+        all_time: false,
     };
     let ov = storage
         .query_overview(&filter, 1_800_000_000_000)
@@ -338,4 +341,246 @@ fn background_watcher_spawns_from_non_tokio_main_thread_without_panic() {
     shutdown_tx.send(true).expect("signal shutdown");
     rt.block_on(watcher_task)
         .expect("watcher task should exit cleanly");
+}
+
+#[tokio::test]
+async fn catalog_sync_handles_primary_fallback_offline_and_locks() {
+    use std::sync::Mutex;
+    use tokentracker_collectors::catalog_sync::BoxFuture;
+    use tokentracker_collectors::{
+        sync_catalog_and_rate_with_fetcher, CatalogSyncEndpoints, ReqwestTextFetcher,
+        TextHttpFetcher,
+    };
+    use tokentracker_core::domain::{compute_event_id, ModelPricingEntry, NormalizedUsageEvent};
+
+    // Ensure production reqwest client builds cleanly with rustls + timeout settings.
+    assert!(ReqwestTextFetcher::new().is_ok());
+
+    let sample_models_dev = serde_json::json!({
+        "anthropic": {
+            "id": "anthropic",
+            "models": {
+                "claude-sonnet-4-5": {
+                    "id": "claude-sonnet-4-5",
+                    "cost": { "input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75 }
+                },
+                "claude-opus-4-6": {
+                    "id": "claude-opus-4-6",
+                    "cost": { "input": 15.0, "output": 75.0, "cache_read": 1.5, "cache_write": 18.75 }
+                }
+            }
+        },
+        "openai": {
+            "id": "openai",
+            "models": {
+                "gpt-5-codex": {
+                    "id": "gpt-5-codex",
+                    "cost": { "input": 2.5, "output": 12.0, "cache_read": 0.25 }
+                },
+                "gpt-5.2-codex": {
+                    "id": "gpt-5.2-codex",
+                    "cost": { "input": 1.75, "output": 14.0, "cache_read": 0.175 }
+                }
+            }
+        },
+        "google": {
+            "id": "google",
+            "models": {
+                "gemini-3-flash": {
+                    "id": "gemini-3-flash",
+                    "cost": { "input": 0.5, "output": 3.0, "cache_read": 0.05 }
+                }
+            }
+        }
+    })
+    .to_string();
+
+    let sample_litellm = serde_json::json!({
+        "claude-sonnet-4-5": {
+            "litellm_provider": "anthropic",
+            "mode": "chat",
+            "input_cost_per_token": 0.000003,
+            "output_cost_per_token": 0.000015,
+            "cache_read_input_token_cost": 0.0000003
+        },
+        "claude-haiku-4-5": {
+            "litellm_provider": "anthropic",
+            "mode": "chat",
+            "input_cost_per_token": 0.000001,
+            "output_cost_per_token": 0.000005
+        },
+        "gpt-5-codex": {
+            "litellm_provider": "openai",
+            "mode": "chat",
+            "input_cost_per_token": 0.0000015,
+            "output_cost_per_token": 0.000012
+        },
+        "gemini-2.5-pro": {
+            "litellm_provider": "gemini",
+            "mode": "chat",
+            "input_cost_per_token": 0.00000125,
+            "output_cost_per_token": 0.00001
+        },
+        "deepseek/deepseek-chat": {
+            "litellm_provider": "deepseek",
+            "mode": "chat",
+            "input_cost_per_token": 0.00000028,
+            "output_cost_per_token": 0.00000042
+        }
+    })
+    .to_string();
+
+    struct MockHttpFetcher {
+        models_dev_body: String,
+        litellm_body: String,
+        requests: Mutex<Vec<String>>,
+    }
+
+    impl TextHttpFetcher for MockHttpFetcher {
+        fn fetch_text<'a>(&'a self, url: &'a str) -> BoxFuture<'a, Result<String, String>> {
+            if let Ok(mut guard) = self.requests.lock() {
+                guard.push(url.to_string());
+            }
+            let res = match url {
+                "https://mock.local/frankfurter" => {
+                    Ok(r#"{"amount":1.0,"base":"USD","rates":{"CNY":7.1852}}"#.to_string())
+                }
+                "https://mock.local/open-er" => {
+                    Ok(r#"{"result":"success","base_code":"USD","rates":{"CNY":7.2100}}"#.to_string())
+                }
+                "https://mock.local/models-dev" => Ok(self.models_dev_body.clone()),
+                "https://mock.local/litellm" => Ok(self.litellm_body.clone()),
+                _ => Err("HTTP 500".to_string()),
+            };
+            Box::pin(async move { res })
+        }
+    }
+
+    let fetcher = MockHttpFetcher {
+        models_dev_body: sample_models_dev,
+        litellm_body: sample_litellm,
+        requests: Mutex::new(Vec::new()),
+    };
+
+    // Scenario 1: Primary endpoints succeed, recomputing existing codex event cost
+    let storage = Storage::open_in_memory().expect("db");
+    let dev = storage.local_device().expect("dev").device_id;
+    let ts = 1_760_000_000_000i64;
+    storage
+        .ingest_events_with_cursor(
+            &[NormalizedUsageEvent {
+                event_id: compute_event_id("codex", "s-sync", "m-sync", ts),
+                device_id: dev,
+                provider_id: provider_ids::CODEX.to_string(),
+                session_id: "s-sync".to_string(),
+                project_label: "proj".to_string(),
+                model_id: "gpt-5-codex".to_string(),
+                timestamp_ms: ts,
+                input_tokens: 1_000_000,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: None,
+                ttft_ms: None,
+                output_tps: None,
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            }],
+            None,
+            &[],
+        )
+        .expect("ingest");
+
+    let primary_endpoints = CatalogSyncEndpoints {
+        frankfurter_url: "https://mock.local/frankfurter".to_string(),
+        open_er_url: "https://mock.local/open-er".to_string(),
+        models_dev_url: "https://mock.local/models-dev".to_string(),
+        litellm_url: "https://mock.local/litellm".to_string(),
+    };
+    let res1 = sync_catalog_and_rate_with_fetcher(&storage, true, &primary_endpoints, &fetcher)
+        .await
+        .expect("primary sync");
+    assert!(res1.rate_updated, "expected rate_updated in res1: {res1:?}");
+    assert_eq!(res1.usd_to_cny_rate, "7.1852");
+    assert!(res1.pricing_updated);
+    assert_eq!(res1.recomputed_events_count, 1);
+    assert_eq!(res1.rate_source.as_deref(), Some("frankfurter.dev"));
+    assert_eq!(res1.pricing_source.as_deref(), Some("models.dev"));
+    assert!(res1.warning.is_none());
+
+    // Subsequent non-forced call within 12h/24h TTL makes ZERO HTTP requests
+    let calls_before = fetcher.requests.lock().expect("lock").len();
+    let res_ttl = sync_catalog_and_rate_with_fetcher(&storage, false, &primary_endpoints, &fetcher)
+        .await
+        .expect("ttl skip");
+    assert!(!res_ttl.rate_updated);
+    assert!(!res_ttl.pricing_updated);
+    assert_eq!(fetcher.requests.lock().expect("lock").len(), calls_before);
+
+    // Scenario 2: Primary HTTP 500 -> automatic fallback to open.er-api + litellm
+    let fallback_endpoints = CatalogSyncEndpoints {
+        frankfurter_url: "https://mock.local/fail".to_string(),
+        open_er_url: "https://mock.local/open-er".to_string(),
+        models_dev_url: "https://mock.local/fail".to_string(),
+        litellm_url: "https://mock.local/litellm".to_string(),
+    };
+    let res2 = sync_catalog_and_rate_with_fetcher(&storage, true, &fallback_endpoints, &fetcher)
+        .await
+        .expect("fallback sync");
+    assert!(res2.rate_updated);
+    assert_eq!(res2.usd_to_cny_rate, "7.21");
+    assert!(res2.pricing_updated);
+    assert_eq!(res2.rate_source.as_deref(), Some("open.er-api.com"));
+    assert_eq!(res2.pricing_source.as_deref(), Some("litellm"));
+    assert!(res2.warning.is_none());
+
+    // Scenario 3: Both endpoints fail -> graceful offline fallback with warning, cached data intact
+    let offline_endpoints = CatalogSyncEndpoints {
+        frankfurter_url: "https://mock.local/fail".to_string(),
+        open_er_url: "https://mock.local/fail".to_string(),
+        models_dev_url: "https://mock.local/fail".to_string(),
+        litellm_url: "https://mock.local/fail".to_string(),
+    };
+    let res3 = sync_catalog_and_rate_with_fetcher(&storage, true, &offline_endpoints, &fetcher)
+        .await
+        .expect("offline fallback");
+    assert!(!res3.rate_updated);
+    assert!(!res3.pricing_updated);
+    assert_eq!(res3.usd_to_cny_rate, "7.21");
+    assert!(res3.warning.is_some());
+
+    // Scenario 4: Manual exchange rate lock + pricing user override remain protected on force sync
+    let mut prefs = storage.get_preferences().expect("prefs");
+    prefs.exchange_rate_auto = false;
+    prefs.usd_to_cny_rate = "7.40".to_string();
+    storage.update_preferences(&prefs).expect("save locked");
+
+    storage
+        .upsert_model_pricing(&ModelPricingEntry {
+            model_pattern: "gpt-5-codex".to_string(),
+            provider_id: provider_ids::CODEX.to_string(),
+            input_per_m_micro_usd: 9_000_000,
+            output_per_m_micro_usd: 18_000_000,
+            cache_read_per_m_micro_usd: 900_000,
+            cache_write_per_m_micro_usd: 0,
+            reasoning_per_m_micro_usd: 18_000_000,
+            is_user_override: true,
+            effective_from: "2026-11-16".to_string(),
+        })
+        .expect("user pricing override");
+
+    let res4 = sync_catalog_and_rate_with_fetcher(&storage, true, &primary_endpoints, &fetcher)
+        .await
+        .expect("sync with locks");
+    assert!(!res4.rate_updated);
+    assert_eq!(res4.usd_to_cny_rate, "7.40");
+    let catalog = storage.list_model_pricing().expect("catalog");
+    let codex_entry = catalog
+        .iter()
+        .find(|p| p.model_pattern == "gpt-5-codex")
+        .expect("codex");
+    assert!(codex_entry.is_user_override);
+    assert_eq!(codex_entry.input_per_m_micro_usd, 9_000_000);
 }

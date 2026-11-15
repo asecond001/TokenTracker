@@ -10,6 +10,14 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::Value;
 use tokentracker_core::domain::{NormalizedUsageEvent, ObservedRateLimitWindow};
 
+/// Active turn timestamps retained per streaming `message.id` so multi-chunk responses
+/// measure true turn duration instead of inter-chunk tail deltas.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActiveMessageTurn {
+    pub turn_prompt_ts_ms: Option<i64>,
+    pub first_chunk_ts_ms: i64,
+}
+
 /// Per-file streaming parser context maintained across lines during a scan/tail pass.
 #[derive(Debug, Default)]
 pub struct FileParseContext {
@@ -22,7 +30,43 @@ pub struct FileParseContext {
     pub last_step_ts_ms: Option<i64>,
     /// Tracks Codex cumulative `total_token_usage` to compute deltas and drop duplicate snapshots.
     pub last_codex_totals: Option<CodexRawTotals>,
+    /// Bounded LRU-like ring of active streaming `message.id` turns for Claude Code logs.
+    pub active_message_turns: Vec<(String, ActiveMessageTurn)>,
     pub line_number: u64,
+}
+
+impl FileParseContext {
+    pub const MAX_ACTIVE_MESSAGE_TURNS: usize = 32;
+
+    /// Resolve or initialize turn timing metadata for a streaming `message.id`.
+    pub fn resolve_message_turn(&mut self, message_id: &str, ts_ms: i64) -> ActiveMessageTurn {
+        if let Some(pos) = self
+            .active_message_turns
+            .iter()
+            .position(|(id, _)| id == message_id)
+        {
+            let mut turn = self.active_message_turns[pos].1;
+            if ts_ms < turn.first_chunk_ts_ms {
+                turn.first_chunk_ts_ms = ts_ms;
+                self.active_message_turns[pos].1 = turn;
+            }
+            return turn;
+        }
+        let turn_prompt_ts_ms = self
+            .last_prompt_ts_ms
+            .take()
+            .filter(|&p| p < ts_ms && ts_ms - p <= 600_000);
+        let turn = ActiveMessageTurn {
+            turn_prompt_ts_ms,
+            first_chunk_ts_ms: ts_ms,
+        };
+        if self.active_message_turns.len() >= Self::MAX_ACTIVE_MESSAGE_TURNS {
+            self.active_message_turns.remove(0);
+        }
+        self.active_message_turns
+            .push((message_id.to_string(), turn));
+        turn
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -138,11 +182,11 @@ pub(crate) fn get_i64(obj: &Value, keys: &[&str]) -> i64 {
 
 pub(crate) fn compute_tps(output_tokens: i64, duration_ms: Option<i64>) -> Option<f64> {
     let dur = duration_ms?;
-    if output_tokens <= 0 || dur <= 0 {
+    if output_tokens < 8 || dur < 300 {
         return None;
     }
     let tps = output_tokens as f64 / (dur as f64 / 1000.0);
-    if tps.is_finite() && tps > 0.0 && tps <= 5_000.0 {
+    if tps.is_finite() && tps > 0.0 && tps <= 800.0 {
         Some(tps)
     } else {
         None

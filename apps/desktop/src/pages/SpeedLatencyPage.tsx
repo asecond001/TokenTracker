@@ -1,26 +1,87 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import {
+  createColumnHelper,
+  flexRender,
+  getCoreRowModel,
+  getSortedRowModel,
+  useReactTable,
+  type SortingState,
+} from '@tanstack/react-table';
 import type { EChartsOption } from 'echarts';
+import { AnimatedNumber } from '../components/AnimatedNumber';
 import { EChartBox } from '../components/EChartBox';
+import { TimeRangeControl } from '../components/TimeRangeControl';
+import { useChartTheme } from '../lib/chartTheme';
 import {
   formatDurationMs,
-  formatTokens,
+  formatExactInt,
   formatTps,
   providerAccentColor,
   providerDisplayName,
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
-import { useWorkspaceStore } from '../stores/workspaceStore';
+import { computeTimeRange, useWorkspaceStore } from '../stores/workspaceStore';
+import type { AnalyticsFilter, ModelSpeedStats } from '../types/ipc';
+
+type SpeedGroupMode = 'model' | 'provider';
+
+interface SpeedChartItem {
+  label: string;
+  providerId: string;
+  p50: number;
+  mean: number;
+  p95: number;
+  sampleCount: number;
+  avgDurationMs: number;
+  avgTtftMs: number | null;
+}
+
+const colHelper = createColumnHelper<ModelSpeedStats>();
+
+function hexToRgba(hex: string, alpha: number): string {
+  const normalized = hex.replace('#', '');
+  if (normalized.length !== 6) {
+    return hex;
+  }
+  const r = Number.parseInt(normalized.slice(0, 2), 16);
+  const g = Number.parseInt(normalized.slice(2, 4), 16);
+  const b = Number.parseInt(normalized.slice(4, 6), 16);
+  if ([r, g, b].some(Number.isNaN)) {
+    return hex;
+  }
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
 
 export function SpeedLatencyPage() {
-  const { timePreset, customStartDate, customEndDate, providerFilter, getFilter } =
+  const { timePreset, customStartDate, customEndDate, providerFilter, tzOffsetMinutes } =
     useWorkspaceStore();
+  const chartTheme = useChartTheme();
+  const [groupMode, setGroupMode] = useState<SpeedGroupMode>('model');
+  const [sorting, setSorting] = useState<SortingState>([{ id: 'sample_count', desc: true }]);
 
-  const filter = useMemo(
-    () => getFilter(),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [timePreset, customStartDate, customEndDate, providerFilter]
-  );
+  const filter = useMemo<AnalyticsFilter>(() => {
+    const range = computeTimeRange(timePreset, {
+      start: customStartDate,
+      end: customEndDate,
+    });
+    return {
+      start_ms: range.start_ms,
+      end_ms: range.end_ms,
+      provider_id: providerFilter === 'all' ? null : providerFilter,
+      tz_offset_minutes: tzOffsetMinutes,
+      all_time: range.all_time,
+    };
+  }, [timePreset, customStartDate, customEndDate, providerFilter, tzOffsetMinutes]);
 
   const { data, isLoading } = useQuery({
     queryKey: ['speed_latency', filter],
@@ -28,258 +89,486 @@ export function SpeedLatencyPage() {
     refetchInterval: 15_000,
   });
 
-  const modelSpeedOption = useMemo<EChartsOption>(() => {
-    const models = (data?.models ?? []).slice(0, 10);
+  const providers = data?.providers ?? [];
+  const models = data?.models ?? [];
+
+  const groupedModelsForChart = useMemo<ModelSpeedStats[]>(() => {
+    if (models.length === 0) return [];
+    const maxSamplesByModel = new Map<string, number>();
+    for (const row of models) {
+      const prev = maxSamplesByModel.get(row.model_id) ?? 0;
+      if (row.sample_count > prev) {
+        maxSamplesByModel.set(row.model_id, row.sample_count);
+      }
+    }
+    return [...models]
+      .sort((a, b) => {
+        const aMax = maxSamplesByModel.get(a.model_id) ?? 0;
+        const bMax = maxSamplesByModel.get(b.model_id) ?? 0;
+        if (bMax !== aMax) return bMax - aMax;
+        if (a.model_id !== b.model_id) return a.model_id.localeCompare(b.model_id);
+        return b.mean_tps - a.mean_tps;
+      })
+      .slice(0, 12);
+  }, [models]);
+
+  const chartItems = useMemo<SpeedChartItem[]>(() => {
+    if (groupMode === 'provider') {
+      return providers.map((p) => ({
+        label: providerDisplayName(p.provider_id),
+        providerId: p.provider_id,
+        p50: p.p50_tps,
+        mean: p.mean_tps,
+        p95: p.p95_tps,
+        sampleCount: p.sample_count,
+        avgDurationMs: p.avg_duration_ms,
+        avgTtftMs: p.avg_ttft_ms,
+      }));
+    }
+    return groupedModelsForChart.map((m) => ({
+      label: `${m.model_id} · ${providerDisplayName(m.provider_id)}`,
+      providerId: m.provider_id,
+      p50: m.p50_tps,
+      mean: m.mean_tps,
+      p95: m.p95_tps,
+      sampleCount: m.sample_count,
+      avgDurationMs: m.avg_duration_ms,
+      avgTtftMs: m.avg_ttft_ms,
+    }));
+  }, [groupMode, providers, groupedModelsForChart]);
+
+  const speedComparisonOption = useMemo<EChartsOption>(() => {
     return {
       backgroundColor: 'transparent',
+      animationDuration: 280,
+      animationDurationUpdate: 260,
       tooltip: {
         trigger: 'axis',
         axisPointer: { type: 'shadow' },
-        backgroundColor: '#161922',
-        borderColor: '#2d3343',
-        textStyle: { color: '#eceff4', fontSize: 12 },
+        backgroundColor: chartTheme.tooltipBg,
+        borderColor: chartTheme.tooltipBorder,
+        textStyle: { color: chartTheme.tooltipText, fontSize: 12 },
+        formatter: (params: unknown) => {
+          const list = Array.isArray(params)
+            ? (params as Array<{ dataIndex?: number }>)
+            : [];
+          const idx = list[0]?.dataIndex;
+          if (idx === undefined) return '';
+          const item = chartItems[idx];
+          if (!item) return '';
+          const lines = [
+            `<b>${escapeHtml(item.label)}</b>`,
+            `P50: <b>${formatTps(item.p50)}</b>`,
+            `均值: <b>${formatTps(item.mean)}</b>`,
+            `P95: <b>${formatTps(item.p95)}</b>`,
+            `样本数: ${formatExactInt(item.sampleCount)} · 平均耗时: ${formatDurationMs(item.avgDurationMs)}`,
+          ];
+          if (item.avgTtftMs !== null) {
+            lines.push(`平均首字延迟: ${formatDurationMs(item.avgTtftMs)}`);
+          }
+          return lines.join('<br/>');
+        },
       },
       legend: {
         top: 0,
         right: 0,
-        textStyle: { color: '#98a2b3', fontSize: 11 },
+        textStyle: { color: chartTheme.textSecondary, fontSize: 11 },
+        itemWidth: 10,
+        itemHeight: 6,
       },
-      grid: { top: 32, right: 20, bottom: 24, left: 165 },
+      grid: { top: 34, right: 24, bottom: 26, left: 16, containLabel: true },
       xAxis: {
         type: 'value',
         name: 'tok/s',
-        nameTextStyle: { color: '#6b7280', fontSize: 11 },
-        splitLine: { lineStyle: { color: '#1f232e', type: 'dashed' } },
-        axisLabel: { color: '#6b7280', fontSize: 11 },
+        nameTextStyle: { color: chartTheme.textMuted, fontSize: 11 },
+        splitLine: { lineStyle: { color: chartTheme.splitLineColor, type: 'dashed' } },
+        axisLabel: { color: chartTheme.textMuted, fontSize: 11 },
       },
       yAxis: {
         type: 'category',
         inverse: true,
-        data: models.map((m) => m.model_id),
-        axisLine: { lineStyle: { color: '#2b3040' } },
-        axisLabel: { color: '#98a2b3', fontSize: 11 },
+        data: chartItems.map((item) => item.label),
+        axisLine: { lineStyle: { color: chartTheme.axisLineColor } },
+        axisTick: { show: false },
+        axisLabel: {
+          color: chartTheme.textSecondary,
+          fontSize: 11,
+          width: 220,
+          overflow: 'truncate',
+        },
       },
       series: [
         {
+          id: `speed-p50-${groupMode}`,
           name: 'P50',
           type: 'bar',
-          barWidth: 7,
-          itemStyle: { color: '#38bdf8' },
-          data: models.map((m) => Number(m.p50_tps.toFixed(1))),
-        },
-        {
-          name: '均值',
-          type: 'bar',
-          barWidth: 7,
-          itemStyle: { color: '#10b981' },
-          data: models.map((m) => Number(m.mean_tps.toFixed(1))),
-        },
-        {
-          name: 'P95',
-          type: 'bar',
-          barWidth: 7,
-          itemStyle: { color: '#6366f1' },
-          data: models.map((m) => Number(m.p95_tps.toFixed(1))),
-        },
-      ],
-    };
-  }, [data]);
-
-  const contextDecayOption = useMemo<EChartsOption>(() => {
-    const scatter = data?.scatter_points ?? [];
-    const bins = data?.context_bins ?? [];
-
-    return {
-      backgroundColor: 'transparent',
-      tooltip: {
-        trigger: 'item',
-        backgroundColor: '#161922',
-        borderColor: '#2d3343',
-        textStyle: { color: '#eceff4', fontSize: 12 },
-        formatter: (params: unknown) => {
-          const p = params as { seriesType?: string; value?: [number, number, string, number] };
-          if (p.seriesType === 'scatter' && p.value) {
-            return `${p.value[2]}<br/>上下文: ${formatTokens(p.value[0])}<br/>输出速度: <b>${p.value[1].toFixed(1)} tok/s</b><br/>耗时: ${formatDurationMs(p.value[3])}`;
-          }
-          return '';
-        },
-      },
-      grid: { top: 24, right: 20, bottom: 28, left: 50 },
-      xAxis: {
-        type: 'value',
-        name: '输入上下文 Tokens',
-        nameTextStyle: { color: '#6b7280', fontSize: 11 },
-        splitLine: { lineStyle: { color: '#1f232e', type: 'dashed' } },
-        axisLabel: {
-          color: '#6b7280',
-          fontSize: 11,
-          formatter: (v: number) => formatTokens(v),
-        },
-      },
-      yAxis: {
-        type: 'value',
-        name: 'Output tok/s',
-        nameTextStyle: { color: '#6b7280', fontSize: 11 },
-        splitLine: { lineStyle: { color: '#1f232e', type: 'dashed' } },
-        axisLabel: { color: '#6b7280', fontSize: 11 },
-      },
-      series: [
-        {
-          name: '单次请求采样',
-          type: 'scatter',
-          symbolSize: 6,
-          data: scatter.map((pt) => ({
-            value: [pt.context_tokens, Number(pt.output_tps.toFixed(1)), pt.model_id, pt.duration_ms],
+          barWidth: 6,
+          barGap: '30%',
+          universalTransition: true,
+          itemStyle: {
+            color: chartTheme.textMuted,
+            borderRadius: [0, 3, 3, 0],
+          },
+          data: chartItems.map((item) => ({
+            value: Number(item.p50.toFixed(1)),
             itemStyle: {
-              color: providerAccentColor(pt.provider_id),
-              opacity: 0.72,
+              color: hexToRgba(providerAccentColor(item.providerId), 0.45),
+              borderRadius: [0, 3, 3, 0],
             },
           })),
         },
         {
-          name: '分箱均值趋势',
-          type: 'line',
-          smooth: true,
-          symbolSize: 7,
-          lineStyle: { color: '#eceff4', width: 1.5, type: 'dashed' },
-          itemStyle: { color: '#eceff4' },
-          data: bins
-            .filter((b) => b.sample_count > 0)
-            .map((b) => {
-              const midpoint =
-                b.bin_label === '0-8k'
-                  ? 4_000
-                  : b.bin_label === '8k-32k'
-                    ? 20_000
-                    : b.bin_label === '32k-128k'
-                      ? 80_000
-                      : b.bin_label === '128k-256k'
-                        ? 192_000
-                        : 300_000;
-              return [midpoint, Number(b.avg_tps.toFixed(1))];
-            }),
+          id: `speed-mean-${groupMode}`,
+          name: '均值',
+          type: 'bar',
+          barWidth: 6,
+          universalTransition: true,
+          itemStyle: {
+            color: chartTheme.textPrimary,
+            borderRadius: [0, 3, 3, 0],
+          },
+          data: chartItems.map((item) => ({
+            value: Number(item.mean.toFixed(1)),
+            itemStyle: {
+              color: providerAccentColor(item.providerId),
+              borderRadius: [0, 3, 3, 0],
+            },
+          })),
+        },
+        {
+          id: `speed-p95-${groupMode}`,
+          name: 'P95',
+          type: 'bar',
+          barWidth: 6,
+          universalTransition: true,
+          itemStyle: {
+            color: chartTheme.textSecondary,
+            borderRadius: [0, 3, 3, 0],
+          },
+          data: chartItems.map((item) => ({
+            value: Number(item.p95.toFixed(1)),
+            itemStyle: {
+              color: hexToRgba(providerAccentColor(item.providerId), 0.72),
+              borderColor: providerAccentColor(item.providerId),
+              borderWidth: 1,
+              borderRadius: [0, 3, 3, 0],
+            },
+          })),
         },
       ],
     };
-  }, [data]);
+  }, [chartItems, chartTheme, groupMode]);
+
+  const columns = useMemo(
+    () => [
+      colHelper.accessor('model_id', {
+        header: '模型',
+        cell: (info) => <span className="font-medium select-text">{info.getValue()}</span>,
+      }),
+      colHelper.accessor('provider_id', {
+        header: 'Provider',
+        cell: (info) => {
+          const pid = info.getValue();
+          return (
+            <div className="flex items-center gap-2" style={{ color: 'var(--text-secondary)' }}>
+              <span
+                className="inline-block w-2 h-2 rounded-full shrink-0"
+                style={{ backgroundColor: providerAccentColor(pid) }}
+              />
+              <span>{providerDisplayName(pid)}</span>
+            </div>
+          );
+        },
+      }),
+      colHelper.accessor('sample_count', {
+        header: '样本数',
+        cell: (info) => (
+          <span className="tabular-nums">{formatExactInt(info.getValue())}</span>
+        ),
+      }),
+      colHelper.accessor('mean_tps', {
+        header: '均值',
+        cell: (info) => (
+          <span className="font-medium tabular-nums">{formatTps(info.getValue())}</span>
+        ),
+      }),
+      colHelper.accessor('p50_tps', {
+        header: 'P50',
+        cell: (info) => <span className="tabular-nums">{formatTps(info.getValue())}</span>,
+      }),
+      colHelper.accessor('p95_tps', {
+        header: 'P95',
+        cell: (info) => <span className="tabular-nums">{formatTps(info.getValue())}</span>,
+      }),
+      colHelper.accessor('max_tps', {
+        header: '峰值',
+        cell: (info) => <span className="tabular-nums">{formatTps(info.getValue())}</span>,
+      }),
+      colHelper.accessor('latest_tps', {
+        header: '最新',
+        cell: (info) => (
+          <span className="tabular-nums" style={{ color: 'var(--accent-emerald)' }}>
+            {formatTps(info.getValue())}
+          </span>
+        ),
+      }),
+      colHelper.accessor('avg_duration_ms', {
+        header: '平均耗时',
+        cell: (info) => (
+          <span className="tabular-nums" style={{ color: 'var(--text-secondary)' }}>
+            {formatDurationMs(info.getValue())}
+          </span>
+        ),
+      }),
+      colHelper.accessor('avg_ttft_ms', {
+        header: '首字延迟',
+        sortUndefined: 'last',
+        cell: (info) => (
+          <span className="tabular-nums" style={{ color: 'var(--text-secondary)' }}>
+            {formatDurationMs(info.getValue())}
+          </span>
+        ),
+      }),
+    ],
+    []
+  );
+
+  const table = useReactTable({
+    data: models,
+    columns,
+    state: { sorting },
+    onSortingChange: setSorting,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  });
+
+  const chartHeight =
+    groupMode === 'provider'
+      ? Math.max(180, chartItems.length * 56 + 60)
+      : Math.max(220, chartItems.length * 42 + 60);
 
   return (
     <div className="space-y-7">
       <section
-        className="pb-5"
-        style={{ borderBottom: '1px solid var(--border-subtle)' }}
+        className="flex flex-wrap items-center justify-between gap-3 pb-5"
+        style={{ borderBottom: '1px solid var(--border-hairline)' }}
       >
-        <h1 className="text-[16px] font-semibold tracking-tight">生成速度与上下文衰减监测</h1>
-        <p className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
-          分析各模型 Output Tokens/s 的均值、P50/P95 分位分布，以及长上下文对响应吞吐的影响拐点
-        </p>
+        <div>
+          <h1 className="text-[16px] font-semibold tracking-tight">生成速度与延迟监测</h1>
+          <p className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
+            按 Provider 与模型横向对比 Output Tokens/s（均值 / P50 / P95 / 峰值）及响应耗时分布
+          </p>
+        </div>
+        <TimeRangeControl />
       </section>
 
-      {isLoading ? (
+      {isLoading && !data ? (
         <div className="py-12 text-center" style={{ color: 'var(--text-muted)' }}>
-          计算速度分布与延迟分箱…
+          计算速度分布与延迟统计…
         </div>
-      ) : (data?.models.length ?? 0) === 0 ? (
+      ) : providers.length === 0 && models.length === 0 ? (
         <div className="py-12 text-center text-[12.5px]" style={{ color: 'var(--text-muted)' }}>
-          当前时间窗内暂无带耗时样本的速度记录
+          当前时间窗内暂无有效耗时样本（需单次输出 ≥ 8 tokens 且耗时 ≥ 300ms）
         </div>
       ) : (
         <>
-          {/* Model TPS Comparison Chart */}
+          {/* Module 1: Provider Speed & Latency Overview Strip */}
           <section
             className="pb-6"
-            style={{ borderBottom: '1px solid var(--border-subtle)' }}
+            style={{ borderBottom: '1px solid var(--border-hairline)' }}
           >
-            <h2 className="text-[13.5px] font-semibold mb-2">分模型 Output Tokens/s 分布对比</h2>
-            <EChartBox option={modelSpeedOption} height={Math.max(200, (data?.models.length ?? 1) * 34)} />
-          </section>
-
-          {/* Context Decay Scatter + Binned Summary */}
-          <section
-            className="pb-6 space-y-4"
-            style={{ borderBottom: '1px solid var(--border-subtle)' }}
-          >
-            <div>
-              <h2 className="text-[13.5px] font-semibold">上下文大小 vs 生成速度衰减洞察</h2>
-              <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                散点代表单次请求上下文长度与吞吐速率，虚线为 5 个上下文区间均值变化
-              </p>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-[13.5px] font-semibold">Provider 维度速度与延迟总览</h2>
+              <span className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+                各活跃 Provider 有效流式回合加权汇总
+              </span>
             </div>
-            <EChartBox option={contextDecayOption} height={260} />
 
-            {/* Flat 5-Bin Context Summary Strip */}
-            <div
-              className="grid grid-cols-5 pt-3"
-              style={{ borderTop: '1px solid var(--border-subtle)' }}
-            >
-              {(data?.context_bins ?? []).map((bin, idx) => (
+            <div className="grid grid-cols-1 md:grid-flow-col md:auto-cols-fr gap-y-4">
+              {providers.map((p, idx) => (
                 <div
-                  key={bin.bin_label}
-                  className={idx === 0 ? 'pr-3' : 'px-3'}
+                  key={p.provider_id}
+                  className={idx === 0 ? 'md:pr-5' : 'md:px-5'}
                   style={
-                    idx > 0 ? { borderLeft: '1px solid var(--border-subtle)' } : undefined
+                    idx > 0
+                      ? { borderLeft: '1px solid var(--border-hairline)' }
+                      : undefined
                   }
                 >
-                  <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                    上下文 {bin.bin_label}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="inline-block w-2 h-2 rounded-full shrink-0"
+                        style={{ backgroundColor: providerAccentColor(p.provider_id) }}
+                      />
+                      <span
+                        className="text-[12px] font-medium"
+                        style={{ color: 'var(--text-secondary)' }}
+                      >
+                        {providerDisplayName(p.provider_id)}
+                      </span>
+                    </div>
+                    <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+                      {formatExactInt(p.sample_count)} 样本
+                    </span>
                   </div>
-                  <div className="mt-1 text-[16px] font-semibold tabular-nums">
-                    {bin.sample_count > 0 ? formatTps(bin.avg_tps) : '—'}
+
+                  <div className="mt-1.5 flex items-baseline gap-2">
+                    <span className="text-[22px] font-semibold tracking-tight tabular-nums">
+                      <AnimatedNumber value={p.mean_tps} formatter={formatTps} />
+                    </span>
+                    <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                      均值
+                    </span>
                   </div>
-                  <div className="text-[11px] tabular-nums" style={{ color: 'var(--text-secondary)' }}>
-                    {bin.sample_count} 样本 · {formatDurationMs(bin.avg_duration_ms)}
+
+                  <div
+                    className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] tabular-nums"
+                    style={{ color: 'var(--text-secondary)' }}
+                  >
+                    <span>P50 {formatTps(p.p50_tps)}</span>
+                    <span>P95 {formatTps(p.p95_tps)}</span>
+                    <span>耗时 {formatDurationMs(p.avg_duration_ms)}</span>
+                    {p.avg_ttft_ms !== null && (
+                      <span>首字 {formatDurationMs(p.avg_ttft_ms)}</span>
+                    )}
                   </div>
                 </div>
               ))}
             </div>
           </section>
 
-          {/* Flat Model Latency Detail Table */}
+          {/* Module 2: Model × Provider Grouped Speed Comparison Chart */}
+          <section
+            className="pb-6"
+            style={{ borderBottom: '1px solid var(--border-hairline)' }}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+              <div>
+                <h2 className="text-[13.5px] font-semibold">模型 × Provider 速率对比</h2>
+                <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+                  横向对比 P50 / 均值 / P95 生成速率（tok/s），色相区分 Provider
+                  {groupMode === 'model' && models.length > 12 ? '（展示样本量前 12 项）' : ''}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-3">
+                {/* Provider Color Legend */}
+                <div className="hidden sm:flex items-center gap-2.5 text-[11px]">
+                  {providers.map((p) => (
+                    <span
+                      key={p.provider_id}
+                      className="inline-flex items-center gap-1.5"
+                      style={{ color: 'var(--text-secondary)' }}
+                    >
+                      <span
+                        className="inline-block w-2 h-2 rounded-full"
+                        style={{ backgroundColor: providerAccentColor(p.provider_id) }}
+                      />
+                      {providerDisplayName(p.provider_id)}
+                    </span>
+                  ))}
+                </div>
+
+                {/* Group Mode Segmented Switch */}
+                <div
+                  className="flex items-center p-0.5 rounded"
+                  style={{
+                    backgroundColor: 'var(--bg-sidebar)',
+                    border: '1px solid var(--border-hairline)',
+                  }}
+                >
+                  {(
+                    [
+                      { id: 'model', label: '按模型分组' },
+                      { id: 'provider', label: '按 Provider 分组' },
+                    ] as const
+                  ).map((option) => {
+                    const active = groupMode === option.id;
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        data-active={active}
+                        onClick={() => setGroupMode(option.id)}
+                        className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
+                        style={{
+                          color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                          fontWeight: active ? 500 : 400,
+                        }}
+                      >
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <EChartBox option={speedComparisonOption} height={chartHeight} />
+          </section>
+
+          {/* Module 3: Model × Provider High-Density Sortable Table */}
           <section>
-            <h2 className="text-[13.5px] font-semibold mb-3">模型速度与耗时明细表</h2>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-[13.5px] font-semibold">模型 × Provider 速度与耗时明细表</h2>
+              <span className="text-[11.5px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+                共 {models.length} 组 · 点击表头排序
+              </span>
+            </div>
+
             <div className="overflow-x-auto">
               <table className="w-full border-collapse text-left">
                 <thead>
-                  <tr
-                    className="text-[11px] font-medium uppercase tracking-wider"
-                    style={{
-                      color: 'var(--text-muted)',
-                      borderBottom: '1px solid var(--border-subtle)',
-                    }}
-                  >
-                    <th className="py-2 pr-4">模型</th>
-                    <th className="py-2 px-3">Provider</th>
-                    <th className="py-2 px-3 text-right">样本数</th>
-                    <th className="py-2 px-3 text-right">最新</th>
-                    <th className="py-2 px-3 text-right">均值</th>
-                    <th className="py-2 px-3 text-right">P50</th>
-                    <th className="py-2 px-3 text-right">P95</th>
-                    <th className="py-2 px-3 text-right">峰值</th>
-                    <th className="py-2 pl-3 text-right">平均耗时</th>
-                  </tr>
+                  {table.getHeaderGroups().map((hg) => (
+                    <tr
+                      key={hg.id}
+                      className="text-[11px] font-medium uppercase tracking-wider"
+                      style={{
+                        color: 'var(--text-muted)',
+                        borderBottom: '1px solid var(--border-hairline)',
+                      }}
+                    >
+                      {hg.headers.map((header) => (
+                        <th
+                          key={header.id}
+                          onClick={header.column.getToggleSortingHandler()}
+                          className={`py-2 px-2 cursor-pointer select-none ${
+                            header.id === 'model_id' || header.id === 'provider_id'
+                              ? 'text-left'
+                              : 'text-right'
+                          }`}
+                        >
+                          {flexRender(header.column.columnDef.header, header.getContext())}
+                          {header.column.getIsSorted() === 'asc'
+                            ? ' ↑'
+                            : header.column.getIsSorted() === 'desc'
+                              ? ' ↓'
+                              : ''}
+                        </th>
+                      ))}
+                    </tr>
+                  ))}
                 </thead>
                 <tbody>
-                  {(data?.models ?? []).map((m) => (
+                  {table.getRowModel().rows.map((row) => (
                     <tr
-                      key={`${m.provider_id}-${m.model_id}`}
-                      className="hover:bg-white/[0.02]"
-                      style={{ borderBottom: '1px solid var(--border-subtle)' }}
+                      key={row.id}
+                      className="row-interactive"
+                      style={{ borderBottom: '1px solid var(--border-hairline)' }}
                     >
-                      <td className="py-2.5 pr-4 font-medium">{m.model_id}</td>
-                      <td className="py-2.5 px-3" style={{ color: 'var(--text-secondary)' }}>
-                        {providerDisplayName(m.provider_id)}
-                      </td>
-                      <td className="py-2.5 px-3 text-right tabular-nums">{m.sample_count}</td>
-                      <td className="py-2.5 px-3 text-right tabular-nums" style={{ color: 'var(--accent-emerald)' }}>
-                        {formatTps(m.latest_tps)}
-                      </td>
-                      <td className="py-2.5 px-3 text-right tabular-nums">{formatTps(m.mean_tps)}</td>
-                      <td className="py-2.5 px-3 text-right tabular-nums">{formatTps(m.p50_tps)}</td>
-                      <td className="py-2.5 px-3 text-right tabular-nums">{formatTps(m.p95_tps)}</td>
-                      <td className="py-2.5 px-3 text-right tabular-nums">{formatTps(m.max_tps)}</td>
-                      <td className="py-2.5 pl-3 text-right tabular-nums" style={{ color: 'var(--text-secondary)' }}>
-                        {formatDurationMs(m.avg_duration_ms)}
-                      </td>
+                      {row.getVisibleCells().map((cell) => (
+                        <td
+                          key={cell.id}
+                          className={`py-2.5 px-2 ${
+                            cell.column.id === 'model_id' || cell.column.id === 'provider_id'
+                              ? 'text-left'
+                              : 'text-right'
+                          }`}
+                        >
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        </td>
+                      ))}
                     </tr>
                   ))}
                 </tbody>
