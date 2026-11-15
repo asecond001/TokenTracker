@@ -1,0 +1,48 @@
+# Rust & Tauri build outputs
+/target/
+**/target/
+**/*.rs.bk
+
+# Frontend (Node / pnpm / Vite)
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+
+# Cloudflare Worker local state
+.wrangler/
+.dev.vars*
+
+# Native mobile build artifacts (Phase 3)
+DerivedData/
+*.xcuserstate
+.build/
+.gradle/
+local.properties
+apps/ios/build/
+apps/android/build/
+
+# Local databases, logs & runtime data
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
+
+# Secrets & environment variables
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# OS & editor metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
