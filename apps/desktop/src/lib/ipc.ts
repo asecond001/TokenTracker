@@ -1,0 +1,311 @@
+import { invoke } from '@tauri-apps/api/core';
+import type {
+  AnalyticsFilter,
+  AppPreferences,
+  BootstrapState,
+  ExportReportResult,
+  IngestionCursor,
+  ModelPricingEntry,
+  ModelStatsReport,
+  MonthlyQuery,
+  MonthlyReport,
+  OfficialApiReconcileResult,
+  OverviewReport,
+  ProviderConfig,
+  ScanReport,
+  SpeedLatencyReport,
+  SubscriptionPlan,
+  SubscriptionPlanStatus,
+  SyncEnvelopeV1,
+  TraySummary,
+  TrendsQuery,
+  TrendsReport,
+} from '../types/ipc';
+
+declare global {
+  interface Window {
+    __TAURI_INTERNALS__?: unknown;
+  }
+}
+
+export function isTauriRuntime(): boolean {
+  return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__);
+}
+
+function nowMinusHours(hours: number): number {
+  return Date.now() - hours * 3_600_000;
+}
+
+function defaultPreviewPreferences(now: number): AppPreferences {
+  return {
+    currency: 'USD',
+    usd_to_cny_rate: '7.25',
+    theme: 'dark',
+    minimize_to_tray: true,
+    launch_at_startup: false,
+    otlp_enabled: false,
+    otlp_port: 4318,
+    device_display_name: 'win-workstation',
+    updated_at_ms: now,
+  };
+}
+
+/**
+ * Lightweight browser-preview fallback used ONLY when the React UI is loaded directly
+ * in Vite/Vitest outside Tauri native runtime. Inside Tauri desktop, all calls go directly
+ * to Rust + SQLite via `invoke`.
+ */
+function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>): T {
+  const now = Date.now();
+  const baseHour = Math.floor(now / 3_600_000) * 3_600_000;
+  switch (command) {
+    case 'get_bootstrap_state': {
+      const data: BootstrapState = {
+        db_path: '%LOCALAPPDATA%\\TokenTracker\\tokentracker.db',
+        device: {
+          device_id: 'preview-local-device',
+          device_name: 'win-workstation',
+          platform: 'windows',
+          created_at_ms: nowMinusHours(72),
+        },
+        preferences: defaultPreviewPreferences(now),
+        providers: [
+          {
+            provider_id: 'claude_code',
+            enabled: true,
+            collection_mode: 'local_log',
+            custom_log_paths: [],
+            has_credential: false,
+            last_sync_at_ms: now - 15_000,
+            last_error: null,
+            updated_at_ms: now,
+          },
+          {
+            provider_id: 'codex',
+            enabled: true,
+            collection_mode: 'local_log',
+            custom_log_paths: [],
+            has_credential: false,
+            last_sync_at_ms: now - 20_000,
+            last_error: null,
+            updated_at_ms: now,
+          },
+          {
+            provider_id: 'antigravity',
+            enabled: true,
+            collection_mode: 'local_log',
+            custom_log_paths: [],
+            has_credential: false,
+            last_sync_at_ms: now - 10_000,
+            last_error: null,
+            updated_at_ms: now,
+          },
+        ],
+        collector_watching: true,
+        otlp_running: false,
+        otlp_port: null,
+        last_scan: {
+          files_scanned: 0,
+          events_inserted: 0,
+          events_deduplicated: 0,
+          errors: [],
+          scanned_at_ms: now,
+        },
+      };
+      return data as T;
+    }
+    case 'get_overview': {
+      const data: OverviewReport = {
+        total_tokens: 0,
+        total_cost_micro_usd: 0,
+        cache_hit_ratio: 0,
+        avg_output_tps: 0,
+        peak_output_tps: 0,
+        latest_output_tps: null,
+        total_requests: 0,
+        observable_steps: 0,
+        tokens_delta_pct: null,
+        cost_delta_pct: null,
+        cache_delta_pct: null,
+        tps_delta_pct: null,
+        series_granularity: 'hourly',
+        series: [
+          {
+            bucket_start_ms: baseHour,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            cost_micro_usd: 0,
+            requests: 0,
+          },
+        ],
+        providers: [],
+      };
+      return data as T;
+    }
+    case 'get_trends':
+      return { buckets: [], series: [], comparisons: [] } as T;
+    case 'get_monthly':
+      return {
+        year: new Date().getFullYear(),
+        month: new Date().getMonth() + 1,
+        api_equivalent_cost_micro_usd: 0,
+        subscription_monthly_fee_micro_usd: 0,
+        roi_multiplier: null,
+        month_total_tokens: 0,
+        month_total_requests: 0,
+        month_cache_saved_micro_usd: 0,
+        daily_ledger: [],
+        heatmap_365d: [],
+      } as T;
+    case 'get_models_pricing':
+      return {
+        rows: [],
+        total_cost_micro_usd: 0,
+        total_cache_saved_micro_usd: 0,
+        catalog: [],
+      } as T;
+    case 'get_subscriptions':
+    case 'get_provider_configs':
+    case 'get_ingestion_cursors':
+      return [] as T;
+    case 'get_speed_latency':
+      return { models: [], scatter_points: [], context_bins: [] } as T;
+    case 'get_tray_summary':
+      return {
+        today_tokens: 0,
+        today_cost_micro_usd: 0,
+        today_requests: 0,
+        latest_output_tps: null,
+        subscriptions: [],
+        currency: 'USD',
+        usd_to_cny_rate: '7.25',
+        active_providers_count: 3,
+        total_ingested_events: 0,
+      } as T;
+    case 'get_preferences':
+      return defaultPreviewPreferences(now) as T;
+    case 'update_preferences':
+      return ((args?.prefs as AppPreferences | undefined) ?? defaultPreviewPreferences(now)) as T;
+    case 'trigger_scan_now':
+      return {
+        files_scanned: 0,
+        events_inserted: 0,
+        events_deduplicated: 0,
+        errors: [],
+        scanned_at_ms: now,
+      } as T;
+    case 'preview_sync_envelope_v1':
+      return {
+        schema_version: 1,
+        device_id: 'preview-local-device',
+        device_display_name: 'win-workstation',
+        generated_at_ms: now,
+        since_watermark_ms: 0,
+        hourly_deltas: [],
+        subscription_snapshots: [],
+      } as T;
+    default:
+      return {} as T;
+  }
+}
+
+async function callIpc<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (!isTauriRuntime()) {
+    return buildPreviewFallback<T>(command, args);
+  }
+  return invoke<T>(command, args);
+}
+
+export const ipc = {
+  getBootstrapState: (): Promise<BootstrapState> => callIpc('get_bootstrap_state'),
+
+  getOverview: (filter: AnalyticsFilter): Promise<OverviewReport> =>
+    callIpc('get_overview', { filter }),
+
+  getTrends: (query: TrendsQuery): Promise<TrendsReport> =>
+    callIpc('get_trends', { query }),
+
+  getMonthly: (query: MonthlyQuery): Promise<MonthlyReport> =>
+    callIpc('get_monthly', { query }),
+
+  getModelsPricing: (filter: AnalyticsFilter): Promise<ModelStatsReport> =>
+    callIpc('get_models_pricing', { filter }),
+
+  upsertModelPricingOverride: (
+    entry: ModelPricingEntry,
+    recomputeHistory: boolean
+  ): Promise<number> =>
+    callIpc('upsert_model_pricing_override', {
+      entry,
+      recomputeHistory,
+    }),
+
+  deleteModelPricingOverride: (
+    modelPattern: string,
+    recomputeHistory: boolean
+  ): Promise<number> =>
+    callIpc('delete_model_pricing_override', {
+      modelPattern,
+      recomputeHistory,
+    }),
+
+  recomputeAllCosts: (): Promise<number> => callIpc('recompute_all_costs'),
+
+  getSubscriptions: (): Promise<SubscriptionPlanStatus[]> => callIpc('get_subscriptions'),
+
+  upsertSubscriptionPlan: (plan: SubscriptionPlan): Promise<void> =>
+    callIpc('upsert_subscription_plan', { plan }),
+
+  getSpeedLatency: (filter: AnalyticsFilter): Promise<SpeedLatencyReport> =>
+    callIpc('get_speed_latency', { filter }),
+
+  getTraySummary: (tzOffsetMinutes: number): Promise<TraySummary> =>
+    callIpc('get_tray_summary', { tzOffsetMinutes }),
+
+  getProviderConfigs: (): Promise<ProviderConfig[]> => callIpc('get_provider_configs'),
+
+  updateProviderConfig: (config: ProviderConfig): Promise<void> =>
+    callIpc('update_provider_config', { config }),
+
+  getIngestionCursors: (): Promise<IngestionCursor[]> => callIpc('get_ingestion_cursors'),
+
+  triggerScanNow: (): Promise<ScanReport> => callIpc('trigger_scan_now'),
+
+  setProviderApiKey: (providerId: string, apiKey: string): Promise<void> =>
+    callIpc('set_provider_api_key', { providerId, apiKey }),
+
+  deleteProviderApiKey: (providerId: string): Promise<void> =>
+    callIpc('delete_provider_api_key', { providerId }),
+
+  reconcileProviderOfficialApi: (
+    providerId: string,
+    lookbackDays: number
+  ): Promise<OfficialApiReconcileResult> =>
+    callIpc('reconcile_provider_official_api', { providerId, lookbackDays }),
+
+  getPreferences: (): Promise<AppPreferences> => callIpc('get_preferences'),
+
+  updatePreferences: (prefs: AppPreferences): Promise<AppPreferences> =>
+    callIpc('update_preferences', { prefs }),
+
+  exportMonthlyReport: (
+    query: MonthlyQuery,
+    format: 'csv' | 'json',
+    savePath?: string | null
+  ): Promise<ExportReportResult> =>
+    callIpc('export_monthly_report', {
+      query,
+      format,
+      savePath: savePath ?? null,
+    }),
+
+  previewSyncEnvelopeV1: (sinceWatermarkMs: number): Promise<SyncEnvelopeV1> =>
+    callIpc('preview_sync_envelope_v1', { sinceWatermarkMs }),
+
+  openMainWorkspace: (): Promise<void> => callIpc('open_main_workspace'),
+
+  quitApplication: (): Promise<void> => callIpc('quit_application'),
+};

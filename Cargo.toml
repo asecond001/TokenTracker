@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tokentracker-core",
+    "crates/tokentracker-collectors",
+    "apps/desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1", features = ["serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
+notify = "7"
+keyring = { version = "3", features = ["windows-native"] }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+walkdir = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-build = { version = "2", features = [] }
+tauri-plugin-autostart = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"

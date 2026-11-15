@@ -1,0 +1,2 @@
+{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-15T10:10:00Z","content":"Analyze workspace"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-15T10:10:04Z","model":"gemini-2.5-pro","input_tokens":4000,"cache_read_tokens":2000,"output_tokens":400,"reasoning_tokens":100}

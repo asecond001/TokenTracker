@@ -1,0 +1,12 @@
+{
+  "name": "tokentracker-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "typecheck": "pnpm --filter desktop typecheck",
+    "test": "pnpm --filter desktop test",
+    "build": "pnpm --filter desktop build",
+    "desktop:dev": "pnpm --filter desktop tauri dev",
+    "desktop:build": "pnpm --filter desktop tauri build"
+  }
+}

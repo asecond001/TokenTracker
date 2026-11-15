@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "totalSessions": 12,
+  "totalMessages": 480,
+  "dailyActivity": [
+    { "date": "2026-11-14", "messageCount": 120, "sessionCount": 3 },
+    { "date": "2026-11-15", "messageCount": 360, "sessionCount": 9 }
+  ],
+  "modelUsage": {
+    "claude-sonnet-4-5-20250929": {
+      "inputTokens": 25000,
+      "outputTokens": 12000,
+      "cacheReadInputTokens": 180000,
+      "cacheCreationInputTokens": 15000
+    }
+  }
+}

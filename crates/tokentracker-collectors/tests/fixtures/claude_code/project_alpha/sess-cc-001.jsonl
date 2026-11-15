@@ -1,0 +1,7 @@
+{"type":"user","timestamp":"2026-11-15T10:00:00Z","sessionId":"sess-cc-001","cwd":"C:\\Projects\\SampleApp","uuid":"u-1"}
+{"type":"assistant","timestamp":"2026-11-15T10:00:02Z","sessionId":"sess-cc-001","cwd":"C:\\Projects\\SampleApp","uuid":"a-1a","message":{"id":"msg_01alpha","model":"claude-sonnet-4-5-20250929","stop_reason":null,"usage":{"input_tokens":1200,"cache_creation_input_tokens":400,"cache_read_input_tokens":8000,"output_tokens":40}}}
+{"type":"assistant","timestamp":"2026-11-15T10:00:05Z","sessionId":"sess-cc-001","cwd":"C:\\Projects\\SampleApp","uuid":"a-1b","message":{"id":"msg_01alpha","model":"claude-sonnet-4-5-20250929","stop_reason":"tool_use","usage":{"input_tokens":1200,"cache_creation_input_tokens":400,"cache_read_input_tokens":8000,"output_tokens":300}}}
+{"type":"tool_result","timestamp":"2026-11-15T10:00:06Z","sessionId":"sess-cc-001","uuid":"tr-1"}
+{broken-json-line-to-tolerate
+{"type":"assistant","timestamp":"2026-11-15T10:00:09Z","sessionId":"sess-cc-001","cwd":"C:\\Projects\\SampleApp","uuid":"a-2","message":{"id":"msg_01beta","model":"claude-opus-4-6","stop_reason":"end_turn","usage":{"input_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":10000,"output_tokens":600}}}
+{"type":"assistant","timestamp":"2026-11-15T10:00:10Z","sessionId":"sess-cc-001","uuid":"a-syn","message":{"id":"msg_syn","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}
