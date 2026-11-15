@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 
@@ -21,6 +21,11 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
 hex = "0.4"
+aes-gcm = "0.10"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hmac = "0.12"
+base64 = "0.22"
+getrandom = "0.2"
 notify = "7"
 keyring = { version = "3", features = ["windows-native"] }
 axum = "0.8"
@@ -35,3 +40,5 @@ tauri-build = { version = "2", features = [] }
 tauri-plugin-autostart = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"

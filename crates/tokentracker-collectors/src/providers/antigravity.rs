@@ -80,7 +80,7 @@ impl AntigravityParser {
 }
 
 impl ProviderLogParser for AntigravityParser {
-    fn provider_id(&self) -> &'static str {
+    fn provider_id(&self) -> &str {
         provider_ids::ANTIGRAVITY
     }
 

@@ -25,7 +25,7 @@ impl ClaudeCodeParser {
 }
 
 impl ProviderLogParser for ClaudeCodeParser {
-    fn provider_id(&self) -> &'static str {
+    fn provider_id(&self) -> &str {
         provider_ids::CLAUDE_CODE
     }
 

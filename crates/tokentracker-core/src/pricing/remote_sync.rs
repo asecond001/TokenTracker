@@ -297,9 +297,10 @@ fn map_upstream_vendor(vendor: &str) -> Option<(&'static str, u8)> {
         | "google_vertex"
         | "vertex_ai"
         | "vertex_ai-language-models" => Some((provider_ids::ANTIGRAVITY, 1)),
-        "deepseek" => Some(("deepseek", 0)),
-        "moonshot" | "moonshotai" | "kimi" => Some(("kimi_code", 0)),
-        "minimax" => Some(("minimax_code", 0)),
+        "deepseek" => Some((provider_ids::DEEPSEEK_HARNESS, 0)),
+        "moonshot" | "moonshotai" | "kimi" => Some((provider_ids::KIMI_CODE, 0)),
+        "minimax" => Some((provider_ids::MINIMAX_CODE, 0)),
+        "qwen" | "alibaba" | "dashscope" => Some((provider_ids::QCODE, 0)),
         _ => None,
     }
 }

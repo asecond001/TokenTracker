@@ -63,8 +63,14 @@ function escapeHtml(text: string): string {
 }
 
 export function SpeedLatencyPage() {
-  const { timePreset, customStartDate, customEndDate, providerFilter, tzOffsetMinutes } =
-    useWorkspaceStore();
+  const {
+    timePreset,
+    customStartDate,
+    customEndDate,
+    providerFilter,
+    deviceFilter,
+    tzOffsetMinutes,
+  } = useWorkspaceStore();
   const chartTheme = useChartTheme();
   const [groupMode, setGroupMode] = useState<SpeedGroupMode>('model');
   const [sorting, setSorting] = useState<SortingState>([{ id: 'sample_count', desc: true }]);
@@ -78,10 +84,11 @@ export function SpeedLatencyPage() {
       start_ms: range.start_ms,
       end_ms: range.end_ms,
       provider_id: providerFilter === 'all' ? null : providerFilter,
+      device_id: deviceFilter === 'all' ? null : deviceFilter,
       tz_offset_minutes: tzOffsetMinutes,
       all_time: range.all_time,
     };
-  }, [timePreset, customStartDate, customEndDate, providerFilter, tzOffsetMinutes]);
+  }, [timePreset, customStartDate, customEndDate, providerFilter, deviceFilter, tzOffsetMinutes]);
 
   const { data, isLoading } = useQuery({
     queryKey: ['speed_latency', filter],

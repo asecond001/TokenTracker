@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { AnimatedNumber } from './AnimatedNumber';
 import { formatCost } from '../lib/format';
+import { useUpdaterStore } from '../lib/updater';
 import { useWorkspaceStore, type NavPage } from '../stores/workspaceStore';
 import type { TraySummary } from '../types/ipc';
 
@@ -34,6 +35,7 @@ const SYSTEM_NAV: Array<{ id: NavPage; label: string; icon: typeof Database }> =
 
 export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
   const { activePage, setActivePage, currency, usdToCnyRate } = useWorkspaceStore();
+  const availableUpdate = useUpdaterStore((s) => s.availableUpdate);
 
   const borderToken = hasBackdrop ? 'var(--border-hairline)' : 'var(--border-subtle)';
 
@@ -91,9 +93,25 @@ export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
             style={{ color: 'var(--text-muted)' }}
           >
             <span>系统配置</span>
-            <span className="font-mono text-[10px] font-normal lowercase tabular-nums">
-              v0.1.1
-            </span>
+            <div className="flex items-center gap-1.5">
+              {availableUpdate && (
+                <button
+                  type="button"
+                  onClick={() => setActivePage('preferences')}
+                  className="px-1.5 py-0.5 rounded text-[9.5px] font-medium normal-case tracking-normal cursor-pointer hover:opacity-90 tabular-nums"
+                  style={{
+                    backgroundColor: 'rgba(16, 185, 129, 0.14)',
+                    color: 'var(--accent-emerald)',
+                  }}
+                  title={`发现新版本 v${availableUpdate.version}，点击前往偏好设置安装`}
+                >
+                  有新版本 v{availableUpdate.version}
+                </button>
+              )}
+              <span className="font-mono text-[10px] font-normal lowercase tabular-nums">
+                v0.2.0
+              </span>
+            </div>
           </div>
           <nav className="space-y-0.5">{SYSTEM_NAV.map(renderItem)}</nav>
         </div>

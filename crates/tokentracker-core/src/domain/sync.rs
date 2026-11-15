@@ -48,3 +48,53 @@ pub struct SyncEnvelopeV1 {
     pub hourly_deltas: Vec<SyncHourlyDelta>,
     pub subscription_snapshots: Vec<SyncSubscriptionSnapshot>,
 }
+
+/// Persistent cloud synchronization configuration and watermarks (`sync_state` row `id = 1`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncConfigState {
+    pub enabled: bool,
+    pub worker_url: Option<String>,
+    pub e2ee_enabled: bool,
+    pub e2ee_kdf_salt_hex: Option<String>,
+    pub last_push_watermark_ms: i64,
+    pub last_pull_watermark_ms: i64,
+    pub last_sync_at_ms: Option<i64>,
+    pub last_sync_error: Option<String>,
+    pub updated_at_ms: i64,
+}
+
+/// Remote device subscription quota status synced via `SyncEnvelopeV1`.
+/// Isolated from local `subscription_plans` so remote snapshots stay read-only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemoteSubscriptionSnapshot {
+    pub device_id: String,
+    pub device_display_name: String,
+    pub plan_id: String,
+    pub window_id: String,
+    pub provider_id: String,
+    pub plan_name: String,
+    pub window_label: String,
+    pub used_percent: f64,
+    pub resets_at_ms: Option<i64>,
+    pub source: String,
+    pub updated_at_ms: i64,
+}
+
+/// Optional E2EE wrapper for `SyncEnvelopeV1` using PBKDF2-HMAC-SHA256 + AES-256-GCM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncryptedSyncEnvelopeV1 {
+    pub schema_version: u32,
+    pub device_id: String,
+    pub seq_ms: i64,
+    pub kdf_salt_hex: String,
+    pub nonce_hex: String,
+    pub ciphertext_b64: String,
+}
+
+/// Outcome summary after applying a pulled `SyncEnvelopeV1` locally.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteSyncApplyResult {
+    pub device_id: String,
+    pub hourly_buckets_applied: usize,
+    pub subscription_snapshots_applied: usize,
+}

@@ -110,6 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         start_ms: 0,
         end_ms: i64::MAX / 2,
         provider_id: None,
+        device_id: None,
         tz_offset_minutes: 480,
         all_time: false,
     };

@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useContext, useEffect, useMemo, useState } from 'react';
+import { QueryClient, QueryClientContext, useQuery } from '@tanstack/react-query';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   Minus,
@@ -9,7 +10,7 @@ import {
   Moon,
   Monitor,
 } from 'lucide-react';
-import { isTauriRuntime } from '../lib/ipc';
+import { ipc, isTauriRuntime } from '../lib/ipc';
 import { useWorkspaceStore, type NavPage } from '../stores/workspaceStore';
 import type { CurrencyCode, ThemeMode } from '../types/ipc';
 
@@ -34,11 +35,16 @@ const PAGE_TITLES: Record<NavPage, string> = {
   preferences: '偏好设置',
 };
 
-const PROVIDER_FILTERS = [
+const BUILTIN_PROVIDER_FILTERS = [
   { id: 'all', label: '全部源' },
   { id: 'claude_code', label: 'Claude Code' },
   { id: 'codex', label: 'Codex' },
   { id: 'antigravity', label: 'Antigravity' },
+  { id: 'kimi_code', label: 'Kimi Code' },
+  { id: 'workbuddy', label: 'Workbuddy' },
+  { id: 'deepseek_harness', label: 'DeepSeek Harness' },
+  { id: 'qcode', label: 'QCode' },
+  { id: 'minimax_code', label: 'MiniMax Code' },
 ];
 
 const THEME_LABELS: Record<ThemeMode, string> = {
@@ -59,12 +65,67 @@ export function TitleBar({
   const {
     activePage,
     providerFilter,
+    deviceFilter,
     currency,
     theme,
     setProviderFilter,
+    setDeviceFilter,
     setCurrency,
     setTheme,
   } = useWorkspaceStore();
+
+  const parentQueryClient = useContext(QueryClientContext);
+  const fallbackQueryClient = useMemo(
+    () => new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+    []
+  );
+  const queryClient = parentQueryClient ?? fallbackQueryClient;
+
+  const { data: customRules = [] } = useQuery(
+    {
+      queryKey: ['custom-provider-rules'],
+      queryFn: () => ipc.listCustomProviderRules(),
+      staleTime: 30_000,
+    },
+    queryClient
+  );
+
+  const { data: devices = [] } = useQuery(
+    {
+      queryKey: ['devices'],
+      queryFn: () => ipc.listDevices(),
+      staleTime: 30_000,
+    },
+    queryClient
+  );
+
+  const safeDevices = useMemo(() => (Array.isArray(devices) ? devices : []), [devices]);
+
+  useEffect(() => {
+    if (
+      deviceFilter !== 'all' &&
+      safeDevices.length > 0 &&
+      !safeDevices.some((dev) => dev.device_id === deviceFilter)
+    ) {
+      setDeviceFilter('all');
+    }
+  }, [deviceFilter, safeDevices, setDeviceFilter]);
+
+  const providerOptions = useMemo(() => {
+    const safeRules = Array.isArray(customRules) ? customRules : [];
+    const customEntries = safeRules
+      .filter((rule) => rule.enabled)
+      .map((rule) => {
+        const overrideId = rule.mapping_spec.provider_id_override?.trim();
+        const id = overrideId
+          ? overrideId
+          : rule.rule_id.startsWith('custom_')
+            ? rule.rule_id
+            : `custom_${rule.rule_id}`;
+        return { id, label: rule.display_name };
+      });
+    return [...BUILTIN_PROVIDER_FILTERS, ...customEntries];
+  }, [customRules]);
 
   const [livePulseActive, setLivePulseActive] = useState(false);
 
@@ -177,6 +238,28 @@ export function TitleBar({
 
       {/* Center/Right Controls */}
       <div className="flex items-center gap-2">
+        {/* Multi-Device Quick Filter (only when >1 devices synced) */}
+        {safeDevices.length > 1 && (
+          <select
+            aria-label="设备筛选"
+            value={deviceFilter}
+            onChange={(e) => setDeviceFilter(e.target.value)}
+            className="px-2 py-1 text-[11.5px] rounded outline-none cursor-pointer"
+            style={{
+              backgroundColor: controlBgToken,
+              border: `1px solid ${borderToken}`,
+              color: 'var(--text-primary)',
+            }}
+          >
+            <option value="all">全部设备</option>
+            {safeDevices.map((dev, index) => (
+              <option key={dev.device_id} value={dev.device_id}>
+                {index === 0 ? `本机 · ${dev.device_name}` : dev.device_name}
+              </option>
+            ))}
+          </select>
+        )}
+
         {/* Provider Quick Filter */}
         <select
           aria-label="Provider 筛选"
@@ -189,7 +272,7 @@ export function TitleBar({
             color: 'var(--text-primary)',
           }}
         >
-          {PROVIDER_FILTERS.map((pf) => (
+          {providerOptions.map((pf) => (
             <option key={pf.id} value={pf.id}>
               {pf.label}
             </option>

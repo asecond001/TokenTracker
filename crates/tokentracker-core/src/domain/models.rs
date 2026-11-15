@@ -1,13 +1,42 @@
+use chrono::{DateTime, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Canonical Phase 1 provider identifiers.
+/// Canonical built-in provider identifiers (Phase 1 + Phase 2).
 pub mod provider_ids {
     pub const CLAUDE_CODE: &str = "claude_code";
     pub const CODEX: &str = "codex";
     pub const ANTIGRAVITY: &str = "antigravity";
+    pub const KIMI_CODE: &str = "kimi_code";
+    pub const WORKBUDDY: &str = "workbuddy";
+    pub const DEEPSEEK_HARNESS: &str = "deepseek_harness";
+    pub const QCODE: &str = "qcode";
+    pub const MINIMAX_CODE: &str = "minimax_code";
 
-    pub const ALL: [&str; 3] = [CLAUDE_CODE, CODEX, ANTIGRAVITY];
+    pub const ALL: [&str; 8] = [
+        CLAUDE_CODE,
+        CODEX,
+        ANTIGRAVITY,
+        KIMI_CODE,
+        WORKBUDDY,
+        DEEPSEEK_HARNESS,
+        QCODE,
+        MINIMAX_CODE,
+    ];
+
+    pub fn display_name(provider_id: &str) -> &str {
+        match provider_id {
+            CLAUDE_CODE => "Claude Code",
+            CODEX => "Codex",
+            ANTIGRAVITY => "Antigravity",
+            KIMI_CODE => "Kimi Code",
+            WORKBUDDY => "Workbuddy",
+            DEEPSEEK_HARNESS => "DeepSeek Harness",
+            QCODE => "QCode",
+            MINIMAX_CODE => "MiniMax Code",
+            other => other,
+        }
+    }
 }
 
 /// Compliant data acquisition modes permitted by AGENTS.md Section 3.
@@ -343,6 +372,8 @@ pub struct AppPreferences {
     pub last_rate_sync_at_ms: Option<i64>,
     #[serde(default)]
     pub last_pricing_sync_at_ms: Option<i64>,
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
     pub updated_at_ms: i64,
 }
 
@@ -366,9 +397,166 @@ impl Default for AppPreferences {
             exchange_rate_auto: true,
             last_rate_sync_at_ms: None,
             last_pricing_sync_at_ms: None,
+            auto_check_updates: true,
             updated_at_ms: 0,
         }
     }
+}
+
+/// Physical TPS calculation guarded against streaming sub-300ms tail deltas and tiny responses.
+pub fn compute_tps(output_tokens: i64, duration_ms: Option<i64>) -> Option<f64> {
+    let dur = duration_ms?;
+    if output_tokens < 8 || dur < 300 {
+        return None;
+    }
+    let tps = output_tokens as f64 / (dur as f64 / 1000.0);
+    if tps.is_finite() && tps > 0.0 && tps <= 800.0 {
+        Some(tps)
+    } else {
+        None
+    }
+}
+
+/// Parse an ISO-8601 / RFC-3339 timestamp string or epoch seconds/ms number into Unix epoch ms.
+pub fn parse_timestamp_ms_json(val: Option<&serde_json::Value>) -> Option<i64> {
+    let v = val?;
+    if let Some(num) = v.as_i64() {
+        return Some(if num.abs() < 10_000_000_000 {
+            num * 1000
+        } else {
+            num
+        });
+    }
+    if let Some(num_f) = v.as_f64() {
+        if num_f.is_finite() {
+            let ms = if num_f.abs() < 10_000_000_000.0 {
+                (num_f * 1000.0).round() as i64
+            } else {
+                num_f.round() as i64
+            };
+            return Some(ms);
+        }
+    }
+    let s = v.as_str()?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(num) = s.parse::<i64>() {
+        return Some(if num.abs() < 10_000_000_000 {
+            num * 1000
+        } else {
+            num
+        });
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.timestamp_millis());
+    }
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y/%m/%d %H:%M:%S") {
+        return Some(ndt.and_utc().timestamp_millis());
+    }
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        return Some(ndt.and_utc().timestamp_millis());
+    }
+    None
+}
+
+/// Cached balance and quota response fetched from a provider's official public API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderBalanceSnapshot {
+    pub provider_id: String,
+    pub currency: String,
+    pub total_balance_micro: Option<i64>,
+    pub granted_balance_micro: Option<i64>,
+    pub topped_up_balance_micro: Option<i64>,
+    pub daily_quota_used_micro: Option<i64>,
+    pub daily_quota_limit_micro: Option<i64>,
+    pub fetched_at_ms: i64,
+}
+
+/// Supported log/payload format presets for user-configured custom providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomProtocolKind {
+    OpenaiJsonl,
+    AnthropicJsonl,
+    DeclarativeJsonl,
+}
+
+impl CustomProtocolKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenaiJsonl => "openai_jsonl",
+            Self::AnthropicJsonl => "anthropic_jsonl",
+            Self::DeclarativeJsonl => "declarative_jsonl",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value.trim() {
+            "anthropic_jsonl" => Self::AnthropicJsonl,
+            "declarative_jsonl" => Self::DeclarativeJsonl,
+            _ => Self::OpenaiJsonl,
+        }
+    }
+}
+
+/// JSON pointer path configuration for declarative JSONL extraction.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclarativeMappingSpec {
+    #[serde(default)]
+    pub provider_id_override: Option<String>,
+    #[serde(default)]
+    pub file_extensions: Vec<String>,
+    #[serde(default)]
+    pub timestamp_path: Option<String>,
+    #[serde(default)]
+    pub model_path: Option<String>,
+    #[serde(default)]
+    pub session_id_path: Option<String>,
+    #[serde(default)]
+    pub request_id_path: Option<String>,
+    #[serde(default)]
+    pub input_tokens_path: Option<String>,
+    #[serde(default)]
+    pub output_tokens_path: Option<String>,
+    #[serde(default)]
+    pub cache_read_tokens_path: Option<String>,
+    #[serde(default)]
+    pub cache_write_tokens_path: Option<String>,
+    #[serde(default)]
+    pub reasoning_tokens_path: Option<String>,
+    #[serde(default)]
+    pub duration_ms_path: Option<String>,
+    #[serde(default)]
+    pub ttft_ms_path: Option<String>,
+}
+
+/// User-defined compatible / declarative local log ingestion rule stored in SQLite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomProviderRule {
+    pub rule_id: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub protocol_kind: CustomProtocolKind,
+    pub log_roots: Vec<String>,
+    pub mapping_spec: DeclarativeMappingSpec,
+    pub updated_at_ms: i64,
+}
+
+/// Local dry-run validation result for testing one sanitized JSONL line against a custom rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomRuleTestResult {
+    pub matched: bool,
+    pub provider_id: String,
+    pub model_id: Option<String>,
+    pub timestamp_ms: Option<i64>,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub reasoning_tokens: i64,
+    pub estimated_cost_micro_usd: i64,
+    pub diagnostic: String,
 }
 
 /// Result summary returned after synchronizing remote USD->CNY rate and public model pricing.

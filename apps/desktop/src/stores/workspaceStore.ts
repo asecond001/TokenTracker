@@ -101,7 +101,8 @@ interface WorkspaceState {
   timePreset: TimePreset;
   customStartDate: string; // YYYY-MM-DD
   customEndDate: string; // YYYY-MM-DD
-  providerFilter: string; // 'all' | 'claude_code' | 'codex' | 'antigravity'
+  providerFilter: string; // 'all' | 'claude_code' | 'codex' | 'antigravity' | ...
+  deviceFilter: string; // 'all' | device_id
   currency: CurrencyCode;
   usdToCnyRate: string;
   theme: ThemeMode;
@@ -112,6 +113,7 @@ interface WorkspaceState {
   setTimePreset: (preset: TimePreset) => void;
   setCustomDateRange: (start: string, end: string) => void;
   setProviderFilter: (provider: string) => void;
+  setDeviceFilter: (deviceId: string) => void;
   setCurrency: (currency: CurrencyCode) => void;
   setUsdToCnyRate: (rate: string) => void;
   setTheme: (theme: ThemeMode) => void;
@@ -134,6 +136,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   customStartDate: toDateInputString(weekAgo),
   customEndDate: toDateInputString(nowDate),
   providerFilter: 'all',
+  deviceFilter: 'all',
   currency: 'USD',
   usdToCnyRate: '7.25',
   theme: 'dark',
@@ -145,6 +148,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   setCustomDateRange: (customStartDate, customEndDate) =>
     set({ customStartDate, customEndDate, timePreset: 'custom' }),
   setProviderFilter: (providerFilter) => set({ providerFilter }),
+  setDeviceFilter: (deviceFilter) => set({ deviceFilter }),
   setCurrency: (currency) => set({ currency }),
   setUsdToCnyRate: (usdToCnyRate) => set({ usdToCnyRate }),
   setTheme: (theme) => {
@@ -164,6 +168,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       start_ms: range.start_ms,
       end_ms: range.end_ms,
       provider_id: state.providerFilter === 'all' ? null : state.providerFilter,
+      device_id: state.deviceFilter === 'all' ? null : state.deviceFilter,
       tz_offset_minutes: state.tzOffsetMinutes,
       all_time: range.all_time,
     };

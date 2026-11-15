@@ -60,6 +60,7 @@ export function OverviewPage() {
     customStartDate,
     customEndDate,
     providerFilter,
+    deviceFilter,
     currency,
     usdToCnyRate,
     tzOffsetMinutes,
@@ -78,10 +79,11 @@ export function OverviewPage() {
       start_ms: range.start_ms,
       end_ms: range.end_ms,
       provider_id: providerFilter === 'all' ? null : providerFilter,
+      device_id: deviceFilter === 'all' ? null : deviceFilter,
       tz_offset_minutes: tzOffsetMinutes,
       all_time: range.all_time,
     };
-  }, [timePreset, customStartDate, customEndDate, providerFilter, tzOffsetMinutes]);
+  }, [timePreset, customStartDate, customEndDate, providerFilter, deviceFilter, tzOffsetMinutes]);
 
   const { data, isLoading } = useQuery({
     queryKey: ['overview', filter],
@@ -221,8 +223,250 @@ export function OverviewPage() {
     };
   }, [data, activeProviderSeries, chartDimension, chartType, chartTheme]);
 
+  const liveSessions = data?.active_sessions ?? [];
+  const activeCount = liveSessions.filter((s) => s.activity_state === 'active').length;
+  const recentCount = liveSessions.length - activeCount;
+
   return (
     <div className="space-y-7">
+      {/* Top 2-Column Live Pulse & Active/Recent Sessions Strip (Flat Hairline Layout) */}
+      <section
+        className="grid grid-cols-1 lg:grid-cols-12 gap-6 pb-6"
+        style={{ borderBottom: '1px solid var(--border-hairline)' }}
+      >
+        {/* Left: Today Spend + Provider Share Bar + Top Models */}
+        <div
+          className="lg:col-span-5 lg:pr-6 space-y-4 lg:border-r"
+          style={{ borderColor: 'var(--border-hairline)' }}
+        >
+          <div className="flex items-baseline justify-between gap-3">
+            <div>
+              <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                今日实时用量态势
+              </div>
+              <div className="mt-1 flex items-baseline gap-2.5 tabular-nums">
+                <span className="text-[22px] font-semibold tracking-tight">
+                  <AnimatedNumber
+                    value={data?.today_cost_micro_usd ?? 0}
+                    formatter={(v) => formatCost(v, currency, usdToCnyRate)}
+                  />
+                </span>
+                <span className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
+                  ·{' '}
+                  <AnimatedNumber
+                    value={data?.today_tokens ?? 0}
+                    formatter={formatTokens}
+                  />{' '}
+                  Tokens
+                </span>
+              </div>
+            </div>
+            <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+              统计周期按 {data?.series_granularity === 'hourly' ? '小时' : '自然日'}
+            </span>
+          </div>
+
+          {/* Stacked Provider Share Bar */}
+          <div className="space-y-2">
+            <div
+              className="flex items-center justify-between text-[11px]"
+              style={{ color: 'var(--text-secondary)' }}
+            >
+              <span>当前筛选区间 Provider 占比</span>
+              <span className="tabular-nums" style={{ color: 'var(--text-muted)' }}>
+                {(data?.provider_shares ?? []).length} 个活跃数据源
+              </span>
+            </div>
+            {(data?.provider_shares ?? []).length > 0 ? (
+              <>
+                <div
+                  className="h-2 w-full rounded-sm overflow-hidden flex"
+                  style={{ backgroundColor: 'var(--bg-hover)' }}
+                >
+                  {(data?.provider_shares ?? []).map((share) => (
+                    <div
+                      key={share.key}
+                      style={{
+                        width: `${Math.max(1.5, share.token_share_percent)}%`,
+                        backgroundColor: providerAccentColor(share.key),
+                      }}
+                      title={`${providerDisplayName(share.key)}: ${formatTokens(share.tokens)} (${share.token_share_percent.toFixed(1)}%)`}
+                    />
+                  ))}
+                </div>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] tabular-nums">
+                  {(data?.provider_shares ?? []).slice(0, 6).map((share) => (
+                    <div key={share.key} className="flex items-center justify-between gap-2 min-w-0">
+                      <span className="inline-flex items-center gap-1.5 min-w-0">
+                        <span
+                          className="inline-block w-2 h-2 rounded-full shrink-0"
+                          style={{ backgroundColor: providerAccentColor(share.key) }}
+                        />
+                        <span className="truncate" style={{ color: 'var(--text-secondary)' }}>
+                          {providerDisplayName(share.key)}
+                        </span>
+                      </span>
+                      <span style={{ color: 'var(--text-muted)' }}>
+                        {share.token_share_percent.toFixed(1)}% ·{' '}
+                        {formatCost(share.cost_micro_usd, currency, usdToCnyRate)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                当前筛选窗口暂无用量占比数据
+              </div>
+            )}
+          </div>
+
+          {/* Top 3 Model Share Breakdown */}
+          <div
+            className="pt-3 space-y-2"
+            style={{ borderTop: '1px solid var(--border-subtle)' }}
+          >
+            <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+              Top 3 模型消耗占比
+            </div>
+            {(data?.top_model_shares ?? []).slice(0, 3).map((model) => (
+              <div key={model.key} className="space-y-1 text-[11px] tabular-nums">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono truncate" style={{ color: 'var(--text-primary)' }}>
+                    {model.label}
+                  </span>
+                  <span className="shrink-0" style={{ color: 'var(--text-muted)' }}>
+                    {model.token_share_percent.toFixed(1)}% · {formatTokens(model.tokens)}
+                  </span>
+                </div>
+                <InlineProgressBar
+                  percent={model.token_share_percent}
+                  accentColor="var(--accent-sky)"
+                  heightPx={3}
+                />
+              </div>
+            ))}
+            {(data?.top_model_shares ?? []).length === 0 && (
+              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                暂无模型分布记录
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Right: Active & Recent Sessions (Last 24h) */}
+        <div className="lg:col-span-7 flex flex-col min-w-0">
+          <div className="flex items-center justify-between gap-3 pb-2.5">
+            <div className="flex items-center gap-2">
+              <span className="text-[12px] font-medium">活跃与近期会话（15m）</span>
+              <span
+                className="px-1.5 py-0.5 rounded text-[10.5px] tabular-nums"
+                style={{
+                  backgroundColor: 'rgba(16, 185, 129, 0.12)',
+                  color: 'var(--accent-emerald)',
+                }}
+              >
+                {activeCount} 活跃
+              </span>
+              {recentCount > 0 && (
+                <span
+                  className="px-1.5 py-0.5 rounded text-[10.5px] tabular-nums"
+                  style={{
+                    backgroundColor: 'var(--bg-hover)',
+                    color: 'var(--text-secondary)',
+                  }}
+                >
+                  {recentCount} 近期
+                </span>
+              )}
+            </div>
+            <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              2 分钟内请求标记为实时活跃 · 仅显示脱敏工程目录名
+            </span>
+          </div>
+
+          {liveSessions.length > 0 ? (
+            <div
+              className="divide-y max-h-[228px] overflow-y-auto pr-1"
+              style={{ borderTop: '1px solid var(--border-subtle)' }}
+            >
+              {liveSessions.map((session) => {
+                const isLive = session.activity_state === 'active';
+                return (
+                  <div
+                    key={`${session.provider_id}-${session.session_key}`}
+                    className="py-2 flex items-center justify-between gap-3 text-[12px]"
+                    style={{ borderColor: 'var(--border-subtle)' }}
+                  >
+                    <div className="min-w-0 flex items-start gap-2.5">
+                      <span
+                        className={`mt-1.5 inline-block w-2 h-2 rounded-full shrink-0 ${isLive ? 'collector-dot-live' : ''}`}
+                        style={{
+                          backgroundColor: isLive ? 'var(--accent-emerald)' : 'var(--text-muted)',
+                        }}
+                      />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="font-medium truncate">
+                            {providerDisplayName(session.provider_id)} · {session.model_id}
+                          </span>
+                          <span
+                            className="text-[10px] px-1.5 py-0.2 rounded shrink-0"
+                            style={{
+                              backgroundColor: isLive
+                                ? 'rgba(16, 185, 129, 0.14)'
+                                : 'var(--bg-hover)',
+                              color: isLive
+                                ? 'var(--accent-emerald)'
+                                : 'var(--text-muted)',
+                            }}
+                          >
+                            {isLive ? '活跃中' : '近期'}
+                          </span>
+                        </div>
+                        <div
+                          className="text-[11px] flex items-center gap-2 truncate tabular-nums"
+                          style={{ color: 'var(--text-muted)' }}
+                        >
+                          <span className="truncate">{session.project_label}</span>
+                          <span>·</span>
+                          <span className="font-mono">{session.session_key}</span>
+                          <span>·</span>
+                          <span>{session.request_count} 次请求</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="shrink-0 text-right tabular-nums">
+                      <div className="text-[12px] font-medium">
+                        {formatTokens(session.total_tokens)}{' '}
+                        <span style={{ color: 'var(--text-muted)' }}>
+                          ({formatCost(session.estimated_cost_micro_usd, currency, usdToCnyRate)})
+                        </span>
+                      </div>
+                      <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                        {formatTps(session.latest_output_tps)} ·{' '}
+                        {formatRelativeTime(session.last_active_at_ms)}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div
+              className="py-8 text-center text-[12px]"
+              style={{
+                borderTop: '1px solid var(--border-subtle)',
+                color: 'var(--text-muted)',
+              }}
+            >
+              过去 15 分钟内暂无本地或远端活跃会话；运行受支持的 AI 编程工具后将在此实时显示。
+            </div>
+          )}
+        </div>
+      </section>
+
       {/* Top Flat Single-Row 4-Metric Strip (Separated by 1px Vertical Hairlines — No Bento Cards) */}
       <section
         className="grid grid-cols-4 pb-6"

@@ -1,0 +1,11 @@
+name = "tokentracker-sync-worker"
+main = "src/index.ts"
+compatibility_date = "2026-03-01"
+
+[[durable_objects.bindings]]
+name = "SYNC_HUB"
+class_name = "SyncHubDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SyncHubDO"]

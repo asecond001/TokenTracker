@@ -8,17 +8,24 @@ use tauri_plugin_autostart::ManagerExt;
 use tokentracker_collectors::providers::official_api::{
     reconcile_official_usage_api, OfficialApiReconcileResult,
 };
-use tokentracker_collectors::ScanReport;
+use tokentracker_collectors::{
+    clear_sync_credentials as clear_sync_creds,
+    refresh_provider_balance as collect_provider_balance, set_sync_credentials as set_sync_creds,
+    BalanceRefreshOutcome, ScanReport, SyncRunReport, SyncStatusView,
+};
 use tokentracker_core::analytics::{
     export_monthly_csv, export_monthly_json, AnalyticsFilter, ModelStatsReport, MonthlyQuery,
     MonthlyReport, OverviewReport, SpeedLatencyReport, TraySummary, TrendsQuery, TrendsReport,
 };
+use tokentracker_core::declarative::test_custom_rule_line;
 use tokentracker_core::domain::{
-    AppPreferences, CatalogSyncResult, DeviceRecord, IngestionCursor, ModelPricingEntry,
-    ObservedRateLimitWindow, ProviderConfig, SubscriptionPlan, SubscriptionPlanTemplate,
+    AppPreferences, CatalogSyncResult, CustomProviderRule, CustomRuleTestResult, DeviceRecord,
+    IngestionCursor, ModelPricingEntry, ObservedRateLimitWindow, ProviderBalanceSnapshot,
+    ProviderConfig, RemoteSubscriptionSnapshot, SubscriptionPlan, SubscriptionPlanTemplate,
     SyncEnvelopeV1,
 };
 use tokentracker_core::subscription::{subscription_plan_templates, SubscriptionPlanStatus};
+use tokentracker_core::sync_crypto::generate_kdf_salt_hex;
 use tokentracker_core::CoreError;
 
 use crate::state::AppState;
@@ -304,7 +311,9 @@ pub fn upsert_subscription_plan(
     state
         .storage
         .upsert_subscription_plan(&plan)
-        .map_err(IpcError::from)
+        .map_err(IpcError::from)?;
+    state.sync_client.notify_local_change();
+    Ok(())
 }
 
 #[tauri::command]
@@ -315,7 +324,9 @@ pub fn delete_subscription_plan(
     state
         .storage
         .delete_subscription_plan(&plan_id)
-        .map_err(IpcError::from)
+        .map_err(IpcError::from)?;
+    state.sync_client.notify_local_change();
+    Ok(())
 }
 
 #[tauri::command]
@@ -383,10 +394,14 @@ pub fn get_ingestion_cursors(state: State<'_, AppState>) -> Result<Vec<Ingestion
 #[tauri::command]
 pub async fn trigger_scan_now(state: State<'_, AppState>) -> Result<ScanReport, IpcError> {
     let coord = state.coordinator.clone();
-    tauri::async_runtime::spawn_blocking(move || coord.scan_now())
+    let report = tauri::async_runtime::spawn_blocking(move || coord.scan_now())
         .await
         .map_err(|e| IpcError::new("TASK_JOIN_ERROR", e.to_string()))?
-        .map_err(IpcError::from)
+        .map_err(IpcError::from)?;
+    if report.events_inserted > 0 {
+        state.sync_client.notify_local_change();
+    }
+    Ok(report)
 }
 
 #[tauri::command]
@@ -456,6 +471,7 @@ pub async fn update_preferences(
     }
 
     let updated = state.storage.get_preferences()?;
+    state.sync_client.notify_local_change();
     apply_theme_to_app(&app, &updated.theme);
     let _ = app.emit("preferences-updated", &updated);
     Ok(updated)
@@ -647,8 +663,189 @@ pub fn preview_sync_envelope_v1(
 }
 
 #[tauri::command]
-pub fn open_main_workspace(app: AppHandle) {
+pub fn list_custom_provider_rules(
+    state: State<'_, AppState>,
+) -> Result<Vec<CustomProviderRule>, IpcError> {
+    state
+        .storage
+        .list_custom_provider_rules()
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub fn upsert_custom_provider_rule(
+    state: State<'_, AppState>,
+    rule: CustomProviderRule,
+) -> Result<Vec<CustomProviderRule>, IpcError> {
+    state.storage.upsert_custom_provider_rule(&rule)?;
+    state
+        .storage
+        .list_custom_provider_rules()
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub fn delete_custom_provider_rule(
+    state: State<'_, AppState>,
+    rule_id: String,
+) -> Result<Vec<CustomProviderRule>, IpcError> {
+    state.storage.delete_custom_provider_rule(&rule_id)?;
+    state
+        .storage
+        .list_custom_provider_rules()
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub fn test_custom_provider_sample_line(
+    state: State<'_, AppState>,
+    rule: CustomProviderRule,
+    sample_line: String,
+) -> Result<CustomRuleTestResult, IpcError> {
+    let catalog = state.storage.list_model_pricing()?;
+    Ok(test_custom_rule_line(&rule, &sample_line, &catalog))
+}
+
+#[tauri::command]
+pub fn get_provider_balances(
+    state: State<'_, AppState>,
+) -> Result<Vec<ProviderBalanceSnapshot>, IpcError> {
+    state
+        .storage
+        .list_provider_balances()
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub async fn refresh_provider_balance(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<BalanceRefreshOutcome, IpcError> {
+    let outcome = collect_provider_balance(&state.storage, &provider_id, state.credentials.as_ref())
+        .await
+        .map_err(IpcError::from)?;
+    if !outcome.from_cache && outcome.rate_limits_updated > 0 {
+        let _ = app.emit("usage-updated", &outcome);
+    }
+    Ok(outcome)
+}
+
+#[tauri::command]
+pub fn list_devices(state: State<'_, AppState>) -> Result<Vec<DeviceRecord>, IpcError> {
+    state.storage.list_devices().map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatusView, IpcError> {
+    state.sync_client.status_view().map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub fn update_sync_config(
+    state: State<'_, AppState>,
+    enabled: bool,
+    worker_url: Option<String>,
+    e2ee_enabled: bool,
+) -> Result<SyncStatusView, IpcError> {
+    let current = state
+        .storage
+        .get_sync_config_state()
+        .map_err(IpcError::from)?;
+    let salt = if e2ee_enabled
+        && current
+            .e2ee_kdf_salt_hex
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+    {
+        Some(generate_kdf_salt_hex().map_err(IpcError::from)?)
+    } else {
+        None
+    };
+
+    state
+        .storage
+        .update_sync_config_state(
+            enabled,
+            worker_url.as_deref(),
+            e2ee_enabled,
+            salt.as_deref(),
+        )
+        .map_err(IpcError::from)?;
+    state.sync_client.reconfigure();
+    state.sync_client.status_view().map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub fn set_sync_credentials(
+    state: State<'_, AppState>,
+    bearer_token: Option<String>,
+    e2ee_passphrase: Option<String>,
+) -> Result<SyncStatusView, IpcError> {
+    set_sync_creds(
+        state.credentials.as_ref(),
+        bearer_token.as_deref(),
+        e2ee_passphrase.as_deref(),
+    )
+    .map_err(IpcError::from)?;
+    state.sync_client.reconfigure();
+    state.sync_client.status_view().map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub fn clear_sync_credentials(state: State<'_, AppState>) -> Result<SyncStatusView, IpcError> {
+    clear_sync_creds(state.credentials.as_ref()).map_err(IpcError::from)?;
+    state.sync_client.reconfigure();
+    state.sync_client.status_view().map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub async fn trigger_cloud_sync_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SyncRunReport, IpcError> {
+    let report = state
+        .sync_client
+        .trigger_now()
+        .await
+        .map_err(IpcError::from)?;
+    if report.applied_hourly_buckets > 0 || report.applied_subscriptions > 0 {
+        let _ = app.emit("usage-updated", &report);
+    }
+    Ok(report)
+}
+
+#[tauri::command]
+pub fn get_remote_subscription_snapshots(
+    state: State<'_, AppState>,
+) -> Result<Vec<RemoteSubscriptionSnapshot>, IpcError> {
+    state
+        .storage
+        .list_remote_subscription_snapshots()
+        .map_err(IpcError::from)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceNavigatePayload {
+    pub page: Option<String>,
+    pub provider_id: Option<String>,
+}
+
+#[tauri::command]
+pub fn open_main_workspace(
+    app: AppHandle,
+    page: Option<String>,
+    provider_id: Option<String>,
+) {
     show_main_window(&app);
+    if page.is_some() || provider_id.is_some() {
+        let _ = app.emit(
+            "navigate-workspace",
+            WorkspaceNavigatePayload { page, provider_id },
+        );
+    }
 }
 
 #[tauri::command]

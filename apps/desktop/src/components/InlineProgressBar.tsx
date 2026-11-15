@@ -1,6 +1,7 @@
 export interface InlineProgressBarProps {
   percent: number;
   alertLevel?: string;
+  accentColor?: string;
   heightPx?: number;
   showTrack?: boolean;
 }
@@ -8,16 +9,19 @@ export interface InlineProgressBarProps {
 export function InlineProgressBar({
   percent,
   alertLevel = 'normal',
+  accentColor,
   heightPx = 5,
   showTrack = true,
 }: InlineProgressBarProps) {
   const clamped = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
 
-  let fillColor = 'var(--accent-emerald)';
-  if (alertLevel === 'exhausted' || alertLevel === 'critical' || clamped >= 95) {
-    fillColor = 'var(--accent-rose)';
-  } else if (alertLevel === 'warning' || clamped >= 80) {
-    fillColor = 'var(--accent-amber)';
+  let fillColor = accentColor ?? 'var(--accent-emerald)';
+  if (!accentColor) {
+    if (alertLevel === 'exhausted' || alertLevel === 'critical' || clamped >= 95) {
+      fillColor = 'var(--accent-rose)';
+    } else if (alertLevel === 'warning' || clamped >= 80) {
+      fillColor = 'var(--accent-amber)';
+    }
   }
 
   return (

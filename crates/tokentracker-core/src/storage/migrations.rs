@@ -9,7 +9,7 @@ use crate::error::CoreResult;
 use crate::pricing::default_pricing_catalog;
 use crate::storage::repository::{rebuild_rollup_from_events, DAY_MS, HOUR_MS};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 3;
+pub const CURRENT_SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -196,6 +196,10 @@ pub fn run_migrations(conn: &mut Connection) -> CoreResult<()> {
 
     if current_version < 3 {
         migrate_v2_to_v3(conn, now_ms)?;
+    }
+
+    if current_version < 4 {
+        migrate_v3_to_v4(conn, now_ms)?;
     }
 
     seed_defaults(conn, now_ms)?;
@@ -421,6 +425,101 @@ fn migrate_v2_to_v3(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     Ok(())
 }
 
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_def: &str,
+) -> CoreResult<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let existing: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !existing.iter().any(|c| c.eq_ignore_ascii_case(column)) {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {column_def};"
+        ))?;
+    }
+    Ok(())
+}
+
+fn migrate_v3_to_v4(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS sync_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL DEFAULT 0,
+            worker_url TEXT,
+            e2ee_enabled INTEGER NOT NULL DEFAULT 0,
+            e2ee_kdf_salt_hex TEXT,
+            last_push_watermark_ms INTEGER NOT NULL DEFAULT 0,
+            last_pull_watermark_ms INTEGER NOT NULL DEFAULT 0,
+            last_sync_at_ms INTEGER,
+            last_sync_error TEXT,
+            updated_at_ms INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS remote_subscription_snapshots (
+            device_id TEXT NOT NULL,
+            device_display_name TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            window_id TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            plan_name TEXT NOT NULL,
+            window_label TEXT NOT NULL,
+            used_percent REAL NOT NULL,
+            resets_at_ms INTEGER,
+            source TEXT NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (device_id, plan_id, window_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS provider_balances (
+            provider_id TEXT PRIMARY KEY,
+            currency TEXT NOT NULL,
+            total_balance_micro INTEGER,
+            granted_balance_micro INTEGER,
+            topped_up_balance_micro INTEGER,
+            daily_quota_used_micro INTEGER,
+            daily_quota_limit_micro INTEGER,
+            fetched_at_ms INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS custom_provider_rules (
+            rule_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            protocol_kind TEXT NOT NULL,
+            log_roots_json TEXT NOT NULL,
+            mapping_spec_json TEXT NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        );
+
+        UPDATE model_pricing
+        SET provider_id = 'deepseek_harness'
+        WHERE provider_id = 'deepseek' AND is_user_override = 0;
+
+        DELETE FROM model_pricing
+        WHERE model_pattern = '_default_deepseek' AND is_user_override = 0;
+        "#,
+    )?;
+
+    add_column_if_missing(
+        &tx,
+        "app_preferences",
+        "auto_check_updates",
+        "INTEGER NOT NULL DEFAULT 1",
+    )?;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![4i64, now_ms],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn seed_defaults(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     let tx = conn.transaction()?;
 
@@ -479,8 +578,8 @@ fn seed_defaults(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
              otlp_enabled, otlp_port, device_display_name,
              bg_mode, bg_image_path, bg_preset_id, bg_opacity, bg_blur_px,
              auto_sync_pricing, exchange_rate_auto, last_rate_sync_at_ms, last_pricing_sync_at_ms,
-             updated_at_ms)
-        VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+             auto_check_updates, updated_at_ms)
+        VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
         "#,
         params![
             prefs.currency.as_str(),
@@ -500,8 +599,20 @@ fn seed_defaults(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
             i64::from(prefs.exchange_rate_auto),
             prefs.last_rate_sync_at_ms,
             prefs.last_pricing_sync_at_ms,
+            i64::from(prefs.auto_check_updates),
             now_ms,
         ],
+    )?;
+
+    // 5. Seed cloud sync state row (id = 1)
+    tx.execute(
+        r#"
+        INSERT OR IGNORE INTO sync_state
+            (id, enabled, worker_url, e2ee_enabled, e2ee_kdf_salt_hex,
+             last_push_watermark_ms, last_pull_watermark_ms, last_sync_at_ms, last_sync_error, updated_at_ms)
+        VALUES (1, 0, NULL, 0, NULL, 0, 0, NULL, NULL, ?1)
+        "#,
+        params![now_ms],
     )?;
 
     tx.commit()?;

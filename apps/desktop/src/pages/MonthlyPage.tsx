@@ -82,7 +82,8 @@ export function MonthlyPage() {
   const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [roiExpanded, setRoiExpanded] = useState(true);
 
-  const { providerFilter, currency, usdToCnyRate, tzOffsetMinutes } = useWorkspaceStore();
+  const { providerFilter, deviceFilter, currency, usdToCnyRate, tzOffsetMinutes } =
+    useWorkspaceStore();
   const chartTheme = useChartTheme();
 
   const query = useMemo(
@@ -90,9 +91,10 @@ export function MonthlyPage() {
       year,
       month,
       provider_id: providerFilter === 'all' ? null : providerFilter,
+      device_id: deviceFilter === 'all' ? null : deviceFilter,
       tz_offset_minutes: tzOffsetMinutes,
     }),
-    [year, month, providerFilter, tzOffsetMinutes]
+    [year, month, providerFilter, deviceFilter, tzOffsetMinutes]
   );
 
   const { data, isLoading } = useQuery({

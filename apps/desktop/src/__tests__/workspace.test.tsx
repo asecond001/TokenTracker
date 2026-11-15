@@ -13,6 +13,7 @@ import {
   formatTokens,
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
+import { DataSourcesPage } from '../pages/DataSourcesPage';
 import { ModelsPricingPage } from '../pages/ModelsPricingPage';
 import { MonthlyPage, computeHeatmapIntensityLevels } from '../pages/MonthlyPage';
 import { OverviewPage } from '../pages/OverviewPage';
@@ -24,15 +25,21 @@ import { TrendsPage } from '../pages/TrendsPage';
 import { useWorkspaceStore } from '../stores/workspaceStore';
 import type {
   AppPreferences,
+  BalanceRefreshOutcome,
   BootstrapState,
   CatalogSyncResult,
+  CustomRuleTestResult,
+  DeviceRecord,
   ModelStatsReport,
   MonthlyReport,
   ObservedRateLimitWindow,
   OverviewReport,
+  ProviderConfig,
+  RemoteSubscriptionSnapshot,
   SpeedLatencyReport,
   SubscriptionPlanStatus,
   SubscriptionPlanTemplate,
+  SyncStatusView,
   TraySummary,
   TrendsReport,
 } from '../types/ipc';
@@ -105,6 +112,7 @@ function makePreferences(overrides: Partial<AppPreferences> = {}): AppPreference
     bg_blur_px: 16,
     auto_sync_pricing: true,
     exchange_rate_auto: true,
+    auto_check_updates: true,
     last_rate_sync_at_ms: null,
     last_pricing_sync_at_ms: null,
     updated_at_ms: 1_770_000_000_000,
@@ -137,6 +145,8 @@ function makeTraySummary(overrides: Partial<TraySummary> = {}): TraySummary {
     today_requests: 12,
     latest_output_tps: 68.4,
     subscriptions: [],
+    provider_shares: [],
+    active_sessions: [],
     currency: 'USD',
     usd_to_cny_rate: '7.25',
     active_providers_count: 2,
@@ -150,6 +160,8 @@ function makeOverviewReport(overrides: Partial<OverviewReport> = {}): OverviewRe
   return {
     total_tokens: 420_000,
     total_cost_micro_usd: 6_450_000,
+    today_tokens: 150_000,
+    today_cost_micro_usd: 2_500_000,
     cache_hit_ratio: 0.64,
     avg_output_tps: 74.2,
     peak_output_tps: 142.0,
@@ -237,6 +249,9 @@ function makeOverviewReport(overrides: Partial<OverviewReport> = {}): OverviewRe
         last_error: null,
       },
     ],
+    provider_shares: [],
+    top_model_shares: [],
+    active_sessions: [],
     ...overrides,
   };
 }
@@ -490,6 +505,7 @@ function resetWorkspaceState() {
     activePage: 'overview',
     timePreset: '7d',
     providerFilter: 'all',
+    deviceFilter: 'all',
     currency: 'USD',
     usdToCnyRate: '7.25',
     theme: 'dark',
@@ -1361,12 +1377,12 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
       );
     });
 
-    // Now verify PreferencesPage controls & v0.1.2 badge
+    // Now verify PreferencesPage controls & v0.2.0 badge
     cleanup();
     resetWorkspaceState();
     renderWithQuery(<PreferencesPage />);
 
-    expect(await screen.findByText('v0.1.2')).toBeInTheDocument();
+    expect(await screen.findByText('v0.2.0')).toBeInTheDocument();
     const rateInput = screen.getByLabelText('USD 对 CNY 汇率') as HTMLInputElement;
     expect(rateInput.readOnly).toBe(true);
 
@@ -1391,5 +1407,385 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
     await waitFor(() => {
       expect(syncSpy).toHaveBeenLastCalledWith(true);
     });
+  });
+});
+
+describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sync', () => {
+  beforeEach(() => {
+    resetWorkspaceState();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it('renders 15m active/recent sessions & share bars in OverviewPage and TrayPopupPage click-to-workspace', async () => {
+    const now = Date.now();
+    vi.spyOn(ipc, 'getOverview').mockResolvedValue(
+      makeOverviewReport({
+        today_tokens: 96_000,
+        today_cost_micro_usd: 1_250_000,
+        provider_shares: [
+          {
+            key: 'kimi_code',
+            label: 'Kimi Code',
+            tokens: 60_000,
+            token_share_percent: 62.5,
+            cost_micro_usd: 800_000,
+            cost_share_percent: 64.0,
+          },
+          {
+            key: 'claude_code',
+            label: 'Claude Code',
+            tokens: 36_000,
+            token_share_percent: 37.5,
+            cost_micro_usd: 450_000,
+            cost_share_percent: 36.0,
+          },
+        ],
+        top_model_shares: [
+          {
+            key: 'kimi-k2',
+            label: 'kimi-k2',
+            tokens: 60_000,
+            token_share_percent: 62.5,
+            cost_micro_usd: 800_000,
+            cost_share_percent: 64.0,
+          },
+        ],
+        active_sessions: [
+          {
+            session_key: 'sess-live-1',
+            provider_id: 'kimi_code',
+            model_id: 'kimi-k2',
+            project_label: 'token-tracker',
+            activity_state: 'active',
+            started_at_ms: now - 180_000,
+            last_active_at_ms: now - 15_000,
+            request_count: 6,
+            total_tokens: 60_000,
+            input_tokens: 45_000,
+            output_tokens: 15_000,
+            cache_read_tokens: 8_000,
+            estimated_cost_micro_usd: 800_000,
+            latest_output_tps: 92.4,
+          },
+          {
+            session_key: 'sess-recent-2',
+            provider_id: 'claude_code',
+            model_id: 'claude-sonnet-4-5',
+            project_label: 'sync-worker',
+            activity_state: 'recent',
+            started_at_ms: now - 600_000,
+            last_active_at_ms: now - 360_000,
+            request_count: 3,
+            total_tokens: 36_000,
+            input_tokens: 24_000,
+            output_tokens: 12_000,
+            cache_read_tokens: 0,
+            estimated_cost_micro_usd: 450_000,
+            latest_output_tps: 64.0,
+          },
+        ],
+      })
+    );
+
+    renderWithQuery(<OverviewPage />);
+
+    expect(await screen.findByText('token-tracker')).toBeInTheDocument();
+    expect(screen.getByText('1 活跃')).toBeInTheDocument();
+    expect(screen.getByText('1 近期')).toBeInTheDocument();
+    expect(screen.getByText('活跃中')).toBeInTheDocument();
+    expect(screen.getByText('sync-worker')).toBeInTheDocument();
+
+    cleanup();
+    const openMainSpy = vi.spyOn(ipc, 'openMainWorkspace').mockResolvedValue(undefined);
+    vi.spyOn(ipc, 'getTraySummary').mockResolvedValue(
+      makeTraySummary({
+        today_tokens: 96_000,
+        today_cost_micro_usd: 1_250_000,
+        provider_shares: [
+          {
+            key: 'kimi_code',
+            label: 'Kimi Code',
+            tokens: 60_000,
+            token_share_percent: 62.5,
+            cost_micro_usd: 800_000,
+            cost_share_percent: 64.0,
+          },
+        ],
+        active_sessions: [
+          {
+            session_key: 'sess-live-1',
+            provider_id: 'kimi_code',
+            model_id: 'kimi-k2',
+            project_label: 'token-tracker',
+            activity_state: 'active',
+            started_at_ms: now - 180_000,
+            last_active_at_ms: now - 15_000,
+            request_count: 6,
+            total_tokens: 60_000,
+            input_tokens: 45_000,
+            output_tokens: 15_000,
+            cache_read_tokens: 8_000,
+            estimated_cost_micro_usd: 800_000,
+            latest_output_tps: 92.4,
+          },
+        ],
+      })
+    );
+
+    renderWithQuery(<TrayPopupPage />);
+    expect(await screen.findByText('活跃会话（15m）')).toBeInTheDocument();
+    expect(await screen.findByText('63%')).toBeInTheDocument();
+
+    const sessionBtn = screen.getByRole('button', { name: /Kimi Code · kimi-k2/ });
+    fireEvent.click(sessionBtn);
+    await waitFor(() => {
+      expect(openMainSpy).toHaveBeenCalledWith('overview', 'kimi_code');
+    });
+  });
+
+  it('refreshes Phase 2 official balance and dry-runs declarative custom rule lines in DataSourcesPage', async () => {
+    const now = Date.now();
+    const configs: ProviderConfig[] = [
+      {
+        provider_id: 'kimi_code',
+        enabled: true,
+        collection_mode: 'local_log',
+        custom_log_paths: [],
+        has_credential: true,
+        last_sync_at_ms: now - 10_000,
+        last_error: null,
+        updated_at_ms: now,
+      },
+    ];
+
+    vi.spyOn(ipc, 'getProviderConfigs').mockResolvedValue(configs);
+    vi.spyOn(ipc, 'getIngestionCursors').mockResolvedValue([]);
+    vi.spyOn(ipc, 'listCustomProviderRules').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getProviderBalances').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(makePreferences());
+
+    const balanceOutcome: BalanceRefreshOutcome = {
+      snapshot: {
+        provider_id: 'kimi_code',
+        currency: 'CNY',
+        total_balance_micro: 88_500_000,
+        granted_balance_micro: 10_000_000,
+        topped_up_balance_micro: 78_500_000,
+        daily_quota_used_micro: null,
+        daily_quota_limit_micro: null,
+        fetched_at_ms: now,
+      },
+      rate_limits_updated: 0,
+      endpoint: 'https://api.moonshot.cn/v1/users/me/balance',
+      from_cache: false,
+      cooldown_remaining_secs: 60,
+    };
+    const refreshBalanceSpy = vi
+      .spyOn(ipc, 'refreshProviderBalance')
+      .mockResolvedValue(balanceOutcome);
+
+    const dryRunResult: CustomRuleTestResult = {
+      matched: true,
+      provider_id: 'custom_demo',
+      model_id: 'gpt-4o',
+      timestamp_ms: now,
+      input_tokens: 1_200,
+      output_tokens: 340,
+      cache_read_tokens: 500,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      estimated_cost_micro_usd: 12_500,
+      diagnostic: 'parsed ok',
+    };
+    const testSampleSpy = vi
+      .spyOn(ipc, 'testCustomProviderSampleLine')
+      .mockResolvedValue(dryRunResult);
+
+    renderWithQuery(<DataSourcesPage />);
+
+    const refreshBtn = await screen.findByRole('button', { name: '刷新余额' });
+    fireEvent.click(refreshBtn);
+
+    await waitFor(() => {
+      expect(refreshBalanceSpy).toHaveBeenCalledWith('kimi_code');
+    });
+    expect(await screen.findByText('CNY 88.50')).toBeInTheDocument();
+
+    const dryRunBtn = screen.getByRole('button', { name: '试跑验证样本' });
+    fireEvent.click(dryRunBtn);
+
+    await waitFor(() => {
+      expect(testSampleSpy).toHaveBeenCalledTimes(1);
+    });
+    expect(await screen.findByText('匹配成功')).toBeInTheDocument();
+    expect(screen.getByText('模型: gpt-4o')).toBeInTheDocument();
+    expect(screen.getByText('输入: 1,200')).toBeInTheDocument();
+  });
+
+  it('switches multi-device filter in TitleBar, configures E2EE sync in PreferencesPage & shows read-only remote snapshots in SubscriptionsPage', async () => {
+    const now = Date.now();
+    const devices: DeviceRecord[] = [
+      {
+        device_id: 'dev-win-local',
+        device_name: 'WorkPC',
+        platform: 'windows',
+        created_at_ms: now - 100_000,
+      },
+      {
+        device_id: 'dev-mac-remote',
+        device_name: 'MacBookPro',
+        platform: 'macos',
+        created_at_ms: now - 50_000,
+      },
+    ];
+    vi.spyOn(ipc, 'listCustomProviderRules').mockResolvedValue([]);
+    vi.spyOn(ipc, 'listDevices').mockResolvedValue(devices);
+
+    render(
+      <TitleBar
+        collectorWatching={true}
+        isScanning={false}
+        onScanNow={() => {}}
+      />
+    );
+
+    const deviceSelect = await screen.findByLabelText('设备筛选');
+    expect(within(deviceSelect).getByRole('option', { name: '全部设备' })).toBeInTheDocument();
+    expect(
+      within(deviceSelect).getByRole('option', { name: '本机 · WorkPC' })
+    ).toBeInTheDocument();
+    expect(within(deviceSelect).getByRole('option', { name: 'MacBookPro' })).toBeInTheDocument();
+
+    fireEvent.change(deviceSelect, { target: { value: 'dev-mac-remote' } });
+    expect(useWorkspaceStore.getState().deviceFilter).toBe('dev-mac-remote');
+
+    // Now test PreferencesPage Cloud Sync & E2EE workflow
+    cleanup();
+    let currentSyncStatus: SyncStatusView = {
+      enabled: false,
+      worker_url: '',
+      e2ee_enabled: false,
+      e2ee_kdf_salt_hex: null,
+      has_bearer_token: false,
+      has_e2ee_passphrase: false,
+      sse_connected: false,
+      last_push_watermark_ms: 0,
+      last_pull_watermark_ms: 0,
+      last_sync_at_ms: now - 30_000,
+      last_sync_error: null,
+      updated_at_ms: now,
+    };
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(makePreferences());
+    vi.spyOn(ipc, 'getBootstrapState').mockResolvedValue(makeBootstrap());
+    const getSyncStatusSpy = vi
+      .spyOn(ipc, 'getSyncStatus')
+      .mockImplementation(async () => currentSyncStatus);
+
+    const updateSyncSpy = vi
+      .spyOn(ipc, 'updateSyncConfig')
+      .mockImplementation(async (enabled, workerUrl, e2eeEnabled) => {
+        currentSyncStatus = {
+          ...currentSyncStatus,
+          enabled,
+          worker_url: workerUrl,
+          e2ee_enabled: e2eeEnabled,
+          e2ee_kdf_salt_hex: e2eeEnabled ? 'aabbccddeeff00112233445566778899' : null,
+        };
+        return currentSyncStatus;
+      });
+    const setCredsSpy = vi
+      .spyOn(ipc, 'setSyncCredentials')
+      .mockImplementation(async (token, pass) => {
+        currentSyncStatus = {
+          ...currentSyncStatus,
+          has_bearer_token: Boolean(token) || currentSyncStatus.has_bearer_token,
+          has_e2ee_passphrase: Boolean(pass) || currentSyncStatus.has_e2ee_passphrase,
+          sse_connected: Boolean(token) && currentSyncStatus.enabled,
+        };
+        return currentSyncStatus;
+      });
+    const triggerSyncSpy = vi.spyOn(ipc, 'triggerCloudSyncNow').mockResolvedValue({
+      pushed_hourly_deltas: 2,
+      pushed_subscriptions: 1,
+      pulled_items: 1,
+      applied_hourly_buckets: 3,
+      applied_subscriptions: 1,
+      server_seq_ms: now,
+      synced_at_ms: now,
+    });
+
+    renderWithQuery(<PreferencesPage />);
+
+    expect(await screen.findByText('云端多端同步（Cloudflare Worker）')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(getSyncStatusSpy).toHaveBeenCalled();
+    });
+    expect(await screen.findByText(/30s 前/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('启用 Cloudflare Worker 云端同步'));
+    fireEvent.click(screen.getByLabelText(/启用端到端加密/));
+    fireEvent.change(screen.getByLabelText('Worker 服务地址'), {
+      target: { value: 'https://sync.example.workers.dev' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存同步配置' }));
+
+    await waitFor(() => {
+      expect(updateSyncSpy).toHaveBeenCalledWith(
+        true,
+        'https://sync.example.workers.dev',
+        true
+      );
+    });
+    expect(await screen.findByText('aabbccddeeff00112233445566778899')).toBeInTheDocument();
+
+    const tokenInput = screen.getByLabelText('Sync Bearer Token') as HTMLInputElement;
+    const passInput = screen.getByLabelText('E2EE 同步口令') as HTMLInputElement;
+    fireEvent.change(tokenInput, { target: { value: 'tok-secret-123' } });
+    fireEvent.change(passInput, { target: { value: 'e2ee-pass-999' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存同步凭据' }));
+
+    await waitFor(() => {
+      expect(setCredsSpy).toHaveBeenCalledWith('tok-secret-123', 'e2ee-pass-999');
+    });
+    expect(tokenInput.value).toBe('');
+    expect(passInput.value).toBe('');
+    expect(await screen.findByText('SSE 实时已连接')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '立即同步' }));
+    await waitFor(() => {
+      expect(triggerSyncSpy).toHaveBeenCalledTimes(1);
+    });
+
+    // Finally verify read-only remote subscription snapshots in SubscriptionsPage
+    cleanup();
+    const remoteSnaps: RemoteSubscriptionSnapshot[] = [
+      {
+        device_id: 'dev-mac-remote',
+        device_display_name: 'MacBookPro',
+        plan_id: 'minimax-plan',
+        window_id: '5h',
+        provider_id: 'minimax_code',
+        plan_name: 'MiniMax Coding Plan',
+        window_label: '5h 滚动窗口',
+        used_percent: 42.5,
+        resets_at_ms: now + 3_600_000,
+        source: 'local_estimate',
+        updated_at_ms: now - 12_000,
+      },
+    ];
+    vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getObservedRateLimits').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getSubscriptionTemplates').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getRemoteSubscriptionSnapshots').mockResolvedValue(remoteSnaps);
+
+    renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('跨设备同步配额快照（只读）')).toBeInTheDocument();
+    expect(screen.getByText('MacBookPro')).toBeInTheDocument();
+    expect(screen.getByText('只读远端快照')).toBeInTheDocument();
+    expect(screen.getByText('42.5%')).toBeInTheDocument();
   });
 });

@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{Datelike, FixedOffset, NaiveDate, TimeZone, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params_from_iter, types::Value, Connection};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::domain::{provider_ids, CurrencyCode, ModelPricingEntry, ObservedRateLimitWindow};
 use crate::error::{CoreError, CoreResult};
@@ -19,6 +20,8 @@ pub struct AnalyticsFilter {
     pub start_ms: i64,
     pub end_ms: i64,
     pub provider_id: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
     pub tz_offset_minutes: i32,
     #[serde(default)]
     pub all_time: bool,
@@ -54,6 +57,8 @@ pub struct MonthlyQuery {
     pub year: i32,
     pub month: u32,
     pub provider_id: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
     pub tz_offset_minutes: i32,
 }
 
@@ -88,9 +93,39 @@ pub struct ProviderSummaryRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActiveSessionSummary {
+    pub session_key: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub project_label: String,
+    pub activity_state: String,
+    pub started_at_ms: i64,
+    pub last_active_at_ms: i64,
+    pub request_count: i64,
+    pub total_tokens: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub estimated_cost_micro_usd: i64,
+    pub latest_output_tps: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageShareItem {
+    pub key: String,
+    pub label: String,
+    pub tokens: i64,
+    pub token_share_percent: f64,
+    pub cost_micro_usd: i64,
+    pub cost_share_percent: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OverviewReport {
     pub total_tokens: i64,
     pub total_cost_micro_usd: i64,
+    pub today_tokens: i64,
+    pub today_cost_micro_usd: i64,
     pub cache_hit_ratio: f64,
     pub avg_output_tps: f64,
     pub peak_output_tps: f64,
@@ -105,6 +140,9 @@ pub struct OverviewReport {
     pub series: Vec<TimeBucketPoint>,
     pub provider_series: Vec<TrendSeries>,
     pub providers: Vec<ProviderSummaryRow>,
+    pub provider_shares: Vec<UsageShareItem>,
+    pub top_model_shares: Vec<UsageShareItem>,
+    pub active_sessions: Vec<ActiveSessionSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -251,6 +289,8 @@ pub struct TraySummary {
     pub today_requests: i64,
     pub latest_output_tps: Option<f64>,
     pub subscriptions: Vec<SubscriptionPlanStatus>,
+    pub provider_shares: Vec<UsageShareItem>,
+    pub active_sessions: Vec<ActiveSessionSummary>,
     pub currency: CurrencyCode,
     pub usd_to_cny_rate: String,
     pub active_providers_count: usize,
@@ -295,11 +335,90 @@ impl PeriodTotals {
     }
 }
 
-fn normalized_provider_filter(provider_id: &Option<String>) -> Option<&str> {
-    provider_id
+fn normalized_optional_filter(value: &Option<String>) -> Option<&str> {
+    value
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
+}
+
+struct SqlScopeClause {
+    sql_and: String,
+    sql_where: String,
+    params: Vec<Value>,
+}
+
+fn build_scope_clause(
+    base_param_count: usize,
+    provider: Option<&str>,
+    device_id: Option<&str>,
+) -> SqlScopeClause {
+    let mut parts = Vec::new();
+    let mut params = Vec::new();
+    let mut next_idx = base_param_count + 1;
+    if let Some(prov) = provider {
+        parts.push(format!("provider_id = ?{next_idx}"));
+        params.push(Value::Text(prov.to_string()));
+        next_idx += 1;
+    }
+    if let Some(dev) = device_id {
+        parts.push(format!("device_id = ?{next_idx}"));
+        params.push(Value::Text(dev.to_string()));
+    }
+    if parts.is_empty() {
+        SqlScopeClause {
+            sql_and: String::new(),
+            sql_where: String::new(),
+            params,
+        }
+    } else {
+        let joined = parts.join(" AND ");
+        SqlScopeClause {
+            sql_and: format!(" AND {joined}"),
+            sql_where: format!(" WHERE {joined}"),
+            params,
+        }
+    }
+}
+
+fn bound_range_params(start_ms: i64, end_ms: i64, extra: &[Value]) -> Vec<Value> {
+    let mut out = Vec::with_capacity(2 + extra.len());
+    out.push(Value::Integer(start_ms));
+    out.push(Value::Integer(end_ms));
+    out.extend_from_slice(extra);
+    out
+}
+
+fn short_session_key(provider_id: &str, session_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(provider_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(session_id.as_bytes());
+    let digest = hasher.finalize();
+    format!("#{:02x}{:02x}{:02x}", digest[0], digest[1], digest[2])
+}
+
+fn sanitize_project_label(raw: &str) -> String {
+    let leaf = raw
+        .trim()
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    if leaf.is_empty() {
+        "workspace".to_string()
+    } else {
+        leaf.to_string()
+    }
+}
+
+fn pct_share(part: i64, total: i64) -> f64 {
+    if total <= 0 || part <= 0 {
+        0.0
+    } else {
+        (part as f64 / total as f64) * 100.0
+    }
 }
 
 fn pct_change(current: f64, previous: f64) -> Option<f64> {
@@ -349,52 +468,33 @@ fn query_period_totals(
     start_ms: i64,
     end_ms: i64,
     provider: Option<&str>,
+    device_id: Option<&str>,
 ) -> CoreResult<PeriodTotals> {
-    let (sql, use_provider) = if provider.is_some() {
-        (
-            r#"
-            SELECT
-                COALESCE(SUM(request_count), 0),
-                COALESCE(SUM(observable_step_count), 0),
-                COALESCE(SUM(input_tokens), 0),
-                COALESCE(SUM(output_tokens), 0),
-                COALESCE(SUM(cache_read_tokens), 0),
-                COALESCE(SUM(cache_write_tokens), 0),
-                COALESCE(SUM(reasoning_tokens), 0),
-                COALESCE(SUM(estimated_cost_micro_usd), 0),
-                COALESCE(SUM(tps_sample_count), 0),
-                COALESCE(SUM(tps_sum), 0.0),
-                COALESCE(MAX(max_output_tps), 0.0)
-            FROM usage_hourly_rollups
-            WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2 AND provider_id = ?3
-            "#,
-            true,
-        )
-    } else {
-        (
-            r#"
-            SELECT
-                COALESCE(SUM(request_count), 0),
-                COALESCE(SUM(observable_step_count), 0),
-                COALESCE(SUM(input_tokens), 0),
-                COALESCE(SUM(output_tokens), 0),
-                COALESCE(SUM(cache_read_tokens), 0),
-                COALESCE(SUM(cache_write_tokens), 0),
-                COALESCE(SUM(reasoning_tokens), 0),
-                COALESCE(SUM(estimated_cost_micro_usd), 0),
-                COALESCE(SUM(tps_sample_count), 0),
-                COALESCE(SUM(tps_sum), 0.0),
-                COALESCE(MAX(max_output_tps), 0.0)
-            FROM usage_hourly_rollups
-            WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2
-            "#,
-            false,
-        )
-    };
+    let scope = build_scope_clause(2, provider, device_id);
+    let sql = format!(
+        r#"
+        SELECT
+            COALESCE(SUM(request_count), 0),
+            COALESCE(SUM(observable_step_count), 0),
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0),
+            COALESCE(SUM(cache_read_tokens), 0),
+            COALESCE(SUM(cache_write_tokens), 0),
+            COALESCE(SUM(reasoning_tokens), 0),
+            COALESCE(SUM(estimated_cost_micro_usd), 0),
+            COALESCE(SUM(tps_sample_count), 0),
+            COALESCE(SUM(tps_sum), 0.0),
+            COALESCE(MAX(max_output_tps), 0.0)
+        FROM usage_hourly_rollups
+        WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2{where_and}
+        "#,
+        where_and = scope.sql_and
+    );
 
     // Align lower bound down to hour bucket boundary so exact hour-bucketed rollups match event windows.
     let aligned_start = start_ms.div_euclid(HOUR_MS) * HOUR_MS;
-    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<PeriodTotals> {
+    let bound = bound_range_params(aligned_start, end_ms, &scope.params);
+    conn.query_row(&sql, params_from_iter(bound), |row| {
         Ok(PeriodTotals {
             requests: row.get(0)?,
             observable_steps: row.get(1)?,
@@ -408,25 +508,15 @@ fn query_period_totals(
             tps_sum: row.get(9)?,
             max_tps: row.get(10)?,
         })
-    };
-
-    if use_provider {
-        conn.query_row(
-            sql,
-            params![aligned_start, end_ms, provider.unwrap_or_default()],
-            map_row,
-        )
-        .map_err(CoreError::from)
-    } else {
-        conn.query_row(sql, params![aligned_start, end_ms], map_row)
-            .map_err(CoreError::from)
-    }
+    })
+    .map_err(CoreError::from)
 }
 
 fn resolve_effective_window(
     conn: &Connection,
     filter: &AnalyticsFilter,
     provider: Option<&str>,
+    device_id: Option<&str>,
     fallback_now_ms: i64,
 ) -> CoreResult<(i64, i64)> {
     if !filter.all_time {
@@ -438,14 +528,25 @@ fn resolve_effective_window(
     } else {
         fallback_now_ms
     };
-    let min_ts: Option<i64> = if let Some(prov) = provider {
-        conn.query_row(
-            "SELECT MIN(timestamp_ms) FROM usage_events WHERE provider_id = ?1",
-            params![prov],
-            |r| r.get(0),
-        )?
-    } else {
-        conn.query_row("SELECT MIN(timestamp_ms) FROM usage_events", [], |r| r.get(0))?
+    let scope = build_scope_clause(0, provider, device_id);
+    let events_sql = format!(
+        "SELECT MIN(timestamp_ms) FROM usage_events{where_clause}",
+        where_clause = scope.sql_where
+    );
+    let events_min: Option<i64> =
+        conn.query_row(&events_sql, params_from_iter(scope.params.clone()), |r| r.get(0))?;
+    let rollups_sql = format!(
+        "SELECT MIN(bucket_start_ms) FROM usage_hourly_rollups{where_clause}",
+        where_clause = scope.sql_where
+    );
+    let rollups_min: Option<i64> =
+        conn.query_row(&rollups_sql, params_from_iter(scope.params), |r| r.get(0))?;
+
+    let min_ts = match (events_min, rollups_min) {
+        (Some(e), Some(r)) => Some(e.min(r)),
+        (Some(e), None) => Some(e),
+        (None, Some(r)) => Some(r),
+        (None, None) => None,
     };
     let start_ms = min_ts
         .unwrap_or_else(|| end_ms.saturating_sub(7 * DAY_MS))
@@ -537,54 +638,318 @@ fn query_latest_tps(
     start_ms: i64,
     end_ms: i64,
     provider: Option<&str>,
+    device_id: Option<&str>,
 ) -> CoreResult<Option<f64>> {
-    let result = if let Some(prov) = provider {
-        conn.query_row(
-            r#"
-            SELECT output_tps FROM usage_events
-            WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
-              AND provider_id = ?3
-              AND output_tps IS NOT NULL
-              AND output_tps > 0.0
-              AND output_tps <= 800.0
-              AND (duration_ms IS NULL OR duration_ms >= 300)
-              AND (output_tokens + reasoning_tokens) >= 8
-            ORDER BY timestamp_ms DESC LIMIT 1
-            "#,
-            params![start_ms, end_ms, prov],
-            |r| r.get::<_, f64>(0),
-        )
-    } else {
-        conn.query_row(
-            r#"
-            SELECT output_tps FROM usage_events
-            WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
-              AND output_tps IS NOT NULL
-              AND output_tps > 0.0
-              AND output_tps <= 800.0
-              AND (duration_ms IS NULL OR duration_ms >= 300)
-              AND (output_tokens + reasoning_tokens) >= 8
-            ORDER BY timestamp_ms DESC LIMIT 1
-            "#,
-            params![start_ms, end_ms],
-            |r| r.get::<_, f64>(0),
-        )
-    };
-
-    match result {
+    let scope = build_scope_clause(2, provider, device_id);
+    let sql = format!(
+        r#"
+        SELECT output_tps FROM usage_events
+        WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2{where_and}
+          AND output_tps IS NOT NULL
+          AND output_tps > 0.0
+          AND output_tps <= 800.0
+          AND (duration_ms IS NULL OR duration_ms >= 300)
+          AND (output_tokens + reasoning_tokens) >= 8
+        ORDER BY timestamp_ms DESC, rowid DESC LIMIT 1
+        "#,
+        where_and = scope.sql_and
+    );
+    let bound = bound_range_params(start_ms, end_ms, &scope.params);
+    match conn.query_row(&sql, params_from_iter(bound), |r| r.get::<_, f64>(0)) {
         Ok(v) => Ok(Some(v)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(CoreError::from(e)),
     }
 }
 
+fn query_provider_shares(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    provider: Option<&str>,
+    device_id: Option<&str>,
+) -> CoreResult<Vec<UsageShareItem>> {
+    let aligned_start = start_ms.div_euclid(HOUR_MS) * HOUR_MS;
+    let scope = build_scope_clause(2, provider, device_id);
+    let sql = format!(
+        r#"
+        SELECT provider_id,
+               SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + reasoning_tokens) AS total_tok,
+               SUM(estimated_cost_micro_usd) AS total_cost
+        FROM usage_hourly_rollups
+        WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2{where_and}
+        GROUP BY provider_id
+        HAVING total_tok > 0 OR total_cost > 0
+        ORDER BY total_tok DESC, total_cost DESC, provider_id ASC
+        "#,
+        where_and = scope.sql_and
+    );
+    let bound = bound_range_params(aligned_start, end_ms, &scope.params);
+    let mut stmt = conn.prepare(&sql)?;
+    let mut raw = Vec::new();
+    let rows = stmt.query_map(params_from_iter(bound), |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        raw.push(row?);
+    }
+    let total_tokens: i64 = raw.iter().map(|(_, t, _)| *t).sum();
+    let total_cost: i64 = raw.iter().map(|(_, _, c)| *c).sum();
+    Ok(raw
+        .into_iter()
+        .map(|(pid, tokens, cost_micro_usd)| UsageShareItem {
+            label: provider_ids::display_name(&pid).to_string(),
+            key: pid,
+            tokens,
+            token_share_percent: pct_share(tokens, total_tokens),
+            cost_micro_usd,
+            cost_share_percent: pct_share(cost_micro_usd, total_cost),
+        })
+        .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn query_top_model_shares(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    provider: Option<&str>,
+    device_id: Option<&str>,
+    period_total_tokens: i64,
+    period_total_cost: i64,
+    limit: usize,
+) -> CoreResult<Vec<UsageShareItem>> {
+    let aligned_start = start_ms.div_euclid(HOUR_MS) * HOUR_MS;
+    let scope = build_scope_clause(2, provider, device_id);
+    let limit_idx = 3 + scope.params.len();
+    let sql = format!(
+        r#"
+        SELECT model_id,
+               SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + reasoning_tokens) AS total_tok,
+               SUM(estimated_cost_micro_usd) AS total_cost
+        FROM usage_hourly_rollups
+        WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2{where_and}
+        GROUP BY model_id
+        HAVING total_tok > 0 OR total_cost > 0
+        ORDER BY total_tok DESC, total_cost DESC, model_id ASC
+        LIMIT ?{limit_idx}
+        "#,
+        where_and = scope.sql_and
+    );
+    let mut bound = bound_range_params(aligned_start, end_ms, &scope.params);
+    bound.push(Value::Integer(limit as i64));
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(bound), |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (model_id, tokens, cost_micro_usd) = row?;
+        out.push(UsageShareItem {
+            label: model_id.clone(),
+            key: model_id,
+            tokens,
+            token_share_percent: pct_share(tokens, period_total_tokens),
+            cost_micro_usd,
+            cost_share_percent: pct_share(cost_micro_usd, period_total_cost),
+        });
+    }
+    Ok(out)
+}
+
+fn query_active_sessions(
+    conn: &Connection,
+    now_ms: i64,
+    provider: Option<&str>,
+    device_id: Option<&str>,
+    limit: usize,
+) -> CoreResult<Vec<ActiveSessionSummary>> {
+    const ACTIVE_STATE_WINDOW_MS: i64 = 120_000;
+    const RECENT_WINDOW_MS: i64 = 900_000;
+
+    let day_start_ms = now_ms.saturating_sub(DAY_MS);
+    let recent_cutoff_ms = now_ms.saturating_sub(RECENT_WINDOW_MS);
+    let scope = build_scope_clause(2, provider, device_id);
+    let cutoff_idx = 3 + scope.params.len();
+    let limit_idx = cutoff_idx + 1;
+
+    let sql = format!(
+        r#"
+        SELECT provider_id,
+               session_id,
+               MIN(timestamp_ms) AS started_at_ms,
+               MAX(timestamp_ms) AS last_active_at_ms,
+               COUNT(*) AS request_count,
+               SUM(input_tokens),
+               SUM(output_tokens),
+               SUM(cache_read_tokens),
+               SUM(cache_write_tokens),
+               SUM(reasoning_tokens),
+               SUM(estimated_cost_micro_usd)
+        FROM usage_events
+        WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2{where_and}
+        GROUP BY provider_id, session_id
+        HAVING MAX(timestamp_ms) >= ?{cutoff_idx}
+        ORDER BY last_active_at_ms DESC, request_count DESC
+        LIMIT ?{limit_idx}
+        "#,
+        where_and = scope.sql_and
+    );
+
+    let mut bound = bound_range_params(day_start_ms, now_ms, &scope.params);
+    bound.push(Value::Integer(recent_cutoff_ms));
+    bound.push(Value::Integer(limit as i64));
+
+    #[allow(clippy::type_complexity)]
+    struct SessionGroupRow {
+        provider_id: String,
+        session_id: String,
+        started_at_ms: i64,
+        last_active_at_ms: i64,
+        request_count: i64,
+        input_tokens: i64,
+        output_tokens: i64,
+        cache_read_tokens: i64,
+        cache_write_tokens: i64,
+        reasoning_tokens: i64,
+        estimated_cost_micro_usd: i64,
+    }
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(bound), |r| {
+        Ok(SessionGroupRow {
+            provider_id: r.get(0)?,
+            session_id: r.get(1)?,
+            started_at_ms: r.get(2)?,
+            last_active_at_ms: r.get(3)?,
+            request_count: r.get(4)?,
+            input_tokens: r.get(5)?,
+            output_tokens: r.get(6)?,
+            cache_read_tokens: r.get(7)?,
+            cache_write_tokens: r.get(8)?,
+            reasoning_tokens: r.get(9)?,
+            estimated_cost_micro_usd: r.get(10)?,
+        })
+    })?;
+
+    let mut groups = Vec::new();
+    for r in rows {
+        groups.push(r?);
+    }
+
+    let dev_clause = if device_id.is_some() {
+        " AND device_id = ?5"
+    } else {
+        ""
+    };
+    let latest_meta_sql = format!(
+        r#"
+        SELECT model_id, project_label
+        FROM usage_events
+        WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
+          AND provider_id = ?3 AND session_id = ?4{dev_clause}
+        ORDER BY timestamp_ms DESC, rowid DESC
+        LIMIT 1
+        "#
+    );
+    let latest_tps_sql = format!(
+        r#"
+        SELECT output_tps
+        FROM usage_events
+        WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
+          AND provider_id = ?3 AND session_id = ?4{dev_clause}
+          AND output_tps IS NOT NULL
+          AND output_tps > 0.0
+          AND output_tps <= 800.0
+          AND (duration_ms IS NULL OR duration_ms >= 300)
+          AND (output_tokens + reasoning_tokens) >= 8
+        ORDER BY timestamp_ms DESC, rowid DESC
+        LIMIT 1
+        "#
+    );
+
+    let mut meta_stmt = conn.prepare(&latest_meta_sql)?;
+    let mut tps_stmt = conn.prepare(&latest_tps_sql)?;
+
+    let mut out = Vec::with_capacity(groups.len());
+    for g in groups {
+        let mut p = vec![
+            Value::Integer(day_start_ms),
+            Value::Integer(now_ms),
+            Value::Text(g.provider_id.clone()),
+            Value::Text(g.session_id.clone()),
+        ];
+        if let Some(dev) = device_id {
+            p.push(Value::Text(dev.to_string()));
+        }
+
+        let (model_id, raw_project) = match meta_stmt
+            .query_row(params_from_iter(p.clone()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }) {
+            Ok(pair) => pair,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                ("unknown".to_string(), "workspace".to_string())
+            }
+            Err(e) => return Err(CoreError::from(e)),
+        };
+
+        let latest_output_tps = match tps_stmt.query_row(params_from_iter(p), |r| r.get::<_, f64>(0))
+        {
+            Ok(v) => Some(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(CoreError::from(e)),
+        };
+
+        let activity_state = if now_ms.saturating_sub(g.last_active_at_ms) <= ACTIVE_STATE_WINDOW_MS
+        {
+            "active".to_string()
+        } else {
+            "recent".to_string()
+        };
+        let total_tokens = g.input_tokens
+            + g.output_tokens
+            + g.cache_read_tokens
+            + g.cache_write_tokens
+            + g.reasoning_tokens;
+
+        out.push(ActiveSessionSummary {
+            session_key: short_session_key(&g.provider_id, &g.session_id),
+            provider_id: g.provider_id,
+            model_id,
+            project_label: sanitize_project_label(&raw_project),
+            activity_state,
+            started_at_ms: g.started_at_ms,
+            last_active_at_ms: g.last_active_at_ms,
+            request_count: g.request_count,
+            total_tokens,
+            input_tokens: g.input_tokens,
+            output_tokens: g.output_tokens,
+            cache_read_tokens: g.cache_read_tokens,
+            estimated_cost_micro_usd: g.estimated_cost_micro_usd,
+            latest_output_tps,
+        });
+    }
+
+    Ok(out)
+}
+
 impl Storage {
     pub fn query_overview(&self, filter: &AnalyticsFilter, now_ms: i64) -> CoreResult<OverviewReport> {
         self.with_conn(|conn| {
-            let provider = normalized_provider_filter(&filter.provider_id);
+            let provider = normalized_optional_filter(&filter.provider_id);
+            let device_id = normalized_optional_filter(&filter.device_id);
             let (eff_start_ms, eff_end_ms) =
-                resolve_effective_window(conn, filter, provider, now_ms)?;
-            let current = query_period_totals(conn, eff_start_ms, eff_end_ms, provider)?;
+                resolve_effective_window(conn, filter, provider, device_id, now_ms)?;
+            let current = query_period_totals(conn, eff_start_ms, eff_end_ms, provider, device_id)?;
 
             let span = (eff_end_ms - eff_start_ms).max(HOUR_MS);
             let (tokens_delta_pct, cost_delta_pct, cache_delta_pct, tps_delta_pct) =
@@ -593,7 +958,8 @@ impl Storage {
                 } else {
                     let prev_start = eff_start_ms.saturating_sub(span);
                     let prev_end = eff_start_ms.saturating_sub(1);
-                    let previous = query_period_totals(conn, prev_start, prev_end, provider)?;
+                    let previous =
+                        query_period_totals(conn, prev_start, prev_end, provider, device_id)?;
                     (
                         pct_change(current.total_tokens() as f64, previous.total_tokens() as f64),
                         pct_change(current.cost_micro_usd as f64, previous.cost_micro_usd as f64),
@@ -602,7 +968,8 @@ impl Storage {
                     )
                 };
 
-            let latest_output_tps = query_latest_tps(conn, eff_start_ms, eff_end_ms, provider)?;
+            let latest_output_tps =
+                query_latest_tps(conn, eff_start_ms, eff_end_ms, provider, device_id)?;
 
             // Choose hourly series when range <= 48 hours, otherwise daily series
             let use_hourly = span <= 48 * HOUR_MS;
@@ -612,40 +979,27 @@ impl Storage {
                 ("usage_daily_rollups", DAY_MS, "daily".to_string())
             };
             let aligned_start = eff_start_ms.div_euclid(bucket_size) * bucket_size;
+            let scope = build_scope_clause(2, provider, device_id);
+            let series_bound = bound_range_params(aligned_start, eff_end_ms, &scope.params);
 
-            let sql = if provider.is_some() {
-                format!(
-                    r#"
-                    SELECT bucket_start_ms,
-                           SUM(input_tokens), SUM(output_tokens),
-                           SUM(cache_read_tokens), SUM(cache_write_tokens),
-                           SUM(reasoning_tokens), SUM(estimated_cost_micro_usd),
-                           SUM(request_count)
-                    FROM {table_name}
-                    WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2 AND provider_id = ?3
-                    GROUP BY bucket_start_ms
-                    ORDER BY bucket_start_ms ASC
-                    "#
-                )
-            } else {
-                format!(
-                    r#"
-                    SELECT bucket_start_ms,
-                           SUM(input_tokens), SUM(output_tokens),
-                           SUM(cache_read_tokens), SUM(cache_write_tokens),
-                           SUM(reasoning_tokens), SUM(estimated_cost_micro_usd),
-                           SUM(request_count)
-                    FROM {table_name}
-                    WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2
-                    GROUP BY bucket_start_ms
-                    ORDER BY bucket_start_ms ASC
-                    "#
-                )
-            };
+            let sql = format!(
+                r#"
+                SELECT bucket_start_ms,
+                       SUM(input_tokens), SUM(output_tokens),
+                       SUM(cache_read_tokens), SUM(cache_write_tokens),
+                       SUM(reasoning_tokens), SUM(estimated_cost_micro_usd),
+                       SUM(request_count)
+                FROM {table_name}
+                WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2{where_and}
+                GROUP BY bucket_start_ms
+                ORDER BY bucket_start_ms ASC
+                "#,
+                where_and = scope.sql_and
+            );
 
             let mut series = Vec::new();
             let mut stmt = conn.prepare(&sql)?;
-            let map_point = |row: &rusqlite::Row<'_>| -> rusqlite::Result<TimeBucketPoint> {
+            let rows = stmt.query_map(params_from_iter(series_bound.clone()), |row| {
                 Ok(TimeBucketPoint {
                     bucket_start_ms: row.get(0)?,
                     input_tokens: row.get(1)?,
@@ -656,75 +1010,40 @@ impl Storage {
                     cost_micro_usd: row.get(6)?,
                     requests: row.get(7)?,
                 })
-            };
-
-            if let Some(prov) = provider {
-                let rows = stmt.query_map(params![aligned_start, eff_end_ms, prov], map_point)?;
-                for row in rows {
-                    series.push(row?);
-                }
-            } else {
-                let rows = stmt.query_map(params![aligned_start, eff_end_ms], map_point)?;
-                for row in rows {
-                    series.push(row?);
-                }
+            })?;
+            for row in rows {
+                series.push(row?);
             }
 
-            let prov_series_sql = if provider.is_some() {
-                format!(
-                    r#"
-                    SELECT bucket_start_ms, provider_id,
-                           SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + reasoning_tokens),
-                           SUM(estimated_cost_micro_usd),
-                           SUM(request_count)
-                    FROM {table_name}
-                    WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2 AND provider_id = ?3
-                    GROUP BY bucket_start_ms, provider_id
-                    ORDER BY bucket_start_ms ASC
-                    "#
-                )
-            } else {
-                format!(
-                    r#"
-                    SELECT bucket_start_ms, provider_id,
-                           SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + reasoning_tokens),
-                           SUM(estimated_cost_micro_usd),
-                           SUM(request_count)
-                    FROM {table_name}
-                    WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2
-                    GROUP BY bucket_start_ms, provider_id
-                    ORDER BY bucket_start_ms ASC
-                    "#
-                )
-            };
+            let prov_series_sql = format!(
+                r#"
+                SELECT bucket_start_ms, provider_id,
+                       SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + reasoning_tokens),
+                       SUM(estimated_cost_micro_usd),
+                       SUM(request_count)
+                FROM {table_name}
+                WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2{where_and}
+                GROUP BY bucket_start_ms, provider_id
+                ORDER BY bucket_start_ms ASC
+                "#,
+                where_and = scope.sql_and
+            );
 
             let mut prov_buckets: BTreeMap<String, BTreeMap<i64, (i64, i64, i64)>> =
                 BTreeMap::new();
             let mut prov_stmt = conn.prepare(&prov_series_sql)?;
-            let map_prov_row =
-                |row: &rusqlite::Row<'_>| -> rusqlite::Result<(i64, String, i64, i64, i64)> {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                };
-            if let Some(prov) = provider {
-                let rows =
-                    prov_stmt.query_map(params![aligned_start, eff_end_ms, prov], map_prov_row)?;
-                for row in rows {
-                    let (b, pid, tok, cost, req) = row?;
-                    prov_buckets.entry(pid).or_default().insert(b, (tok, cost, req));
-                }
-            } else {
-                let rows =
-                    prov_stmt.query_map(params![aligned_start, eff_end_ms], map_prov_row)?;
-                for row in rows {
-                    let (b, pid, tok, cost, req) = row?;
-                    prov_buckets.entry(pid).or_default().insert(b, (tok, cost, req));
-                }
+            let prov_rows_iter = prov_stmt.query_map(params_from_iter(series_bound), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
+            for row in prov_rows_iter {
+                let (b, pid, tok, cost, req) = row?;
+                prov_buckets.entry(pid).or_default().insert(b, (tok, cost, req));
             }
 
             let aligned_buckets: Vec<i64> = series.iter().map(|p| p.bucket_start_ms).collect();
@@ -766,6 +1085,8 @@ impl Storage {
             // Build per-provider summary rows including today & month spend + active subscription or observed limit status
             let (today_start_ms, month_start_ms) =
                 local_day_bounds_ms(now_ms, filter.tz_offset_minutes);
+            let today_totals =
+                query_period_totals(conn, today_start_ms, now_ms, provider, device_id)?;
 
             let plans = load_subscription_plans(conn)?;
             let observed = load_observed_rate_limits(conn)?;
@@ -791,9 +1112,12 @@ impl Storage {
                         continue;
                     }
                 }
-                let period_t = query_period_totals(conn, eff_start_ms, eff_end_ms, Some(&pid))?;
-                let today_t = query_period_totals(conn, today_start_ms, now_ms, Some(&pid))?;
-                let month_t = query_period_totals(conn, month_start_ms, now_ms, Some(&pid))?;
+                let period_t =
+                    query_period_totals(conn, eff_start_ms, eff_end_ms, Some(&pid), device_id)?;
+                let today_t =
+                    query_period_totals(conn, today_start_ms, now_ms, Some(&pid), device_id)?;
+                let month_t =
+                    query_period_totals(conn, month_start_ms, now_ms, Some(&pid), device_id)?;
 
                 let active_plan = plans.iter().find(|p| {
                     p.enabled && p.is_user_configured && p.provider_id.eq_ignore_ascii_case(&pid)
@@ -828,9 +1152,26 @@ impl Storage {
                 });
             }
 
+            let provider_shares =
+                query_provider_shares(conn, eff_start_ms, eff_end_ms, provider, device_id)?;
+            let top_model_shares = query_top_model_shares(
+                conn,
+                eff_start_ms,
+                eff_end_ms,
+                provider,
+                device_id,
+                current.total_tokens(),
+                current.cost_micro_usd,
+                3,
+            )?;
+            let active_sessions =
+                query_active_sessions(conn, now_ms, provider, device_id, 8)?;
+
             Ok(OverviewReport {
                 total_tokens: current.total_tokens(),
                 total_cost_micro_usd: current.cost_micro_usd,
+                today_tokens: today_totals.total_tokens(),
+                today_cost_micro_usd: today_totals.cost_micro_usd,
                 cache_hit_ratio: current.cache_hit_ratio(),
                 avg_output_tps: current.avg_tps(),
                 peak_output_tps: current.max_tps,
@@ -845,6 +1186,9 @@ impl Storage {
                 series,
                 provider_series,
                 providers: prov_rows,
+                provider_shares,
+                top_model_shares,
+                active_sessions,
             })
         })
     }
@@ -852,9 +1196,15 @@ impl Storage {
     pub fn query_trends(&self, query: &TrendsQuery) -> CoreResult<TrendsReport> {
         self.with_conn(|conn| {
             let filter = &query.filter;
-            let provider = normalized_provider_filter(&filter.provider_id);
-            let (eff_start_ms, eff_end_ms) =
-                resolve_effective_window(conn, filter, provider, Utc::now().timestamp_millis())?;
+            let provider = normalized_optional_filter(&filter.provider_id);
+            let device_id = normalized_optional_filter(&filter.device_id);
+            let (eff_start_ms, eff_end_ms) = resolve_effective_window(
+                conn,
+                filter,
+                provider,
+                device_id,
+                Utc::now().timestamp_millis(),
+            )?;
             let span = (eff_end_ms - eff_start_ms).max(HOUR_MS);
             let effective_granularity = resolve_trend_granularity(query.granularity, span);
 
@@ -863,6 +1213,7 @@ impl Storage {
                 eff_start_ms,
                 eff_end_ms,
                 provider,
+                device_id,
                 effective_granularity,
             )?;
             let previous_rows = if filter.all_time {
@@ -870,7 +1221,14 @@ impl Storage {
             } else {
                 let prev_start = eff_start_ms.saturating_sub(span);
                 let prev_end = eff_start_ms.saturating_sub(1);
-                fetch_trend_rows(conn, prev_start, prev_end, provider, effective_granularity)?
+                fetch_trend_rows(
+                    conn,
+                    prev_start,
+                    prev_end,
+                    provider,
+                    device_id,
+                    effective_granularity,
+                )?
             };
 
             let mut all_buckets = BTreeSet::new();
@@ -1062,10 +1420,11 @@ impl Storage {
                 .map(|d| d.timestamp_millis() - 1)
                 .ok_or_else(|| CoreError::TimeOverflow("Month end timestamp".to_string()))?;
 
-            let provider = normalized_provider_filter(&query.provider_id);
+            let provider = normalized_optional_filter(&query.provider_id);
+            let device_id = normalized_optional_filter(&query.device_id);
 
             // Query hourly rollups for exact local-timezone day grouping.
-            let rows = fetch_hourly_rows(conn, start_ms, end_ms, provider)?;
+            let rows = fetch_hourly_rows(conn, start_ms, end_ms, provider, device_id)?;
 
             #[derive(Default)]
             struct DayAccum {
@@ -1163,7 +1522,7 @@ impl Storage {
                 .map(|d| d.timestamp_millis())
                 .unwrap_or_else(|| end_ms.saturating_sub(365 * DAY_MS));
 
-            let hm_rows = fetch_hourly_rows(conn, heatmap_start_ms, end_ms, provider)?;
+            let hm_rows = fetch_hourly_rows(conn, heatmap_start_ms, end_ms, provider, device_id)?;
             let mut hm_by_day: BTreeMap<String, DayAccum> = BTreeMap::new();
             for r in hm_rows {
                 let day_key = date_key_from_ms(r.bucket_start_ms, offset);
@@ -1225,13 +1584,21 @@ impl Storage {
 
     pub fn query_models_pricing(&self, filter: &AnalyticsFilter) -> CoreResult<ModelStatsReport> {
         self.with_conn(|conn| {
-            let provider = normalized_provider_filter(&filter.provider_id);
-            let (eff_start_ms, eff_end_ms) =
-                resolve_effective_window(conn, filter, provider, Utc::now().timestamp_millis())?;
+            let provider = normalized_optional_filter(&filter.provider_id);
+            let device_id = normalized_optional_filter(&filter.device_id);
+            let (eff_start_ms, eff_end_ms) = resolve_effective_window(
+                conn,
+                filter,
+                provider,
+                device_id,
+                Utc::now().timestamp_millis(),
+            )?;
             let catalog = load_pricing_catalog(conn)?;
             let aligned_start = eff_start_ms.div_euclid(HOUR_MS) * HOUR_MS;
+            let scope = build_scope_clause(2, provider, device_id);
+            let bound = bound_range_params(aligned_start, eff_end_ms, &scope.params);
 
-            let sql = if provider.is_some() {
+            let sql = format!(
                 r#"
                 SELECT model_id, provider_id,
                        SUM(request_count), SUM(observable_step_count),
@@ -1241,32 +1608,19 @@ impl Storage {
                        SUM(estimated_cost_micro_usd),
                        SUM(tps_sample_count), SUM(tps_sum)
                 FROM usage_hourly_rollups
-                WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2 AND provider_id = ?3
+                WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2{where_and}
                 GROUP BY model_id, provider_id
                 ORDER BY SUM(estimated_cost_micro_usd) DESC, SUM(request_count) DESC
-                "#
-            } else {
-                r#"
-                SELECT model_id, provider_id,
-                       SUM(request_count), SUM(observable_step_count),
-                       SUM(input_tokens), SUM(output_tokens),
-                       SUM(cache_read_tokens), SUM(cache_write_tokens),
-                       SUM(reasoning_tokens), SUM(cache_saved_micro_usd),
-                       SUM(estimated_cost_micro_usd),
-                       SUM(tps_sample_count), SUM(tps_sum)
-                FROM usage_hourly_rollups
-                WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2
-                GROUP BY model_id, provider_id
-                ORDER BY SUM(estimated_cost_micro_usd) DESC, SUM(request_count) DESC
-                "#
-            };
+                "#,
+                where_and = scope.sql_and
+            );
 
-            let mut stmt = conn.prepare(sql)?;
+            let mut stmt = conn.prepare(&sql)?;
             let mut raw_rows = Vec::new();
             let mut total_cost = 0i64;
             let mut total_saved = 0i64;
 
-            let collect_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<ModelStatRow> {
+            let iter = stmt.query_map(params_from_iter(bound), |row| {
                 let model_id: String = row.get(0)?;
                 let provider_id: String = row.get(1)?;
                 let requests: i64 = row.get(2)?;
@@ -1310,28 +1664,13 @@ impl Storage {
                     avg_output_tps,
                     effective_pricing,
                 })
-            };
+            })?;
 
-            if let Some(prov) = provider {
-                let iter = stmt.query_map(params![aligned_start, eff_end_ms, prov], |r| {
-                    collect_row(r)
-                })?;
-                for item in iter {
-                    let row = item?;
-                    total_cost += row.estimated_cost_micro_usd;
-                    total_saved += row.cache_saved_micro_usd;
-                    raw_rows.push(row);
-                }
-            } else {
-                let iter = stmt.query_map(params![aligned_start, eff_end_ms], |r| {
-                    collect_row(r)
-                })?;
-                for item in iter {
-                    let row = item?;
-                    total_cost += row.estimated_cost_micro_usd;
-                    total_saved += row.cache_saved_micro_usd;
-                    raw_rows.push(row);
-                }
+            for item in iter {
+                let row = item?;
+                total_cost += row.estimated_cost_micro_usd;
+                total_saved += row.cache_saved_micro_usd;
+                raw_rows.push(row);
             }
 
             if total_cost > 0 {
@@ -1373,9 +1712,15 @@ impl Storage {
 
     pub fn query_speed_latency(&self, filter: &AnalyticsFilter) -> CoreResult<SpeedLatencyReport> {
         self.with_conn(|conn| {
-            let provider = normalized_provider_filter(&filter.provider_id);
-            let (eff_start_ms, eff_end_ms) =
-                resolve_effective_window(conn, filter, provider, Utc::now().timestamp_millis())?;
+            let provider = normalized_optional_filter(&filter.provider_id);
+            let device_id = normalized_optional_filter(&filter.device_id);
+            let (eff_start_ms, eff_end_ms) = resolve_effective_window(
+                conn,
+                filter,
+                provider,
+                device_id,
+                Utc::now().timestamp_millis(),
+            )?;
 
             struct RawSpeedEvent {
                 model_id: String,
@@ -1385,37 +1730,26 @@ impl Storage {
                 ttft_ms: Option<i64>,
             }
 
-            let sql = if provider.is_some() {
+            let scope = build_scope_clause(2, provider, device_id);
+            let bound = bound_range_params(eff_start_ms, eff_end_ms, &scope.params);
+            let sql = format!(
                 r#"
                 SELECT model_id, provider_id, output_tps, duration_ms, ttft_ms
                 FROM usage_events
-                WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
-                  AND provider_id = ?3
+                WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2{where_and}
                   AND output_tps IS NOT NULL
                   AND output_tps > 0.0
                   AND output_tps <= 800.0
                   AND (duration_ms IS NULL OR duration_ms >= 300)
                   AND (output_tokens + reasoning_tokens) >= 8
                 ORDER BY timestamp_ms ASC
-                "#
-            } else {
-                r#"
-                SELECT model_id, provider_id, output_tps, duration_ms, ttft_ms
-                FROM usage_events
-                WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
-                  AND output_tps IS NOT NULL
-                  AND output_tps > 0.0
-                  AND output_tps <= 800.0
-                  AND (duration_ms IS NULL OR duration_ms >= 300)
-                  AND (output_tokens + reasoning_tokens) >= 8
-                ORDER BY timestamp_ms ASC
-                "#
-            };
+                "#,
+                where_and = scope.sql_and
+            );
 
-            let mut stmt = conn.prepare(sql)?;
+            let mut stmt = conn.prepare(&sql)?;
             let mut events = Vec::new();
-
-            let map_fn = |row: &rusqlite::Row<'_>| -> rusqlite::Result<RawSpeedEvent> {
+            let rows = stmt.query_map(params_from_iter(bound), |row| {
                 Ok(RawSpeedEvent {
                     model_id: row.get(0)?,
                     provider_id: row.get(1)?,
@@ -1423,18 +1757,9 @@ impl Storage {
                     duration_ms: row.get(3)?,
                     ttft_ms: row.get(4)?,
                 })
-            };
-
-            if let Some(prov) = provider {
-                let rows = stmt.query_map(params![eff_start_ms, eff_end_ms, prov], map_fn)?;
-                for r in rows {
-                    events.push(r?);
-                }
-            } else {
-                let rows = stmt.query_map(params![eff_start_ms, eff_end_ms], map_fn)?;
-                for r in rows {
-                    events.push(r?);
-                }
+            })?;
+            for r in rows {
+                events.push(r?);
             }
 
             // Aggregate per-provider speed & latency stats
@@ -1557,8 +1882,8 @@ impl Storage {
     pub fn query_tray_summary(&self, now_ms: i64, tz_offset_minutes: i32) -> CoreResult<TraySummary> {
         self.with_conn(|conn| {
             let (today_start_ms, _) = local_day_bounds_ms(now_ms, tz_offset_minutes);
-            let today_totals = query_period_totals(conn, today_start_ms, now_ms, None)?;
-            let latest_output_tps = query_latest_tps(conn, today_start_ms, now_ms, None)?;
+            let today_totals = query_period_totals(conn, today_start_ms, now_ms, None, None)?;
+            let latest_output_tps = query_latest_tps(conn, today_start_ms, now_ms, None, None)?;
             let prefs = load_preferences(conn)?;
 
             let plans = load_subscription_plans(conn)?;
@@ -1577,6 +1902,9 @@ impl Storage {
                 })
                 .collect();
 
+            let provider_shares = query_provider_shares(conn, today_start_ms, now_ms, None, None)?;
+            let active_sessions = query_active_sessions(conn, now_ms, None, None, 3)?;
+
             let active_providers_count: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM provider_configs WHERE enabled = 1",
                 [],
@@ -1591,6 +1919,8 @@ impl Storage {
                 today_requests: today_totals.requests,
                 latest_output_tps,
                 subscriptions,
+                provider_shares,
+                active_sessions,
                 currency: prefs.currency,
                 usd_to_cny_rate: prefs.usd_to_cny_rate,
                 active_providers_count: active_providers_count.max(0) as usize,
@@ -1649,12 +1979,7 @@ fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
 
 fn format_dimension_label(dim: StackDimension, key: &str) -> String {
     match dim {
-        StackDimension::Provider => match key {
-            provider_ids::CLAUDE_CODE => "Claude Code".to_string(),
-            provider_ids::CODEX => "Codex".to_string(),
-            provider_ids::ANTIGRAVITY => "Antigravity".to_string(),
-            other => other.to_string(),
-        },
+        StackDimension::Provider => provider_ids::display_name(key).to_string(),
         StackDimension::Model => key.to_string(),
         StackDimension::TokenType => match key {
             "input" => "Input".to_string(),
@@ -1697,6 +2022,7 @@ fn fetch_trend_rows(
     start_ms: i64,
     end_ms: i64,
     provider: Option<&str>,
+    device_id: Option<&str>,
     granularity: TrendGranularity,
 ) -> CoreResult<Vec<RawTrendRow>> {
     let resolved = resolve_trend_granularity(granularity, (end_ms - start_ms).max(HOUR_MS));
@@ -1704,7 +2030,8 @@ fn fetch_trend_rows(
         TrendGranularity::Auto => unreachable!("resolve_trend_granularity resolves Auto"),
         TrendGranularity::FifteenMinutes => {
             const BUCKET_15M: i64 = 900_000;
-            let sql = if provider.is_some() {
+            let scope = build_scope_clause(2, provider, device_id);
+            let sql = format!(
                 r#"
                 SELECT (timestamp_ms / 900000) * 900000 AS b,
                        provider_id, model_id,
@@ -1714,32 +2041,19 @@ fn fetch_trend_rows(
                        SUM(reasoning_tokens), SUM(estimated_cost_micro_usd),
                        SUM(cache_saved_micro_usd)
                 FROM usage_events
-                WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2 AND provider_id = ?3
+                WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2{where_and}
                 GROUP BY b, provider_id, model_id
                 ORDER BY b ASC
-                "#
-            } else {
-                r#"
-                SELECT (timestamp_ms / 900000) * 900000 AS b,
-                       provider_id, model_id,
-                       COUNT(*), SUM(observable_only),
-                       SUM(input_tokens), SUM(output_tokens),
-                       SUM(cache_read_tokens), SUM(cache_write_tokens),
-                       SUM(reasoning_tokens), SUM(estimated_cost_micro_usd),
-                       SUM(cache_saved_micro_usd)
-                FROM usage_events
-                WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
-                GROUP BY b, provider_id, model_id
-                ORDER BY b ASC
-                "#
-            };
+                "#,
+                where_and = scope.sql_and
+            );
             let _ = BUCKET_15M;
-            run_trend_query(conn, sql, start_ms, end_ms, provider)
+            run_trend_query(conn, &sql, start_ms, end_ms, &scope.params)
         }
-        TrendGranularity::Hourly => fetch_hourly_rows(conn, start_ms, end_ms, provider),
-        TrendGranularity::Daily => fetch_daily_rows(conn, start_ms, end_ms, provider),
+        TrendGranularity::Hourly => fetch_hourly_rows(conn, start_ms, end_ms, provider, device_id),
+        TrendGranularity::Daily => fetch_daily_rows(conn, start_ms, end_ms, provider, device_id),
         TrendGranularity::Weekly => {
-            let daily = fetch_daily_rows(conn, start_ms, end_ms, provider)?;
+            let daily = fetch_daily_rows(conn, start_ms, end_ms, provider, device_id)?;
             const WEEK_MS: i64 = 7 * DAY_MS;
             let mut grouped: BTreeMap<(i64, String, String), RawTrendRow> = BTreeMap::new();
             for row in daily {
@@ -1780,9 +2094,11 @@ fn fetch_hourly_rows(
     start_ms: i64,
     end_ms: i64,
     provider: Option<&str>,
+    device_id: Option<&str>,
 ) -> CoreResult<Vec<RawTrendRow>> {
     let aligned_start = start_ms.div_euclid(HOUR_MS) * HOUR_MS;
-    let sql = if provider.is_some() {
+    let scope = build_scope_clause(2, provider, device_id);
+    let sql = format!(
         r#"
         SELECT bucket_start_ms, provider_id, model_id,
                SUM(request_count), SUM(observable_step_count),
@@ -1791,25 +2107,13 @@ fn fetch_hourly_rows(
                SUM(reasoning_tokens), SUM(estimated_cost_micro_usd),
                SUM(cache_saved_micro_usd)
         FROM usage_hourly_rollups
-        WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2 AND provider_id = ?3
+        WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2{where_and}
         GROUP BY bucket_start_ms, provider_id, model_id
         ORDER BY bucket_start_ms ASC
-        "#
-    } else {
-        r#"
-        SELECT bucket_start_ms, provider_id, model_id,
-               SUM(request_count), SUM(observable_step_count),
-               SUM(input_tokens), SUM(output_tokens),
-               SUM(cache_read_tokens), SUM(cache_write_tokens),
-               SUM(reasoning_tokens), SUM(estimated_cost_micro_usd),
-               SUM(cache_saved_micro_usd)
-        FROM usage_hourly_rollups
-        WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2
-        GROUP BY bucket_start_ms, provider_id, model_id
-        ORDER BY bucket_start_ms ASC
-        "#
-    };
-    run_trend_query(conn, sql, aligned_start, end_ms, provider)
+        "#,
+        where_and = scope.sql_and
+    );
+    run_trend_query(conn, &sql, aligned_start, end_ms, &scope.params)
 }
 
 fn fetch_daily_rows(
@@ -1817,9 +2121,11 @@ fn fetch_daily_rows(
     start_ms: i64,
     end_ms: i64,
     provider: Option<&str>,
+    device_id: Option<&str>,
 ) -> CoreResult<Vec<RawTrendRow>> {
     let aligned_start = start_ms.div_euclid(DAY_MS) * DAY_MS;
-    let sql = if provider.is_some() {
+    let scope = build_scope_clause(2, provider, device_id);
+    let sql = format!(
         r#"
         SELECT bucket_start_ms, provider_id, model_id,
                SUM(request_count), SUM(observable_step_count),
@@ -1828,25 +2134,13 @@ fn fetch_daily_rows(
                SUM(reasoning_tokens), SUM(estimated_cost_micro_usd),
                SUM(cache_saved_micro_usd)
         FROM usage_daily_rollups
-        WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2 AND provider_id = ?3
+        WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2{where_and}
         GROUP BY bucket_start_ms, provider_id, model_id
         ORDER BY bucket_start_ms ASC
-        "#
-    } else {
-        r#"
-        SELECT bucket_start_ms, provider_id, model_id,
-               SUM(request_count), SUM(observable_step_count),
-               SUM(input_tokens), SUM(output_tokens),
-               SUM(cache_read_tokens), SUM(cache_write_tokens),
-               SUM(reasoning_tokens), SUM(estimated_cost_micro_usd),
-               SUM(cache_saved_micro_usd)
-        FROM usage_daily_rollups
-        WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2
-        GROUP BY bucket_start_ms, provider_id, model_id
-        ORDER BY bucket_start_ms ASC
-        "#
-    };
-    run_trend_query(conn, sql, aligned_start, end_ms, provider)
+        "#,
+        where_and = scope.sql_and
+    );
+    run_trend_query(conn, &sql, aligned_start, end_ms, &scope.params)
 }
 
 fn run_trend_query(
@@ -1854,10 +2148,11 @@ fn run_trend_query(
     sql: &str,
     start_ms: i64,
     end_ms: i64,
-    provider: Option<&str>,
+    extra_params: &[Value],
 ) -> CoreResult<Vec<RawTrendRow>> {
     let mut stmt = conn.prepare(sql)?;
-    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<RawTrendRow> {
+    let bound = bound_range_params(start_ms, end_ms, extra_params);
+    let rows = stmt.query_map(params_from_iter(bound), |row| {
         Ok(RawTrendRow {
             bucket_start_ms: row.get(0)?,
             provider_id: row.get(1)?,
@@ -1872,19 +2167,11 @@ fn run_trend_query(
             cost_micro_usd: row.get(10)?,
             cache_saved_micro_usd: row.get(11)?,
         })
-    };
+    })?;
 
     let mut out = Vec::new();
-    if let Some(prov) = provider {
-        let rows = stmt.query_map(params![start_ms, end_ms, prov], map_row)?;
-        for r in rows {
-            out.push(r?);
-        }
-    } else {
-        let rows = stmt.query_map(params![start_ms, end_ms], map_row)?;
-        for r in rows {
-            out.push(r?);
-        }
+    for r in rows {
+        out.push(r?);
     }
     Ok(out)
 }
@@ -1961,6 +2248,7 @@ mod tests {
             start_ms: base_ts - HOUR_MS,
             end_ms: base_ts + 4 * HOUR_MS,
             provider_id: None,
+            device_id: None,
             tz_offset_minutes: 480,
             all_time: false,
         };
@@ -1981,6 +2269,7 @@ mod tests {
                 year: 2026,
                 month: 11,
                 provider_id: None,
+                device_id: None,
                 tz_offset_minutes: 480,
             })
             .expect("monthly");
@@ -2066,6 +2355,7 @@ mod tests {
             start_ms: base_ts,
             end_ms: base_ts + 2 * HOUR_MS,
             provider_id: None,
+            device_id: None,
             tz_offset_minutes: 480,
             all_time: true,
         };
@@ -2175,6 +2465,7 @@ mod tests {
                 year: 2026,
                 month: 11,
                 provider_id: None,
+                device_id: None,
                 tz_offset_minutes: 480,
             })
             .expect("monthly +8");
@@ -2204,6 +2495,7 @@ mod tests {
                 year: 2026,
                 month: 11,
                 provider_id: None,
+                device_id: None,
                 tz_offset_minutes: -300,
             })
             .expect("monthly -5");
@@ -2274,6 +2566,7 @@ mod tests {
             start_ms: ts - HOUR_MS,
             end_ms: ts + HOUR_MS,
             provider_id: None,
+            device_id: None,
             tz_offset_minutes: 480,
             all_time: false,
         };
@@ -2300,5 +2593,240 @@ mod tests {
             .expect("token type trends");
         assert!(tok_trends.series.iter().all(|s| s.total_tokens > 0));
         assert!(tok_trends.series.iter().all(|s| s.key != "reasoning"));
+    }
+
+    #[test]
+    fn active_sessions_and_shares_classify_active_vs_recent_and_sanitize_labels() {
+        let storage = Storage::open_in_memory().expect("db");
+        let dev = storage.local_device().expect("device").device_id;
+        let now_ms = Utc
+            .with_ymd_and_hms(2026, 11, 16, 12, 0, 0)
+            .single()
+            .expect("now")
+            .timestamp_millis();
+
+        let events = vec![
+            // Active (45s ago) + earlier step 2h ago in same session
+            NormalizedUsageEvent {
+                event_id: compute_event_id("claude_code", "sess-alpha", "m1", now_ms - 7_200_000),
+                device_id: dev.clone(),
+                provider_id: "claude_code".to_string(),
+                session_id: "sess-alpha".to_string(),
+                project_label: "C:\\Users\\alice\\repos\\my-secret-app".to_string(),
+                model_id: "claude-sonnet-4-5".to_string(),
+                timestamp_ms: now_ms - 7_200_000,
+                input_tokens: 1_000,
+                output_tokens: 200,
+                cache_read_tokens: 400,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(1_500),
+                ttft_ms: None,
+                output_tps: Some(45.0),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+            NormalizedUsageEvent {
+                event_id: compute_event_id("claude_code", "sess-alpha", "m2", now_ms - 45_000),
+                device_id: dev.clone(),
+                provider_id: "claude_code".to_string(),
+                session_id: "sess-alpha".to_string(),
+                project_label: "C:\\Users\\alice\\repos\\my-secret-app\\".to_string(),
+                model_id: "claude-sonnet-4-5".to_string(),
+                timestamp_ms: now_ms - 45_000,
+                input_tokens: 2_000,
+                output_tokens: 300,
+                cache_read_tokens: 600,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(1_000),
+                ttft_ms: None,
+                output_tps: Some(82.5),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+            // Recent (10 min ago)
+            NormalizedUsageEvent {
+                event_id: compute_event_id("kimi_code", "sess-beta", "m1", now_ms - 600_000),
+                device_id: dev.clone(),
+                provider_id: "kimi_code".to_string(),
+                session_id: "sess-beta".to_string(),
+                project_label: "/home/dev/worktree/backend-api".to_string(),
+                model_id: "kimi-k2-0905-preview".to_string(),
+                timestamp_ms: now_ms - 600_000,
+                input_tokens: 500,
+                output_tokens: 150,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(2_000),
+                ttft_ms: None,
+                output_tps: Some(55.0),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+            // Too old (20 min ago) -> excluded from active_sessions
+            NormalizedUsageEvent {
+                event_id: compute_event_id("codex", "sess-gamma", "m1", now_ms - 1_200_000),
+                device_id: dev,
+                provider_id: "codex".to_string(),
+                session_id: "sess-gamma".to_string(),
+                project_label: "old-project".to_string(),
+                model_id: "gpt-5-codex".to_string(),
+                timestamp_ms: now_ms - 1_200_000,
+                input_tokens: 300,
+                output_tokens: 100,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(1_000),
+                ttft_ms: None,
+                output_tps: Some(60.0),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+        ];
+        storage
+            .ingest_events_with_cursor(&events, None, &[])
+            .expect("ingest");
+
+        let ov = storage
+            .query_overview(
+                &AnalyticsFilter {
+                    start_ms: now_ms - 6 * HOUR_MS,
+                    end_ms: now_ms,
+                    provider_id: None,
+                    device_id: None,
+                    tz_offset_minutes: 480,
+                    all_time: false,
+                },
+                now_ms,
+            )
+            .expect("overview");
+
+        assert_eq!(ov.active_sessions.len(), 2);
+        let s0 = &ov.active_sessions[0];
+        assert_eq!(s0.provider_id, "claude_code");
+        assert_eq!(s0.activity_state, "active");
+        assert_eq!(s0.project_label, "my-secret-app");
+        assert!(s0.session_key.starts_with('#') && s0.session_key.len() == 7);
+        assert_ne!(s0.session_key, "sess-alpha");
+        assert_eq!(s0.request_count, 2);
+        assert_eq!(s0.total_tokens, 4_500);
+        assert_eq!(s0.latest_output_tps, Some(82.5));
+
+        let s1 = &ov.active_sessions[1];
+        assert_eq!(s1.provider_id, "kimi_code");
+        assert_eq!(s1.activity_state, "recent");
+        assert_eq!(s1.project_label, "backend-api");
+
+        assert_eq!(ov.provider_shares.len(), 3);
+        let pct_sum: f64 = ov
+            .provider_shares
+            .iter()
+            .map(|p| p.token_share_percent)
+            .sum();
+        assert!((pct_sum - 100.0).abs() < 1e-6);
+        assert_eq!(ov.top_model_shares.len(), 3);
+
+        let tray = storage.query_tray_summary(now_ms, 480).expect("tray");
+        assert_eq!(tray.active_sessions.len(), 2);
+        assert_eq!(tray.provider_shares.len(), 3);
+    }
+
+    #[test]
+    fn multi_device_filter_isolates_overview_trends_monthly_and_models() {
+        use crate::domain::{SyncEnvelopeV1, SyncHourlyDelta};
+
+        let storage = Storage::open_in_memory().expect("db");
+        let base_ts = seed_sample_events(&storage);
+        let bucket = base_ts.div_euclid(HOUR_MS) * HOUR_MS;
+        let remote_envelope = SyncEnvelopeV1 {
+            schema_version: 1,
+            device_id: "remote-mbp".to_string(),
+            device_display_name: "MacBook Pro".to_string(),
+            generated_at_ms: base_ts + 5_000,
+            since_watermark_ms: 0,
+            hourly_deltas: vec![SyncHourlyDelta {
+                provider_id: "deepseek_harness".to_string(),
+                model_id: "deepseek-reasoner".to_string(),
+                bucket_start_ms: bucket,
+                request_count: 3,
+                observable_step_count: 0,
+                input_tokens: 20_000,
+                output_tokens: 10_000,
+                cache_read_tokens: 5_000,
+                cache_write_tokens: 0,
+                reasoning_tokens: 15_000,
+                estimated_cost_micro_usd: 420_000,
+                cache_saved_micro_usd: 10_000,
+                total_duration_ms: 9_000,
+                tps_sample_count: 3,
+                tps_sum: 150.0,
+                max_output_tps: 60.0,
+                updated_at_ms: base_ts + 5_000,
+            }],
+            subscription_snapshots: Vec::new(),
+        };
+        storage
+            .apply_remote_sync_envelope_v1(&remote_envelope, base_ts + 6_000)
+            .expect("apply remote");
+
+        // All devices = local (685k) + remote (50k) = 735k
+        let all_filter = AnalyticsFilter {
+            start_ms: base_ts - HOUR_MS,
+            end_ms: base_ts + 4 * HOUR_MS,
+            provider_id: None,
+            device_id: None,
+            tz_offset_minutes: 480,
+            all_time: false,
+        };
+        let all_ov = storage
+            .query_overview(&all_filter, base_ts + 2 * HOUR_MS)
+            .expect("all overview");
+        assert_eq!(all_ov.total_tokens, 735_000);
+
+        // Single remote device = 50k tokens
+        let remote_filter = AnalyticsFilter {
+            device_id: Some("remote-mbp".to_string()),
+            ..all_filter
+        };
+        let remote_ov = storage
+            .query_overview(&remote_filter, base_ts + 2 * HOUR_MS)
+            .expect("remote overview");
+        assert_eq!(remote_ov.total_tokens, 50_000);
+        assert_eq!(remote_ov.total_cost_micro_usd, 420_000);
+        assert_eq!(remote_ov.active_sessions.len(), 0);
+
+        let remote_trends = storage
+            .query_trends(&TrendsQuery {
+                filter: remote_filter.clone(),
+                granularity: TrendGranularity::Hourly,
+                dimension: StackDimension::Provider,
+            })
+            .expect("remote trends");
+        assert_eq!(remote_trends.series.len(), 1);
+        assert_eq!(remote_trends.series[0].key, "deepseek_harness");
+
+        let remote_monthly = storage
+            .query_monthly(&MonthlyQuery {
+                year: 2026,
+                month: 11,
+                provider_id: None,
+                device_id: Some("remote-mbp".to_string()),
+                tz_offset_minutes: 480,
+            })
+            .expect("remote monthly");
+        assert_eq!(remote_monthly.month_total_tokens, 50_000);
+
+        let remote_models = storage
+            .query_models_pricing(&remote_filter)
+            .expect("remote models");
+        assert_eq!(remote_models.rows.len(), 1);
+        assert_eq!(remote_models.rows[0].model_id, "deepseek-reasoner");
     }
 }

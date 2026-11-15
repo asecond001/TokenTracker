@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tempfile::tempdir;
 use tokentracker_collectors::otlp::{
@@ -11,9 +14,20 @@ use tokentracker_collectors::otlp::{
 use tokentracker_collectors::providers::antigravity::AntigravityParser;
 use tokentracker_collectors::providers::claude_code::{read_claude_stats_cache, ClaudeCodeParser};
 use tokentracker_collectors::providers::codex::CodexParser;
+use tokentracker_collectors::providers::deepseek_harness::DeepSeekHarnessParser;
+use tokentracker_collectors::providers::kimi_code::KimiCodeParser;
+use tokentracker_collectors::providers::minimax_code::MiniMaxCodeParser;
+use tokentracker_collectors::providers::qcode::QCodeParser;
+use tokentracker_collectors::providers::workbuddy::WorkbuddyParser;
 use tokentracker_collectors::watcher::{discover_files_for_parser, tail_file_incremental};
+use tokentracker_collectors::{
+    refresh_provider_balance_with_fetcher, AuthHttpFetcher, BalanceApiEndpoints,
+    CollectorCoordinator, MemoryCredentialStore, CredentialManager,
+};
 use tokentracker_core::analytics::AnalyticsFilter;
-use tokentracker_core::domain::provider_ids;
+use tokentracker_core::domain::{
+    provider_ids, CustomProtocolKind, CustomProviderRule, DeclarativeMappingSpec,
+};
 use tokentracker_core::Storage;
 
 fn fixtures_dir() -> PathBuf {
@@ -89,6 +103,7 @@ fn replays_claude_codex_and_antigravity_fixtures_accurately() {
         start_ms: 0,
         end_ms: i64::MAX / 2,
         provider_id: None,
+        device_id: None,
         tz_offset_minutes: 480,
         all_time: false,
     };
@@ -160,6 +175,7 @@ fn incremental_tailer_handles_partial_lines_concurrent_writers_truncation_and_ro
         start_ms: 0,
         end_ms: i64::MAX / 2,
         provider_id: None,
+        device_id: None,
         tz_offset_minutes: 480,
         all_time: false,
     };
@@ -254,6 +270,7 @@ async fn loopback_otlp_server_receives_and_persists_metrics_and_logs() {
         start_ms: 0,
         end_ms: i64::MAX / 2,
         provider_id: Some(provider_ids::CLAUDE_CODE.to_string()),
+        device_id: None,
         tz_offset_minutes: 480,
         all_time: false,
     };
@@ -584,3 +601,867 @@ async fn catalog_sync_handles_primary_fallback_offline_and_locks() {
     assert!(codex_entry.is_user_override);
     assert_eq!(codex_entry.input_per_m_micro_usd, 9_000_000);
 }
+
+#[test]
+fn replays_phase2_five_providers_and_preserves_prefix_cache_and_routed_models() {
+    let storage = Storage::open_in_memory().expect("in-memory db");
+    let dev_id = storage.local_device().expect("device").device_id;
+    let fx = fixtures_dir();
+
+    // 1. Kimi Code
+    let kimi = KimiCodeParser::new();
+    let kimi_out = tail_file_incremental(
+        &storage,
+        &kimi,
+        &fx.join("kimi_code").join("sess-kimi-001.jsonl"),
+        &dev_id,
+    )
+    .expect("kimi tail");
+    assert_eq!(kimi_out.events_inserted, 2);
+
+    // 2. Workbuddy (multi-backend routed models)
+    let wb = WorkbuddyParser::new();
+    let wb_out = tail_file_incremental(
+        &storage,
+        &wb,
+        &fx.join("workbuddy").join("sess-wb-001.jsonl"),
+        &dev_id,
+    )
+    .expect("workbuddy tail");
+    assert_eq!(wb_out.events_inserted, 2);
+
+    // 3. DeepSeek Harness (Prefix Cache hit vs miss + reasoning)
+    let dsh = DeepSeekHarnessParser::new();
+    let dsh_out = tail_file_incremental(
+        &storage,
+        &dsh,
+        &fx.join("deepseek_harness").join("dsh-001.jsonl"),
+        &dev_id,
+    )
+    .expect("dsh tail");
+    assert_eq!(dsh_out.events_inserted, 2);
+
+    // 4. QCode (gateway multi-model)
+    let qcode = QCodeParser::new();
+    let qc_out = tail_file_incremental(
+        &storage,
+        &qcode,
+        &fx.join("qcode").join("sess-qc-001.jsonl"),
+        &dev_id,
+    )
+    .expect("qcode tail");
+    assert_eq!(qc_out.events_inserted, 2);
+
+    // 5. MiniMax Code (Anthropic-compatible usage)
+    let mm = MiniMaxCodeParser::new();
+    let mm_out = tail_file_incremental(
+        &storage,
+        &mm,
+        &fx.join("minimax_code").join("sess-mm-001.jsonl"),
+        &dev_id,
+    )
+    .expect("minimax tail");
+    assert_eq!(mm_out.events_inserted, 1);
+
+    let filter = AnalyticsFilter {
+        start_ms: 0,
+        end_ms: i64::MAX / 2,
+        provider_id: None,
+        device_id: None,
+        tz_offset_minutes: 480,
+        all_time: true,
+    };
+    let ov = storage
+        .query_overview(&filter, 1_800_000_000_000)
+        .expect("overview");
+    assert_eq!(ov.total_requests, 9);
+
+    // Verify Workbuddy routed model breakdown contains claude-sonnet-4-5 & deepseek-chat
+    let wb_filter = AnalyticsFilter {
+        provider_id: Some(provider_ids::WORKBUDDY.to_string()),
+        ..filter.clone()
+    };
+    let wb_models = storage.query_models_pricing(&wb_filter).expect("wb models");
+    assert!(wb_models.rows.iter().any(|m| m.model_id == "claude-sonnet-4-5"));
+    assert!(wb_models.rows.iter().any(|m| m.model_id == "deepseek-chat"));
+
+    // Verify DeepSeek Harness Prefix Cache separation: hit=8000+2500=10500, miss=2000+500=2500, reasoning=300
+    let dsh_filter = AnalyticsFilter {
+        provider_id: Some(provider_ids::DEEPSEEK_HARNESS.to_string()),
+        ..filter.clone()
+    };
+    let dsh_models = storage.query_models_pricing(&dsh_filter).expect("dsh models");
+    let ds_reasoner = dsh_models
+        .rows
+        .iter()
+        .find(|m| m.model_id == "deepseek-reasoner")
+        .expect("deepseek-reasoner row");
+    assert_eq!(ds_reasoner.input_tokens, 2000);
+    assert_eq!(ds_reasoner.cache_read_tokens, 8000);
+    assert_eq!(ds_reasoner.reasoning_tokens, 300);
+    assert_eq!(ds_reasoner.output_tokens, 500);
+
+    // Re-running is idempotent
+    let dsh_re = tail_file_incremental(
+        &storage,
+        &dsh,
+        &fx.join("deepseek_harness").join("dsh-001.jsonl"),
+        &dev_id,
+    )
+    .expect("dsh re-tail");
+    assert_eq!(dsh_re.events_inserted, 0);
+}
+
+#[test]
+fn custom_declarative_rules_and_phase2_otlp_ingest_cleanly() {
+    let dir = tempdir().expect("tempdir");
+    let log_file = dir.path().join("custom.ndjson");
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file)
+        .expect("open log");
+    // First write incomplete trailing line (no newline)
+    write!(
+        f,
+        r#"{{"ts":1763210000,"meta":{{"model":"custom-coder-v1"}},"tok":{{"in":120,"out":80,"cached":300}}}}"#
+    )
+    .expect("write partial");
+    f.flush().expect("flush");
+
+    let storage = Storage::open_in_memory().expect("in-memory db");
+    for mut cfg in storage.list_provider_configs().expect("list configs") {
+        cfg.enabled = false;
+        storage.upsert_provider_config(&cfg).expect("disable default");
+    }
+    let rule = CustomProviderRule {
+        rule_id: "local_gateway".to_string(),
+        display_name: "My Local Gateway".to_string(),
+        enabled: true,
+        protocol_kind: CustomProtocolKind::DeclarativeJsonl,
+        log_roots: vec![dir.path().to_string_lossy().to_string()],
+        mapping_spec: DeclarativeMappingSpec {
+            provider_id_override: None,
+            file_extensions: vec!["ndjson".to_string()],
+            timestamp_path: Some("/ts".to_string()),
+            model_path: Some("/meta/model".to_string()),
+            session_id_path: None,
+            request_id_path: None,
+            input_tokens_path: Some("/tok/in".to_string()),
+            output_tokens_path: Some("/tok/out".to_string()),
+            cache_read_tokens_path: Some("/tok/cached".to_string()),
+            cache_write_tokens_path: None,
+            reasoning_tokens_path: None,
+            duration_ms_path: None,
+            ttft_ms_path: None,
+        },
+        updated_at_ms: 1_763_210_000_000,
+    };
+    storage
+        .upsert_custom_provider_rule(&rule)
+        .expect("save rule");
+
+    let coordinator = CollectorCoordinator::new(storage.clone());
+    let rep1 = coordinator.scan_now().expect("scan partial");
+    assert_eq!(rep1.events_inserted, 0);
+
+    // Complete first line with newline + append second line
+    writeln!(f).expect("newline");
+    writeln!(
+        f,
+        r#"{{"ts":1763210005,"meta":{{"model":"custom-coder-v1"}},"tok":{{"in":200,"out":50,"cached":100}}}}"#
+    )
+    .expect("line 2");
+    f.flush().expect("flush 2");
+
+    let rep2 = coordinator.scan_now().expect("scan full");
+    assert_eq!(rep2.events_inserted, 2);
+
+    // Also verify Phase 2 OTLP system attribution
+    let otlp_dsh = serde_json::json!({
+        "resourceLogs": [{
+            "resource": { "attributes": [{ "key": "service.name", "value": { "stringValue": "deepseek-harness" } }] },
+            "scopeLogs": [{
+                "logRecords": [{
+                    "timeUnixNano": "1763210010000000000",
+                    "attributes": [
+                        { "key": "event.name", "value": { "stringValue": "dsh.api_request" } },
+                        { "key": "model", "value": { "stringValue": "deepseek-chat" } },
+                        { "key": "input_tokens", "value": { "intValue": "500" } },
+                        { "key": "output_tokens", "value": { "intValue": "150" } }
+                    ]
+                }]
+            }]
+        }]
+    });
+    let otlp_out = ingest_otlp_logs_payload(&storage, &otlp_dsh).expect("otlp dsh");
+    assert_eq!(otlp_out.inserted, 1);
+
+    let ov = storage
+        .query_overview(
+            &AnalyticsFilter {
+                start_ms: 0,
+                end_ms: i64::MAX / 2,
+                provider_id: Some(provider_ids::DEEPSEEK_HARNESS.to_string()),
+                device_id: None,
+                tz_offset_minutes: 480,
+                all_time: true,
+            },
+            1_800_000_000_000,
+        )
+        .expect("dsh otlp overview");
+    assert_eq!(ov.total_tokens, 650);
+}
+
+struct MockAuthFetcher {
+    responses: Mutex<HashMap<String, (u16, String)>>,
+    calls: Mutex<Vec<(String, String)>>,
+}
+
+impl AuthHttpFetcher for MockAuthFetcher {
+    fn fetch_bearer_get<'a>(
+        &'a self,
+        url: &'a str,
+        bearer_token: &'a str,
+    ) -> tokentracker_collectors::providers::official_api::BoxFuture<'a, Result<(u16, String), String>>
+    {
+        let u = url.to_string();
+        let tok = bearer_token.to_string();
+        Box::pin(async move {
+            self.calls.lock().expect("lock").push((u.clone(), tok));
+            let map = self.responses.lock().expect("lock");
+            map.get(&u)
+                .cloned()
+                .ok_or_else(|| format!("unexpected mock url {u}"))
+        })
+    }
+}
+
+#[tokio::test]
+async fn official_balance_api_parses_all_vendors_and_enforces_60s_cooldown() {
+    let storage = Storage::open_in_memory().expect("in-memory db");
+    let creds = MemoryCredentialStore::new();
+    creds
+        .set_api_key(provider_ids::KIMI_CODE, "sk-moonshot-test")
+        .expect("set kimi");
+    creds
+        .set_api_key(provider_ids::DEEPSEEK_HARNESS, "sk-ds-test")
+        .expect("set ds");
+    creds
+        .set_api_key(provider_ids::QCODE, "qot_qcode-test")
+        .expect("set qcode");
+    creds
+        .set_api_key(provider_ids::MINIMAX_CODE, "sk-mm-test")
+        .expect("set mm");
+
+    let endpoints = BalanceApiEndpoints {
+        moonshot_url: "https://api.moonshot.cn/v1/users/me/balance".to_string(),
+        deepseek_url: "https://api.deepseek.com/user/balance".to_string(),
+        qcode_url: "https://api.qcode.cc/api/v1/usage".to_string(),
+        minimax_url: "https://www.minimaxi.com/v1/token_plan/remains".to_string(),
+    };
+
+    let mut responses = HashMap::new();
+    responses.insert(
+        endpoints.moonshot_url.clone(),
+        (
+            200,
+            serde_json::json!({
+                "code": 0,
+                "status": true,
+                "data": {
+                    "available_balance": 49.5,
+                    "voucher_balance": 40.0,
+                    "cash_balance": 9.5
+                }
+            })
+            .to_string(),
+        ),
+    );
+    responses.insert(
+        endpoints.deepseek_url.clone(),
+        (
+            200,
+            serde_json::json!({
+                "is_available": true,
+                "balance_infos": [{
+                    "currency": "CNY",
+                    "total_balance": "120.25",
+                    "granted_balance": "20.25",
+                    "topped_up_balance": "100.00"
+                }]
+            })
+            .to_string(),
+        ),
+    );
+    responses.insert(
+        endpoints.qcode_url.clone(),
+        (
+            200,
+            serde_json::json!({
+                "data": {
+                    "balance": 18.5,
+                    "daily_used": 2.4,
+                    "daily_limit": 10.0,
+                    "currency": "USD"
+                }
+            })
+            .to_string(),
+        ),
+    );
+    responses.insert(
+        endpoints.minimax_url.clone(),
+        (
+            200,
+            serde_json::json!({
+                "base_resp": { "status_code": 0, "status_msg": "success" },
+                "model_remains": [{
+                    "model_name": "MiniMax-M2.5",
+                    "current_interval_total_count": 1000,
+                    "current_interval_usage_count": 250,
+                    "remains_time": 7200
+                }]
+            })
+            .to_string(),
+        ),
+    );
+
+    let fetcher = Arc::new(MockAuthFetcher {
+        responses: Mutex::new(responses),
+        calls: Mutex::new(Vec::new()),
+    });
+
+    let now_ms = 1_763_300_000_000i64;
+    let kimi_res = refresh_provider_balance_with_fetcher(
+        &storage,
+        provider_ids::KIMI_CODE,
+        &creds,
+        fetcher.as_ref(),
+        &endpoints,
+        now_ms,
+    )
+    .await
+    .expect("kimi balance");
+    assert!(!kimi_res.from_cache);
+    assert_eq!(kimi_res.snapshot.currency, "CNY");
+    assert_eq!(kimi_res.snapshot.total_balance_micro, Some(49_500_000));
+    assert_eq!(kimi_res.snapshot.granted_balance_micro, Some(40_000_000));
+    assert_eq!(kimi_res.snapshot.topped_up_balance_micro, Some(9_500_000));
+
+    // Cooldown: calling again 10s later returns cached balance with 0 additional HTTP requests
+    let calls_before = fetcher.calls.lock().expect("lock").len();
+    let kimi_cached = refresh_provider_balance_with_fetcher(
+        &storage,
+        provider_ids::KIMI_CODE,
+        &creds,
+        fetcher.as_ref(),
+        &endpoints,
+        now_ms + 10_000,
+    )
+    .await
+    .expect("kimi cached");
+    assert!(kimi_cached.from_cache);
+    assert_eq!(kimi_cached.cooldown_remaining_secs, 50);
+    assert_eq!(fetcher.calls.lock().expect("lock").len(), calls_before);
+
+    let ds_res = refresh_provider_balance_with_fetcher(
+        &storage,
+        provider_ids::DEEPSEEK_HARNESS,
+        &creds,
+        fetcher.as_ref(),
+        &endpoints,
+        now_ms,
+    )
+    .await
+    .expect("deepseek balance");
+    assert_eq!(ds_res.snapshot.total_balance_micro, Some(120_250_000));
+
+    let qc_res = refresh_provider_balance_with_fetcher(
+        &storage,
+        provider_ids::QCODE,
+        &creds,
+        fetcher.as_ref(),
+        &endpoints,
+        now_ms,
+    )
+    .await
+    .expect("qcode balance");
+    assert_eq!(qc_res.snapshot.daily_quota_used_micro, Some(2_400_000));
+    assert_eq!(qc_res.snapshot.daily_quota_limit_micro, Some(10_000_000));
+
+    let mm_res = refresh_provider_balance_with_fetcher(
+        &storage,
+        provider_ids::MINIMAX_CODE,
+        &creds,
+        fetcher.as_ref(),
+        &endpoints,
+        now_ms,
+    )
+    .await
+    .expect("minimax remains");
+    assert_eq!(mm_res.rate_limits_updated, 1);
+    let obs = storage.list_observed_rate_limits().expect("rate limits");
+    assert!(obs
+        .iter()
+        .any(|o| o.provider_id == provider_ids::MINIMAX_CODE && (o.used_percent - 25.0).abs() < 0.01));
+
+    // Unsupported provider strictly rejected for compliance
+    let err = refresh_provider_balance_with_fetcher(
+        &storage,
+        provider_ids::WORKBUDDY,
+        &creds,
+        fetcher.as_ref(),
+        &endpoints,
+        now_ms,
+    )
+    .await
+    .expect_err("workbuddy must reject balance api");
+    assert!(err.to_string().contains("Compliance") || err.to_string().contains("public REST"));
+
+    assert_eq!(storage.list_provider_balances().expect("list balances").len(), 4);
+}
+
+#[derive(Default)]
+struct MockWorkerTransportState {
+    expected_token: String,
+    next_seq: AtomicUsize,
+    records: Mutex<Vec<(i64, String, serde_json::Value)>>,
+    raw_push_bodies: Mutex<Vec<String>>,
+    sse_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
+}
+
+struct MockWorkerTransport {
+    state: Arc<MockWorkerTransportState>,
+}
+
+struct ChannelSseStream {
+    rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+}
+
+impl tokentracker_collectors::SseByteStream for ChannelSseStream {
+    fn next_chunk(
+        &mut self,
+    ) -> tokentracker_collectors::SyncBoxFuture<'_, tokentracker_collectors::CollectorResult<Option<Vec<u8>>>>
+    {
+        Box::pin(async move { Ok(self.rx.recv().await) })
+    }
+}
+
+impl tokentracker_collectors::SyncHttpTransport for MockWorkerTransport {
+    fn post_json<'a>(
+        &'a self,
+        url: &'a str,
+        bearer_token: &'a str,
+        json_body: &'a str,
+    ) -> tokentracker_collectors::SyncBoxFuture<'a, tokentracker_collectors::CollectorResult<(u16, String)>>
+    {
+        let body_text = json_body.to_string();
+        Box::pin(async move {
+            if bearer_token.trim() != self.state.expected_token {
+                return Ok((
+                    401,
+                    serde_json::json!({ "ok": false, "message": "Unauthorized" }).to_string(),
+                ));
+            }
+            assert!(url.ends_with("/v1/sync/push"));
+
+            for forbidden in [
+                "\"session_id\"",
+                "\"file_path\"",
+                "\"source_path\"",
+                "\"project_label\"",
+                "\"prompt\"",
+                "\"messages\"",
+            ] {
+                assert!(
+                    !body_text.contains(forbidden),
+                    "Compliance violation: push payload contained {forbidden}: {body_text}"
+                );
+            }
+
+            self.state
+                .raw_push_bodies
+                .lock()
+                .expect("raw bodies lock")
+                .push(body_text.clone());
+
+            let parsed: serde_json::Value = serde_json::from_str(&body_text)?;
+            let seq = (self.state.next_seq.fetch_add(1, Ordering::SeqCst) as i64 + 1) * 1000;
+            let mode = parsed
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("plaintext")
+                .to_string();
+
+            let device_id = if mode == "e2ee" {
+                parsed["encrypted_envelope"]["device_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            } else {
+                parsed["envelope"]["device_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            };
+
+            let item = if mode == "e2ee" {
+                serde_json::json!({
+                    "mode": "e2ee",
+                    "seq_ms": seq,
+                    "device_id": device_id,
+                    "encrypted_envelope": parsed["encrypted_envelope"]
+                })
+            } else {
+                serde_json::json!({
+                    "mode": "plaintext",
+                    "seq_ms": seq,
+                    "device_id": device_id,
+                    "envelope": parsed["envelope"]
+                })
+            };
+
+            self.state
+                .records
+                .lock()
+                .expect("records lock")
+                .push((seq, device_id.clone(), item));
+
+            if let Some(tx) = self.state.sse_tx.lock().expect("sse lock").as_ref() {
+                let frame = format!(
+                    "event: sync_update\ndata: {{\"seq_ms\":{seq},\"device_id\":\"{device_id}\",\"mode\":\"{mode}\"}}\n\n"
+                );
+                let _ = tx.send(frame.into_bytes());
+            }
+
+            Ok((
+                200,
+                serde_json::json!({
+                    "ok": true,
+                    "server_seq_ms": seq,
+                    "mode": mode
+                })
+                .to_string(),
+            ))
+        })
+    }
+
+    fn get_with_bearer<'a>(
+        &'a self,
+        url: &'a str,
+        bearer_token: &'a str,
+    ) -> tokentracker_collectors::SyncBoxFuture<'a, tokentracker_collectors::CollectorResult<(u16, String)>>
+    {
+        Box::pin(async move {
+            if bearer_token.trim() != self.state.expected_token {
+                return Ok((
+                    401,
+                    serde_json::json!({ "ok": false, "message": "Unauthorized" }).to_string(),
+                ));
+            }
+            let parsed_url = reqwest::Url::parse(url).expect("valid pull url");
+            let params: HashMap<String, String> = parsed_url
+                .query_pairs()
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            let since: i64 = params
+                .get("since")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let exclude = params.get("exclude_device").map(String::as_str).unwrap_or("");
+
+            let guard = self.state.records.lock().expect("records lock");
+            let max_seq = guard.iter().map(|(seq, _, _)| *seq).max().unwrap_or(since);
+            let items: Vec<serde_json::Value> = guard
+                .iter()
+                .filter(|(seq, dev_id, _)| *seq > since && dev_id != exclude)
+                .map(|(_, _, item)| item.clone())
+                .collect();
+
+            Ok((
+                200,
+                serde_json::json!({
+                    "ok": true,
+                    "server_seq_ms": max_seq,
+                    "next_since_ms": max_seq.max(since),
+                    "has_more": false,
+                    "items": items
+                })
+                .to_string(),
+            ))
+        })
+    }
+
+    fn open_sse_stream<'a>(
+        &'a self,
+        url: &'a str,
+        bearer_token: &'a str,
+    ) -> tokentracker_collectors::SyncBoxFuture<
+        'a,
+        tokentracker_collectors::CollectorResult<(u16, Box<dyn tokentracker_collectors::SseByteStream>)>,
+    > {
+        Box::pin(async move {
+            assert!(url.ends_with("/v1/sync/events"));
+            if bearer_token.trim() != self.state.expected_token {
+                let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                return Ok((
+                    401,
+                    Box::new(ChannelSseStream { rx }) as Box<dyn tokentracker_collectors::SseByteStream>,
+                ));
+            }
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let _ = tx.send(b": connected\n\n".to_vec());
+            *self.state.sse_tx.lock().expect("sse lock") = Some(tx);
+            Ok((
+                200,
+                Box::new(ChannelSseStream { rx }) as Box<dyn tokentracker_collectors::SseByteStream>,
+            ))
+        })
+    }
+}
+
+fn seed_device_usage_event(storage: &Storage, seed_id: &str, input_tokens: i64, ts_ms: i64) {
+    let dev = storage.local_device().expect("local device");
+    let ev = tokentracker_core::domain::NormalizedUsageEvent {
+        event_id: seed_id.to_string(),
+        device_id: dev.device_id,
+        provider_id: provider_ids::CLAUDE_CODE.to_string(),
+        session_id: "secret-session-should-never-sync".to_string(),
+        project_label: "private-secret-project".to_string(),
+        model_id: "claude-sonnet-4-5".to_string(),
+        timestamp_ms: ts_ms,
+        input_tokens,
+        output_tokens: 400,
+        cache_read_tokens: 150,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        observable_only: false,
+        duration_ms: Some(1_500),
+        ttft_ms: Some(250),
+        output_tps: Some(80.0),
+        estimated_cost_micro_usd: 0,
+        cache_saved_micro_usd: 0,
+    };
+    storage
+        .ingest_events_with_cursor(&[ev], None, &[])
+        .expect("insert usage");
+}
+
+#[tokio::test]
+async fn cloud_sync_client_supports_plaintext_e2ee_and_realtime_sse() {
+    use tokentracker_collectors::{
+        run_sync_cycle_with_transport, set_sync_credentials, SyncClientHandle, SyncHttpTransport,
+    };
+    use tokentracker_core::analytics::AnalyticsFilter;
+    use tokentracker_core::domain::{QuotaUnit, SubscriptionPlan, SubscriptionWindowRule};
+
+    let worker_url = "https://sync.example.workers.dev";
+    let hub_state = Arc::new(MockWorkerTransportState {
+        expected_token: "sync-test-secret".to_string(),
+        ..Default::default()
+    });
+    let transport: Arc<dyn SyncHttpTransport> = Arc::new(MockWorkerTransport {
+        state: Arc::clone(&hub_state),
+    });
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    // 1. Plaintext sync from Device A -> Device B (verifying desensitization + remote sub snapshots)
+    let storage_a = Storage::open_in_memory().expect("db a");
+    storage_a
+        .update_preferences(&{
+            let mut p = storage_a.get_preferences().expect("prefs a");
+            p.device_display_name = "Workstation A".to_string();
+            p
+        })
+        .expect("save prefs a");
+    seed_device_usage_event(&storage_a, "ev-a-1", 2_500, now_ms - 60_000);
+    storage_a
+        .upsert_subscription_plan(&SubscriptionPlan {
+            plan_id: "plan-a-claude".to_string(),
+            provider_id: provider_ids::CLAUDE_CODE.to_string(),
+            plan_name: "Claude Pro A".to_string(),
+            enabled: true,
+            monthly_fee_micro_usd: 20_000_000,
+            is_user_configured: true,
+            updated_at_ms: now_ms,
+            windows: vec![SubscriptionWindowRule {
+                window_id: "5h".to_string(),
+                label: "5h Rolling".to_string(),
+                duration_hours: 5,
+                rolling: true,
+                unit: QuotaUnit::Tokens,
+                limit_value: 100_000,
+                warning_percent: 80,
+                critical_percent: 95,
+            }],
+        })
+        .expect("upsert plan a");
+
+    let creds_a = MemoryCredentialStore::new();
+    set_sync_credentials(&creds_a, Some("sync-test-secret"), None).expect("creds a");
+    storage_a
+        .update_sync_config_state(true, Some(worker_url), false, None)
+        .expect("sync cfg a");
+
+    let push_a = run_sync_cycle_with_transport(&storage_a, &creds_a, transport.as_ref(), true)
+        .await
+        .expect("device A push");
+    assert_eq!(push_a.pushed_hourly_deltas, 1);
+    assert_eq!(push_a.pushed_subscriptions, 1);
+
+    // Device B pulls in plaintext mode
+    let storage_b = Storage::open_in_memory().expect("db b");
+    let creds_b = MemoryCredentialStore::new();
+    set_sync_credentials(&creds_b, Some("sync-test-secret"), None).expect("creds b");
+    storage_b
+        .update_sync_config_state(true, Some(worker_url), false, None)
+        .expect("sync cfg b");
+
+    let pull_b = run_sync_cycle_with_transport(&storage_b, &creds_b, transport.as_ref(), false)
+        .await
+        .expect("device B pull");
+    assert_eq!(pull_b.pulled_items, 1);
+    assert_eq!(pull_b.applied_hourly_buckets, 1);
+    assert_eq!(pull_b.applied_subscriptions, 1);
+    assert_eq!(storage_b.list_devices().expect("devices in b").len(), 2);
+    assert_eq!(
+        storage_b
+            .list_remote_subscription_snapshots()
+            .expect("remote subs")
+            .len(),
+        1
+    );
+
+    let overview_b = storage_b
+        .query_overview(
+            &AnalyticsFilter {
+                start_ms: now_ms - 86_400_000,
+                end_ms: now_ms + 60_000,
+                provider_id: None,
+                device_id: None,
+                tz_offset_minutes: 0,
+                all_time: false,
+            },
+            now_ms,
+        )
+        .expect("overview b");
+    assert_eq!(overview_b.total_tokens, 3_050);
+
+    // Confirm sensitive secrets never appeared in pushed JSON payloads
+    {
+        let raw_bodies = hub_state.raw_push_bodies.lock().expect("raw bodies");
+        assert!(!raw_bodies.is_empty());
+        for body in raw_bodies.iter() {
+            assert!(!body.contains("secret-session-should-never-sync"));
+            assert!(!body.contains("private-secret-project"));
+        }
+    }
+
+    // 2. E2EE mode sync + wrong passphrase detection (isolated encrypted hub)
+    let e2ee_hub_state = Arc::new(MockWorkerTransportState {
+        expected_token: "sync-test-secret".to_string(),
+        ..Default::default()
+    });
+    let e2ee_transport: Arc<dyn SyncHttpTransport> = Arc::new(MockWorkerTransport {
+        state: Arc::clone(&e2ee_hub_state),
+    });
+    let storage_e1 = Storage::open_in_memory().expect("db e1");
+    seed_device_usage_event(&storage_e1, "ev-e1", 5_000, now_ms - 30_000);
+    let creds_e1 = MemoryCredentialStore::new();
+    set_sync_credentials(&creds_e1, Some("sync-test-secret"), Some("correct-pass-99"))
+        .expect("creds e1");
+    storage_e1
+        .update_sync_config_state(true, Some(worker_url), true, None)
+        .expect("sync cfg e1");
+    run_sync_cycle_with_transport(&storage_e1, &creds_e1, e2ee_transport.as_ref(), true)
+        .await
+        .expect("device e1 push e2ee");
+
+    let storage_e2 = Storage::open_in_memory().expect("db e2");
+    let creds_e2 = MemoryCredentialStore::new();
+    set_sync_credentials(&creds_e2, Some("sync-test-secret"), Some("correct-pass-99"))
+        .expect("creds e2");
+    storage_e2
+        .update_sync_config_state(true, Some(worker_url), true, None)
+        .expect("sync cfg e2");
+    let pull_e2 =
+        run_sync_cycle_with_transport(&storage_e2, &creds_e2, e2ee_transport.as_ref(), false)
+            .await
+            .expect("device e2 pull e2ee");
+    assert!(pull_e2.applied_hourly_buckets >= 1);
+
+    let storage_wrong = Storage::open_in_memory().expect("db wrong");
+    let creds_wrong = MemoryCredentialStore::new();
+    set_sync_credentials(&creds_wrong, Some("sync-test-secret"), Some("wrong-pass"))
+        .expect("creds wrong");
+    storage_wrong
+        .update_sync_config_state(true, Some(worker_url), true, None)
+        .expect("sync cfg wrong");
+    let err = run_sync_cycle_with_transport(
+        &storage_wrong,
+        &creds_wrong,
+        e2ee_transport.as_ref(),
+        false,
+    )
+    .await
+    .expect_err("wrong passphrase must fail");
+    assert!(
+        err.to_string().contains("E2EE") || err.to_string().contains("passphrase"),
+        "unexpected error: {err}"
+    );
+    assert!(storage_wrong
+        .get_sync_config_state()
+        .expect("cfg wrong")
+        .last_sync_error
+        .is_some());
+
+    // 3. Real-time SSE sync_update triggers background SyncClientHandle pull
+    let storage_sse = Storage::open_in_memory().expect("db sse");
+    let creds_sse = Arc::new(MemoryCredentialStore::new());
+    set_sync_credentials(creds_sse.as_ref(), Some("sync-test-secret"), Some("correct-pass-99"))
+        .expect("creds sse");
+    let current_max_seq = {
+        let g = hub_state.records.lock().expect("lock");
+        g.iter().map(|(seq, _, _)| *seq).max().unwrap_or(0)
+    };
+    storage_sse
+        .update_sync_config_state(true, Some(worker_url), false, None)
+        .expect("sync cfg sse");
+    storage_sse
+        .record_sync_pull_success(current_max_seq, now_ms)
+        .expect("advance watermark");
+
+    let sse_handle = SyncClientHandle::with_transport(
+        storage_sse.clone(),
+        creds_sse,
+        Arc::clone(&transport),
+    );
+    let applied_notify = Arc::new(tokio::sync::Notify::new());
+    let applied_notify_cb = Arc::clone(&applied_notify);
+    sse_handle.start_background(move |report| {
+        if report.applied_hourly_buckets > 0 {
+            applied_notify_cb.notify_one();
+        }
+    });
+
+    // Wait briefly until SSE stream opens, then Device A pushes ev-a-2 causing SSE push frame
+    for _ in 0..30 {
+        if sse_handle.is_sse_connected() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(sse_handle.is_sse_connected());
+
+    seed_device_usage_event(&storage_a, "ev-a-2", 900, now_ms - 10_000);
+    run_sync_cycle_with_transport(&storage_a, &creds_a, transport.as_ref(), true)
+        .await
+        .expect("push ev-a-2");
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), applied_notify.notified())
+        .await
+        .expect("SSE sync_update must trigger remote pull within 5s");
+
+    sse_handle.shutdown();
+}
+

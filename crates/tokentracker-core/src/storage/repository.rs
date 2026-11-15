@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -6,10 +6,11 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::domain::{
-    AppPreferences, CollectionMode, CurrencyCode, DeviceRecord, IngestionCursor,
-    ModelPricingEntry, NormalizedUsageEvent, ObservedRateLimitWindow, ProviderConfig,
-    SubscriptionPlan, SubscriptionWindowRule, SyncEnvelopeV1, SyncHourlyDelta,
-    SyncSubscriptionSnapshot,
+    AppPreferences, CollectionMode, CurrencyCode, CustomProtocolKind, CustomProviderRule,
+    DeclarativeMappingSpec, DeviceRecord, IngestionCursor, ModelPricingEntry,
+    NormalizedUsageEvent, ObservedRateLimitWindow, ProviderBalanceSnapshot, ProviderConfig,
+    RemoteSubscriptionSnapshot, RemoteSyncApplyResult, SubscriptionPlan, SubscriptionWindowRule,
+    SyncConfigState, SyncEnvelopeV1, SyncHourlyDelta, SyncSubscriptionSnapshot,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::pricing::{
@@ -784,7 +785,8 @@ impl Storage {
                     bg_blur_px = ?13,
                     auto_sync_pricing = ?14,
                     exchange_rate_auto = ?15,
-                    updated_at_ms = ?16
+                    auto_check_updates = ?16,
+                    updated_at_ms = ?17
                 WHERE id = 1
                 "#,
                 params![
@@ -803,8 +805,617 @@ impl Storage {
                     bg_blur_px,
                     i64::from(prefs.auto_sync_pricing),
                     i64::from(prefs.exchange_rate_auto),
+                    i64::from(prefs.auto_check_updates),
                     now_ms,
                 ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn list_devices(&self) -> CoreResult<Vec<DeviceRecord>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT device_id, device_name, platform, created_at_ms FROM devices ORDER BY created_at_ms ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(DeviceRecord {
+                    device_id: row.get(0)?,
+                    device_name: row.get(1)?,
+                    platform: row.get(2)?,
+                    created_at_ms: row.get(3)?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn get_sync_config_state(&self) -> CoreResult<SyncConfigState> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                r#"
+                SELECT enabled, worker_url, e2ee_enabled, e2ee_kdf_salt_hex,
+                       last_push_watermark_ms, last_pull_watermark_ms,
+                       last_sync_at_ms, last_sync_error, updated_at_ms
+                FROM sync_state
+                WHERE id = 1
+                "#,
+                [],
+                |row| {
+                    Ok(SyncConfigState {
+                        enabled: row.get::<_, i64>(0)? != 0,
+                        worker_url: row.get(1)?,
+                        e2ee_enabled: row.get::<_, i64>(2)? != 0,
+                        e2ee_kdf_salt_hex: row.get(3)?,
+                        last_push_watermark_ms: row.get(4)?,
+                        last_pull_watermark_ms: row.get(5)?,
+                        last_sync_at_ms: row.get(6)?,
+                        last_sync_error: row.get(7)?,
+                        updated_at_ms: row.get(8)?,
+                    })
+                },
+            )
+            .map_err(CoreError::from)
+        })
+    }
+
+    pub fn update_sync_config_state(
+        &self,
+        enabled: bool,
+        worker_url: Option<&str>,
+        e2ee_enabled: bool,
+        e2ee_kdf_salt_hex: Option<&str>,
+    ) -> CoreResult<SyncConfigState> {
+        let now_ms = Utc::now().timestamp_millis();
+        let cleaned_url = worker_url
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim_end_matches('/').to_string());
+        if enabled && cleaned_url.is_none() {
+            return Err(CoreError::Validation(
+                "Worker URL cannot be empty when cloud sync is enabled".to_string(),
+            ));
+        }
+        let cleaned_salt = e2ee_kdf_salt_hex
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                UPDATE sync_state
+                SET enabled = ?1,
+                    worker_url = ?2,
+                    e2ee_enabled = ?3,
+                    e2ee_kdf_salt_hex = COALESCE(?4, e2ee_kdf_salt_hex),
+                    last_sync_error = NULL,
+                    updated_at_ms = ?5
+                WHERE id = 1
+                "#,
+                params![
+                    i64::from(enabled),
+                    cleaned_url,
+                    i64::from(e2ee_enabled),
+                    cleaned_salt,
+                    now_ms,
+                ],
+            )?;
+            Ok(())
+        })?;
+        self.get_sync_config_state()
+    }
+
+    pub fn record_sync_push_success(
+        &self,
+        push_watermark_ms: i64,
+        synced_at_ms: i64,
+    ) -> CoreResult<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                UPDATE sync_state
+                SET last_push_watermark_ms = MAX(last_push_watermark_ms, ?1),
+                    last_sync_at_ms = ?2,
+                    last_sync_error = NULL,
+                    updated_at_ms = ?2
+                WHERE id = 1
+                "#,
+                params![push_watermark_ms, synced_at_ms],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn record_sync_pull_success(
+        &self,
+        pull_watermark_ms: i64,
+        synced_at_ms: i64,
+    ) -> CoreResult<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                UPDATE sync_state
+                SET last_pull_watermark_ms = MAX(last_pull_watermark_ms, ?1),
+                    last_sync_at_ms = ?2,
+                    last_sync_error = NULL,
+                    updated_at_ms = ?2
+                WHERE id = 1
+                "#,
+                params![pull_watermark_ms, synced_at_ms],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn record_sync_error(&self, err_msg: Option<&str>, at_ms: i64) -> CoreResult<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                UPDATE sync_state
+                SET last_sync_error = ?1,
+                    updated_at_ms = ?2
+                WHERE id = 1
+                "#,
+                params![err_msg, at_ms],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Idempotently merge a pulled remote `SyncEnvelopeV1` without altering local device buckets.
+    pub fn apply_remote_sync_envelope_v1(
+        &self,
+        envelope: &SyncEnvelopeV1,
+        received_at_ms: i64,
+    ) -> CoreResult<RemoteSyncApplyResult> {
+        if envelope.schema_version != 1 {
+            return Err(CoreError::Validation(format!(
+                "Unsupported SyncEnvelope schema_version {}",
+                envelope.schema_version
+            )));
+        }
+        let remote_device_id = envelope.device_id.trim();
+        if remote_device_id.is_empty() {
+            return Err(CoreError::Validation(
+                "Remote SyncEnvelope device_id cannot be empty".to_string(),
+            ));
+        }
+
+        self.with_conn_mut(|conn| {
+            let local_dev = query_local_device(conn)?;
+            if remote_device_id == local_dev.device_id {
+                return Ok(RemoteSyncApplyResult {
+                    device_id: remote_device_id.to_string(),
+                    hourly_buckets_applied: 0,
+                    subscription_snapshots_applied: 0,
+                });
+            }
+
+            let display_name = if envelope.device_display_name.trim().is_empty() {
+                remote_device_id.to_string()
+            } else {
+                envelope.device_display_name.trim().to_string()
+            };
+
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
+                r#"
+                INSERT INTO devices (device_id, device_name, platform, created_at_ms)
+                VALUES (?1, ?2, 'remote', ?3)
+                ON CONFLICT(device_id) DO UPDATE SET
+                    device_name = excluded.device_name
+                "#,
+                params![remote_device_id, display_name, received_at_ms],
+            )?;
+
+            let mut affected_days: BTreeSet<i64> = BTreeSet::new();
+            let mut hourly_applied = 0usize;
+            {
+                let mut hourly_stmt = tx.prepare_cached(
+                    r#"
+                    INSERT INTO usage_hourly_rollups (
+                        device_id, provider_id, model_id, bucket_start_ms,
+                        request_count, observable_step_count, input_tokens, output_tokens,
+                        cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                        estimated_cost_micro_usd, cache_saved_micro_usd,
+                        total_duration_ms, tps_sample_count, tps_sum, max_output_tps, updated_at_ms
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4,
+                        ?5, ?6, ?7, ?8,
+                        ?9, ?10, ?11,
+                        ?12, ?13,
+                        ?14, ?15, ?16, ?17, ?18
+                    )
+                    ON CONFLICT(device_id, provider_id, model_id, bucket_start_ms) DO UPDATE SET
+                        request_count = excluded.request_count,
+                        observable_step_count = excluded.observable_step_count,
+                        input_tokens = excluded.input_tokens,
+                        output_tokens = excluded.output_tokens,
+                        cache_read_tokens = excluded.cache_read_tokens,
+                        cache_write_tokens = excluded.cache_write_tokens,
+                        reasoning_tokens = excluded.reasoning_tokens,
+                        estimated_cost_micro_usd = excluded.estimated_cost_micro_usd,
+                        cache_saved_micro_usd = excluded.cache_saved_micro_usd,
+                        total_duration_ms = excluded.total_duration_ms,
+                        tps_sample_count = excluded.tps_sample_count,
+                        tps_sum = excluded.tps_sum,
+                        max_output_tps = excluded.max_output_tps,
+                        updated_at_ms = excluded.updated_at_ms
+                    WHERE excluded.updated_at_ms >= usage_hourly_rollups.updated_at_ms
+                    "#,
+                )?;
+
+                for delta in &envelope.hourly_deltas {
+                    let changed = hourly_stmt.execute(params![
+                        remote_device_id,
+                        delta.provider_id,
+                        delta.model_id,
+                        delta.bucket_start_ms,
+                        delta.request_count,
+                        delta.observable_step_count,
+                        delta.input_tokens,
+                        delta.output_tokens,
+                        delta.cache_read_tokens,
+                        delta.cache_write_tokens,
+                        delta.reasoning_tokens,
+                        delta.estimated_cost_micro_usd,
+                        delta.cache_saved_micro_usd,
+                        delta.total_duration_ms,
+                        delta.tps_sample_count,
+                        delta.tps_sum,
+                        delta.max_output_tps,
+                        delta.updated_at_ms,
+                    ])?;
+                    if changed > 0 {
+                        hourly_applied += 1;
+                    }
+                    affected_days.insert(delta.bucket_start_ms.div_euclid(DAY_MS) * DAY_MS);
+                }
+            }
+
+            // Recompute affected UTC days for the remote device directly from its hourly buckets.
+            for day_start_ms in affected_days {
+                let day_end_ms = day_start_ms.saturating_add(DAY_MS - 1);
+                tx.execute(
+                    "DELETE FROM usage_daily_rollups WHERE device_id = ?1 AND bucket_start_ms = ?2",
+                    params![remote_device_id, day_start_ms],
+                )?;
+                tx.execute(
+                    r#"
+                    INSERT INTO usage_daily_rollups (
+                        device_id, provider_id, model_id, bucket_start_ms,
+                        request_count, observable_step_count, input_tokens, output_tokens,
+                        cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                        estimated_cost_micro_usd, cache_saved_micro_usd,
+                        total_duration_ms, tps_sample_count, tps_sum, max_output_tps, updated_at_ms
+                    )
+                    SELECT
+                        device_id,
+                        provider_id,
+                        model_id,
+                        ?2 AS bucket_start_ms,
+                        SUM(request_count),
+                        SUM(observable_step_count),
+                        SUM(input_tokens),
+                        SUM(output_tokens),
+                        SUM(cache_read_tokens),
+                        SUM(cache_write_tokens),
+                        SUM(reasoning_tokens),
+                        SUM(estimated_cost_micro_usd),
+                        SUM(cache_saved_micro_usd),
+                        SUM(total_duration_ms),
+                        SUM(tps_sample_count),
+                        SUM(tps_sum),
+                        MAX(max_output_tps),
+                        MAX(updated_at_ms)
+                    FROM usage_hourly_rollups
+                    WHERE device_id = ?1 AND bucket_start_ms >= ?2 AND bucket_start_ms <= ?3
+                    GROUP BY device_id, provider_id, model_id
+                    "#,
+                    params![remote_device_id, day_start_ms, day_end_ms],
+                )?;
+            }
+
+            tx.execute(
+                "DELETE FROM remote_subscription_snapshots WHERE device_id = ?1",
+                params![remote_device_id],
+            )?;
+            let mut sub_stmt = tx.prepare_cached(
+                r#"
+                INSERT INTO remote_subscription_snapshots (
+                    device_id, device_display_name, plan_id, window_id, provider_id,
+                    plan_name, window_label, used_percent, resets_at_ms, source, updated_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                "#,
+            )?;
+            for snap in &envelope.subscription_snapshots {
+                sub_stmt.execute(params![
+                    remote_device_id,
+                    display_name,
+                    snap.plan_id,
+                    snap.window_id,
+                    snap.provider_id,
+                    snap.plan_name,
+                    snap.window_label,
+                    snap.used_percent,
+                    snap.resets_at_ms,
+                    snap.source,
+                    envelope.generated_at_ms.max(received_at_ms),
+                ])?;
+            }
+            drop(sub_stmt);
+
+            tx.commit()?;
+            Ok(RemoteSyncApplyResult {
+                device_id: remote_device_id.to_string(),
+                hourly_buckets_applied: hourly_applied,
+                subscription_snapshots_applied: envelope.subscription_snapshots.len(),
+            })
+        })
+    }
+
+    pub fn list_remote_subscription_snapshots(
+        &self,
+    ) -> CoreResult<Vec<RemoteSubscriptionSnapshot>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT device_id, device_display_name, plan_id, window_id, provider_id,
+                       plan_name, window_label, used_percent, resets_at_ms, source, updated_at_ms
+                FROM remote_subscription_snapshots
+                ORDER BY device_display_name ASC, provider_id ASC, window_id ASC
+                "#,
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(RemoteSubscriptionSnapshot {
+                    device_id: row.get(0)?,
+                    device_display_name: row.get(1)?,
+                    plan_id: row.get(2)?,
+                    window_id: row.get(3)?,
+                    provider_id: row.get(4)?,
+                    plan_name: row.get(5)?,
+                    window_label: row.get(6)?,
+                    used_percent: row.get(7)?,
+                    resets_at_ms: row.get(8)?,
+                    source: row.get(9)?,
+                    updated_at_ms: row.get(10)?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn list_provider_balances(&self) -> CoreResult<Vec<ProviderBalanceSnapshot>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT provider_id, currency, total_balance_micro, granted_balance_micro,
+                       topped_up_balance_micro, daily_quota_used_micro, daily_quota_limit_micro,
+                       fetched_at_ms
+                FROM provider_balances
+                ORDER BY provider_id ASC
+                "#,
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(ProviderBalanceSnapshot {
+                    provider_id: row.get(0)?,
+                    currency: row.get(1)?,
+                    total_balance_micro: row.get(2)?,
+                    granted_balance_micro: row.get(3)?,
+                    topped_up_balance_micro: row.get(4)?,
+                    daily_quota_used_micro: row.get(5)?,
+                    daily_quota_limit_micro: row.get(6)?,
+                    fetched_at_ms: row.get(7)?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn get_provider_balance(
+        &self,
+        provider_id: &str,
+    ) -> CoreResult<Option<ProviderBalanceSnapshot>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                r#"
+                SELECT provider_id, currency, total_balance_micro, granted_balance_micro,
+                       topped_up_balance_micro, daily_quota_used_micro, daily_quota_limit_micro,
+                       fetched_at_ms
+                FROM provider_balances
+                WHERE provider_id = ?1
+                "#,
+                params![provider_id],
+                |row| {
+                    Ok(ProviderBalanceSnapshot {
+                        provider_id: row.get(0)?,
+                        currency: row.get(1)?,
+                        total_balance_micro: row.get(2)?,
+                        granted_balance_micro: row.get(3)?,
+                        topped_up_balance_micro: row.get(4)?,
+                        daily_quota_used_micro: row.get(5)?,
+                        daily_quota_limit_micro: row.get(6)?,
+                        fetched_at_ms: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(CoreError::from)
+        })
+    }
+
+    pub fn upsert_provider_balance(&self, balance: &ProviderBalanceSnapshot) -> CoreResult<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO provider_balances (
+                    provider_id, currency, total_balance_micro, granted_balance_micro,
+                    topped_up_balance_micro, daily_quota_used_micro, daily_quota_limit_micro,
+                    fetched_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(provider_id) DO UPDATE SET
+                    currency = excluded.currency,
+                    total_balance_micro = excluded.total_balance_micro,
+                    granted_balance_micro = excluded.granted_balance_micro,
+                    topped_up_balance_micro = excluded.topped_up_balance_micro,
+                    daily_quota_used_micro = excluded.daily_quota_used_micro,
+                    daily_quota_limit_micro = excluded.daily_quota_limit_micro,
+                    fetched_at_ms = excluded.fetched_at_ms
+                "#,
+                params![
+                    balance.provider_id,
+                    balance.currency,
+                    balance.total_balance_micro,
+                    balance.granted_balance_micro,
+                    balance.topped_up_balance_micro,
+                    balance.daily_quota_used_micro,
+                    balance.daily_quota_limit_micro,
+                    balance.fetched_at_ms,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn upsert_observed_rate_limits(
+        &self,
+        rate_limits: &[ObservedRateLimitWindow],
+    ) -> CoreResult<()> {
+        if rate_limits.is_empty() {
+            return Ok(());
+        }
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for obs in rate_limits {
+                tx.execute(
+                    r#"
+                    INSERT INTO observed_rate_limits
+                        (provider_id, window_name, used_percent, window_minutes, resets_at_ms, observed_at_ms)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    ON CONFLICT(provider_id, window_name) DO UPDATE SET
+                        used_percent = excluded.used_percent,
+                        window_minutes = excluded.window_minutes,
+                        resets_at_ms = excluded.resets_at_ms,
+                        observed_at_ms = excluded.observed_at_ms
+                    WHERE excluded.observed_at_ms >= observed_rate_limits.observed_at_ms
+                    "#,
+                    params![
+                        obs.provider_id,
+                        obs.window_name,
+                        obs.used_percent,
+                        obs.window_minutes,
+                        obs.resets_at_ms,
+                        obs.observed_at_ms,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn list_custom_provider_rules(&self) -> CoreResult<Vec<CustomProviderRule>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT rule_id, display_name, enabled, protocol_kind, log_roots_json, mapping_spec_json, updated_at_ms
+                FROM custom_provider_rules
+                ORDER BY display_name ASC, rule_id ASC
+                "#,
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let kind_str: String = row.get(3)?;
+                let roots_json: String = row.get(4)?;
+                let spec_json: String = row.get(5)?;
+                let log_roots = serde_json::from_str::<Vec<String>>(&roots_json).unwrap_or_default();
+                let mapping_spec =
+                    serde_json::from_str::<DeclarativeMappingSpec>(&spec_json).unwrap_or_default();
+                Ok(CustomProviderRule {
+                    rule_id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    enabled: row.get::<_, i64>(2)? != 0,
+                    protocol_kind: CustomProtocolKind::parse(&kind_str),
+                    log_roots,
+                    mapping_spec,
+                    updated_at_ms: row.get(6)?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn upsert_custom_provider_rule(&self, rule: &CustomProviderRule) -> CoreResult<()> {
+        let trimmed_id = rule.rule_id.trim();
+        let trimmed_name = rule.display_name.trim();
+        if trimmed_id.is_empty() {
+            return Err(CoreError::Validation(
+                "Custom provider rule_id cannot be empty".to_string(),
+            ));
+        }
+        if trimmed_name.is_empty() {
+            return Err(CoreError::Validation(
+                "Custom provider display_name cannot be empty".to_string(),
+            ));
+        }
+        let now_ms = Utc::now().timestamp_millis();
+        let roots_json = serde_json::to_string(&rule.log_roots)?;
+        let spec_json = serde_json::to_string(&rule.mapping_spec)?;
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO custom_provider_rules (
+                    rule_id, display_name, enabled, protocol_kind, log_roots_json, mapping_spec_json, updated_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(rule_id) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    enabled = excluded.enabled,
+                    protocol_kind = excluded.protocol_kind,
+                    log_roots_json = excluded.log_roots_json,
+                    mapping_spec_json = excluded.mapping_spec_json,
+                    updated_at_ms = excluded.updated_at_ms
+                "#,
+                params![
+                    trimmed_id,
+                    trimmed_name,
+                    i64::from(rule.enabled),
+                    rule.protocol_kind.as_str(),
+                    roots_json,
+                    spec_json,
+                    now_ms,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn delete_custom_provider_rule(&self, rule_id: &str) -> CoreResult<()> {
+        let trimmed = rule_id.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::Validation(
+                "Custom provider rule_id cannot be empty".to_string(),
+            ));
+        }
+        self.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM custom_provider_rules WHERE rule_id = ?1",
+                params![trimmed],
             )?;
             Ok(())
         })
@@ -1282,7 +1893,7 @@ pub(crate) fn load_preferences(conn: &Connection) -> CoreResult<AppPreferences> 
                otlp_enabled, otlp_port, device_display_name,
                bg_mode, bg_image_path, bg_preset_id, bg_opacity, bg_blur_px,
                auto_sync_pricing, exchange_rate_auto, last_rate_sync_at_ms, last_pricing_sync_at_ms,
-               updated_at_ms
+               auto_check_updates, updated_at_ms
         FROM app_preferences
         WHERE id = 1
         "#,
@@ -1307,7 +1918,8 @@ pub(crate) fn load_preferences(conn: &Connection) -> CoreResult<AppPreferences> 
                 exchange_rate_auto: row.get::<_, i64>(14)? != 0,
                 last_rate_sync_at_ms: row.get(15)?,
                 last_pricing_sync_at_ms: row.get(16)?,
-                updated_at_ms: row.get(17)?,
+                auto_check_updates: row.get::<_, i64>(17)? != 0,
+                updated_at_ms: row.get(18)?,
             })
         },
     )
@@ -1638,7 +2250,7 @@ mod tests {
             .with_conn(|conn| {
                 let ver: i64 =
                     conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))?;
-                assert_eq!(ver, 3);
+                assert_eq!(ver, 4);
 
                 let ok_tps: Option<f64> = conn.query_row(
                     "SELECT output_tps FROM usage_events WHERE event_id = 'ev-ok'",
@@ -1911,5 +2523,165 @@ mod tests {
             .expect("sonnet");
         assert!(sonnet.is_user_override);
         assert_eq!(sonnet.input_per_m_micro_usd, 2_000_000);
+    }
+
+    #[test]
+    fn v3_to_v4_migration_preserves_data_and_adds_new_tables() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("legacy_v3.db");
+        let seed_ts = 1_760_000_000_000i64;
+
+        {
+            let conn = Connection::open(&db_path).expect("open v3");
+            conn.execute_batch(
+                r#"
+                CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at_ms INTEGER NOT NULL);
+                CREATE TABLE devices (device_id TEXT PRIMARY KEY, device_name TEXT NOT NULL, platform TEXT NOT NULL, created_at_ms INTEGER NOT NULL);
+                CREATE TABLE provider_configs (provider_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL, collection_mode TEXT NOT NULL, custom_log_paths_json TEXT NOT NULL, has_credential INTEGER NOT NULL, last_sync_at_ms INTEGER, last_error TEXT, updated_at_ms INTEGER NOT NULL);
+                CREATE TABLE ingestion_cursors (source_path TEXT PRIMARY KEY, provider_id TEXT NOT NULL, file_identity TEXT NOT NULL, byte_offset INTEGER NOT NULL, last_line_hash TEXT NOT NULL, updated_at_ms INTEGER NOT NULL);
+                CREATE TABLE usage_events (event_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, provider_id TEXT NOT NULL, session_id TEXT NOT NULL, project_label TEXT NOT NULL, model_id TEXT NOT NULL, timestamp_ms INTEGER NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cache_read_tokens INTEGER NOT NULL, cache_write_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, observable_only INTEGER NOT NULL DEFAULT 0, duration_ms INTEGER, ttft_ms INTEGER, output_tps REAL, estimated_cost_micro_usd INTEGER NOT NULL, cache_saved_micro_usd INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE usage_hourly_rollups (device_id TEXT NOT NULL, provider_id TEXT NOT NULL, model_id TEXT NOT NULL, bucket_start_ms INTEGER NOT NULL, request_count INTEGER NOT NULL, observable_step_count INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cache_read_tokens INTEGER NOT NULL, cache_write_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, estimated_cost_micro_usd INTEGER NOT NULL, cache_saved_micro_usd INTEGER NOT NULL DEFAULT 0, total_duration_ms INTEGER NOT NULL, tps_sample_count INTEGER NOT NULL, tps_sum REAL NOT NULL, max_output_tps REAL NOT NULL, updated_at_ms INTEGER NOT NULL, PRIMARY KEY (device_id, provider_id, model_id, bucket_start_ms));
+                CREATE TABLE usage_daily_rollups (device_id TEXT NOT NULL, provider_id TEXT NOT NULL, model_id TEXT NOT NULL, bucket_start_ms INTEGER NOT NULL, request_count INTEGER NOT NULL, observable_step_count INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cache_read_tokens INTEGER NOT NULL, cache_write_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, estimated_cost_micro_usd INTEGER NOT NULL, cache_saved_micro_usd INTEGER NOT NULL DEFAULT 0, total_duration_ms INTEGER NOT NULL, tps_sample_count INTEGER NOT NULL, tps_sum REAL NOT NULL, max_output_tps REAL NOT NULL, updated_at_ms INTEGER NOT NULL, PRIMARY KEY (device_id, provider_id, model_id, bucket_start_ms));
+                CREATE TABLE model_pricing (model_pattern TEXT PRIMARY KEY, provider_id TEXT NOT NULL, input_per_m_micro_usd INTEGER NOT NULL, output_per_m_micro_usd INTEGER NOT NULL, cache_read_per_m_micro_usd INTEGER NOT NULL, cache_write_per_m_micro_usd INTEGER NOT NULL, reasoning_per_m_micro_usd INTEGER NOT NULL, is_user_override INTEGER NOT NULL, effective_from TEXT NOT NULL);
+                CREATE TABLE subscription_plans (plan_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, plan_name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, monthly_fee_micro_usd INTEGER NOT NULL, windows_json TEXT NOT NULL, is_user_configured INTEGER NOT NULL DEFAULT 0, updated_at_ms INTEGER NOT NULL);
+                CREATE TABLE observed_rate_limits (provider_id TEXT PRIMARY KEY, window_name TEXT NOT NULL, used_percent REAL NOT NULL, window_minutes INTEGER, resets_at_ms INTEGER, observed_at_ms INTEGER NOT NULL);
+                DROP TABLE IF EXISTS observed_rate_limits;
+                CREATE TABLE observed_rate_limits (provider_id TEXT NOT NULL, window_name TEXT NOT NULL, used_percent REAL NOT NULL, window_minutes INTEGER, resets_at_ms INTEGER, observed_at_ms INTEGER NOT NULL, PRIMARY KEY (provider_id, window_name));
+                CREATE TABLE app_preferences (id INTEGER PRIMARY KEY CHECK (id = 1), currency TEXT NOT NULL, usd_to_cny_rate TEXT NOT NULL, theme TEXT NOT NULL, minimize_to_tray INTEGER NOT NULL, launch_at_startup INTEGER NOT NULL, otlp_enabled INTEGER NOT NULL, otlp_port INTEGER NOT NULL, device_display_name TEXT NOT NULL, bg_mode TEXT NOT NULL DEFAULT 'none', bg_image_path TEXT, bg_preset_id TEXT NOT NULL DEFAULT 'aurora_slate', bg_opacity REAL NOT NULL DEFAULT 0.18, bg_blur_px INTEGER NOT NULL DEFAULT 16, auto_sync_pricing INTEGER NOT NULL DEFAULT 1, exchange_rate_auto INTEGER NOT NULL DEFAULT 1, last_rate_sync_at_ms INTEGER, last_pricing_sync_at_ms INTEGER, pricing_catalog_hash TEXT, updated_at_ms INTEGER NOT NULL);
+                CREATE TABLE remote_sync_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT NOT NULL, updated_at_ms INTEGER NOT NULL);
+                "#,
+            )
+            .expect("v3 schema");
+
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (3, ?1)",
+                params![seed_ts],
+            )
+            .expect("v3 version");
+            conn.execute(
+                "INSERT INTO devices (device_id, device_name, platform, created_at_ms) VALUES ('dev-v3', 'ws-v3', 'windows', ?1)",
+                params![seed_ts],
+            )
+            .expect("dev");
+            conn.execute(
+                "INSERT INTO app_preferences (id, currency, usd_to_cny_rate, theme, minimize_to_tray, launch_at_startup, otlp_enabled, otlp_port, device_display_name, updated_at_ms) VALUES (1, 'CNY', '7.20', 'light', 1, 1, 1, 4318, 'ws-v3', ?1)",
+                params![seed_ts],
+            )
+            .expect("prefs");
+            conn.execute(
+                "INSERT INTO model_pricing VALUES ('deepseek-chat', 'deepseek', 270000, 1100000, 70000, 0, 1100000, 0, '2026-01-01')",
+                [],
+            )
+            .expect("ds pricing");
+        }
+
+        let storage = Storage::open_file(&db_path).expect("migrate v3 -> v4");
+        let prefs = storage.get_preferences().expect("prefs");
+        assert!(prefs.auto_check_updates);
+        assert_eq!(prefs.device_display_name, "ws-v3");
+
+        let configs = storage.list_provider_configs().expect("providers");
+        assert_eq!(configs.len(), 8);
+
+        let pricing = storage.list_model_pricing().expect("pricing");
+        let ds = pricing
+            .iter()
+            .find(|p| p.model_pattern == "deepseek-chat")
+            .expect("ds migrated");
+        assert_eq!(ds.provider_id, "deepseek_harness");
+
+        let sync_cfg = storage.get_sync_config_state().expect("sync state");
+        assert!(!sync_cfg.enabled);
+        assert!(storage
+            .list_provider_balances()
+            .expect("balances")
+            .is_empty());
+        assert!(storage
+            .list_custom_provider_rules()
+            .expect("custom rules")
+            .is_empty());
+    }
+
+    #[test]
+    fn apply_remote_sync_envelope_is_idempotent_and_multi_device_safe() {
+        use crate::domain::{SyncEnvelopeV1, SyncHourlyDelta, SyncSubscriptionSnapshot};
+
+        let storage = Storage::open_in_memory().expect("db");
+        let ts = 1_760_000_000_000i64;
+        let hour = ts.div_euclid(HOUR_MS) * HOUR_MS;
+        let env = SyncEnvelopeV1 {
+            schema_version: 1,
+            device_id: "macbook-air".to_string(),
+            device_display_name: "MacBook Air".to_string(),
+            generated_at_ms: ts + 10_000,
+            since_watermark_ms: 0,
+            hourly_deltas: vec![SyncHourlyDelta {
+                provider_id: "kimi_code".to_string(),
+                model_id: "kimi-k2-0905-preview".to_string(),
+                bucket_start_ms: hour,
+                request_count: 4,
+                observable_step_count: 0,
+                input_tokens: 10_000,
+                output_tokens: 2_000,
+                cache_read_tokens: 3_000,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                estimated_cost_micro_usd: 150_000,
+                cache_saved_micro_usd: 5_000,
+                total_duration_ms: 4_000,
+                tps_sample_count: 4,
+                tps_sum: 200.0,
+                max_output_tps: 65.0,
+                updated_at_ms: ts + 10_000,
+            }],
+            subscription_snapshots: vec![SyncSubscriptionSnapshot {
+                plan_id: "kimi-pro".to_string(),
+                provider_id: "kimi_code".to_string(),
+                plan_name: "Kimi Pro".to_string(),
+                window_id: "5h".to_string(),
+                window_label: "5h 窗口".to_string(),
+                used_percent: 33.5,
+                resets_at_ms: Some(ts + 3_600_000),
+                source: "estimated".to_string(),
+            }],
+        };
+
+        let r1 = storage
+            .apply_remote_sync_envelope_v1(&env, ts + 11_000)
+            .expect("first apply");
+        assert_eq!(r1.hourly_buckets_applied, 1);
+        assert_eq!(r1.subscription_snapshots_applied, 1);
+
+        // Replay identical envelope must stay idempotent and never double-count daily rollups
+        let r2 = storage
+            .apply_remote_sync_envelope_v1(&env, ts + 12_000)
+            .expect("replay apply");
+        assert_eq!(r2.hourly_buckets_applied, 0);
+
+        storage
+            .with_conn(|conn| {
+                let (h_tok, h_req): (i64, i64) = conn.query_row(
+                    "SELECT SUM(input_tokens + output_tokens + cache_read_tokens), SUM(request_count) FROM usage_hourly_rollups WHERE device_id = 'macbook-air'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                let (d_tok, d_req): (i64, i64) = conn.query_row(
+                    "SELECT SUM(input_tokens + output_tokens + cache_read_tokens), SUM(request_count) FROM usage_daily_rollups WHERE device_id = 'macbook-air'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                assert_eq!((h_tok, h_req), (15_000, 4));
+                assert_eq!((d_tok, d_req), (15_000, 4));
+                Ok(())
+            })
+            .expect("verify rollup totals");
+
+        let devices = storage.list_devices().expect("devices");
+        assert!(devices.iter().any(|d| d.device_id == "macbook-air"));
+        let remote_snaps = storage
+            .list_remote_subscription_snapshots()
+            .expect("remote snaps");
+        assert_eq!(remote_snaps.len(), 1);
+        assert_eq!(remote_snaps[0].device_display_name, "MacBook Air");
     }
 }

@@ -87,7 +87,7 @@ fn ensure_tray_popup(app: &AppHandle) -> Option<tauri::WebviewWindow> {
         WebviewUrl::App("index.html?view=tray".into()),
     )
     .title("TokenTracker Quick View")
-    .inner_size(340.0, 410.0)
+    .inner_size(360.0, 480.0)
     .decorations(false)
     .resizable(false)
     .always_on_top(true)
@@ -133,7 +133,7 @@ fn position_tray_popup(
 ) {
     let size = popup
         .outer_size()
-        .unwrap_or(tauri::PhysicalSize::new(340, 410));
+        .unwrap_or(tauri::PhysicalSize::new(360, 480));
     let w = size.width as i32;
     let h = size.height as i32;
 

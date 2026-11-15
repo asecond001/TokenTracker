@@ -53,6 +53,7 @@ export function ModelsPricingPage() {
     customStartDate,
     customEndDate,
     providerFilter,
+    deviceFilter,
     currency,
     usdToCnyRate,
     setUsdToCnyRate,
@@ -72,7 +73,7 @@ export function ModelsPricingPage() {
   const filter = useMemo(
     () => getFilter(),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [timePreset, customStartDate, customEndDate, providerFilter]
+    [timePreset, customStartDate, customEndDate, providerFilter, deviceFilter]
   );
 
   const { data, isLoading } = useQuery({

@@ -65,6 +65,7 @@ export function TrendsPage() {
     customStartDate,
     customEndDate,
     providerFilter,
+    deviceFilter,
     currency,
     usdToCnyRate,
     tzOffsetMinutes,
@@ -83,10 +84,11 @@ export function TrendsPage() {
       start_ms: range.start_ms,
       end_ms: range.end_ms,
       provider_id: providerFilter === 'all' ? null : providerFilter,
+      device_id: deviceFilter === 'all' ? null : deviceFilter,
       tz_offset_minutes: tzOffsetMinutes,
       all_time: range.all_time,
     };
-  }, [timePreset, customStartDate, customEndDate, providerFilter, tzOffsetMinutes]);
+  }, [timePreset, customStartDate, customEndDate, providerFilter, deviceFilter, tzOffsetMinutes]);
 
   const { data, isLoading } = useQuery({
     queryKey: ['trends', filter, granularity, dimension],

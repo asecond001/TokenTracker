@@ -236,8 +236,9 @@ pub fn parse_otlp_metrics_json(payload: &Value, device_id: &str) -> Vec<Normaliz
                         .cloned()
                         .unwrap_or_else(|| "otlp-metrics".to_string());
                     let provider_id = attrs
-                        .get("gen_ai.system")
-                        .map(|s| map_system_to_provider(s))
+                        .get("tokentracker.provider_id")
+                        .cloned()
+                        .or_else(|| attrs.get("gen_ai.system").map(|s| map_system_to_provider(s)))
                         .unwrap_or_else(|| default_provider.clone());
                     let token_type = attrs
                         .get("type")
@@ -371,8 +372,9 @@ pub fn parse_otlp_logs_json(payload: &Value, device_id: &str) -> Vec<NormalizedU
                     .cloned()
                     .unwrap_or_else(|| "otlp-logs".to_string());
                 let provider_id = attrs
-                    .get("gen_ai.system")
-                    .map(|s| map_system_to_provider(s))
+                    .get("tokentracker.provider_id")
+                    .cloned()
+                    .or_else(|| attrs.get("gen_ai.system").map(|s| map_system_to_provider(s)))
                     .unwrap_or_else(|| default_provider.clone());
                 let step_key = attrs
                     .get("request_id")
@@ -457,7 +459,17 @@ fn parse_nano_to_ms(val: Option<&Value>) -> Option<i64> {
 
 fn map_system_to_provider(sys: &str) -> String {
     let low = sys.to_ascii_lowercase();
-    if low.contains("openai") || low.contains("codex") {
+    if low.contains("kimi") || low.contains("moonshot") {
+        provider_ids::KIMI_CODE.to_string()
+    } else if low.contains("workbuddy") {
+        provider_ids::WORKBUDDY.to_string()
+    } else if low.contains("deepseek") || low.contains("dsh") || low.contains("cordis") {
+        provider_ids::DEEPSEEK_HARNESS.to_string()
+    } else if low.contains("qcode") || low.contains("qwen") {
+        provider_ids::QCODE.to_string()
+    } else if low.contains("minimax") {
+        provider_ids::MINIMAX_CODE.to_string()
+    } else if low.contains("openai") || low.contains("codex") {
         provider_ids::CODEX.to_string()
     } else if low.contains("google") || low.contains("gemini") || low.contains("antigravity") {
         provider_ids::ANTIGRAVITY.to_string()
@@ -468,9 +480,14 @@ fn map_system_to_provider(sys: &str) -> String {
 
 fn infer_provider_from_attrs(attrs: &HashMap<String, String>) -> String {
     attrs
-        .get("service.name")
-        .or_else(|| attrs.get("gen_ai.system"))
-        .map(|s| map_system_to_provider(s))
+        .get("tokentracker.provider_id")
+        .cloned()
+        .or_else(|| {
+            attrs
+                .get("service.name")
+                .or_else(|| attrs.get("gen_ai.system"))
+                .map(|s| map_system_to_provider(s))
+        })
         .unwrap_or_else(|| provider_ids::CLAUDE_CODE.to_string())
 }
 

@@ -6,8 +6,13 @@ license.workspace = true
 description = "Platform-agnostic core domain, SQLite storage/rollups, pricing, subscription evaluation, and analytics for TokenTracker."
 
 [dependencies]
+aes-gcm.workspace = true
+base64.workspace = true
 chrono.workspace = true
+getrandom.workspace = true
 hex.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
 rusqlite.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true

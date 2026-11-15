@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 use tokentracker_collectors::{
     start_loopback_otlp_server, sync_catalog_and_rate, CollectorCoordinator, CredentialManager,
-    OsKeyringStore, OtlpServerHandle,
+    OsKeyringStore, OtlpServerHandle, SyncClientHandle,
 };
 use tokentracker_core::domain::CatalogSyncResult;
 use tokentracker_core::{CoreResult, Storage};
@@ -35,6 +35,7 @@ pub struct AppState {
     pub otlp_handle: Mutex<Option<OtlpServerHandle>>,
     pub watcher_shutdown_tx: Mutex<Option<watch::Sender<bool>>>,
     pub catalog_sync_lock: Arc<tokio::sync::Mutex<()>>,
+    pub sync_client: SyncClientHandle,
 }
 
 impl AppState {
@@ -44,6 +45,8 @@ impl AppState {
             .map_err(|e| format!("Failed to open TokenTracker SQLite database: {e}"))?;
         let coordinator = CollectorCoordinator::new(storage.clone());
         let credentials: Arc<dyn CredentialManager> = Arc::new(OsKeyringStore::new());
+        let sync_client = SyncClientHandle::new(storage.clone(), Arc::clone(&credentials))
+            .map_err(|e| format!("Failed to initialize cloud sync client: {e}"))?;
 
         Ok(Self {
             db_path,
@@ -53,6 +56,7 @@ impl AppState {
             otlp_handle: Mutex::new(None),
             watcher_shutdown_tx: Mutex::new(None),
             catalog_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            sync_client,
         })
     }
 
@@ -65,14 +69,24 @@ impl AppState {
         let mut catalog_rx = tx.subscribe();
         let watcher_app = app_handle.clone();
         let coord = self.coordinator.clone();
+        let sync_for_watcher = self.sync_client.clone();
         tauri::async_runtime::spawn(async move {
             coord
                 .run_background_watcher_with_hook(rx, move |report| {
                     if report.events_inserted > 0 {
                         let _ = watcher_app.emit("usage-updated", report);
+                        sync_for_watcher.notify_local_change();
                     }
                 })
                 .await;
+        });
+
+        let sync_client = self.sync_client.clone();
+        let sync_app = app_handle.clone();
+        tauri::async_runtime::spawn(async move {
+            sync_client.start_background(move |report| {
+                let _ = sync_app.emit("usage-updated", report);
+            });
         });
 
         let sync_storage = self.storage.clone();
@@ -188,6 +202,7 @@ impl AppState {
     }
 
     pub fn shutdown_background_services(&self) {
+        self.sync_client.shutdown();
         if let Ok(mut guard) = self.watcher_shutdown_tx.lock() {
             if let Some(tx) = guard.take() {
                 let _ = tx.send(true);

@@ -156,6 +156,44 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
             1_250_000_000,
             "Google AI Ultra / Antigravity 旗舰订阅（249.99 USD/月高额度窗口）",
         ),
+        template_entry(
+            "minimax_coding_plan",
+            provider_ids::MINIMAX_CODE,
+            "MiniMax Coding Plan ($15/mo)",
+            15_000_000,
+            12_000_000,
+            60_000_000,
+            "MiniMax Coding Plan 编码订阅参考窗口（支持官方 Coding Plan 额度接口对齐）",
+        ),
+        SubscriptionPlanTemplate {
+            template_id: "minimax_token_plan".to_string(),
+            provider_id: provider_ids::MINIMAX_CODE.to_string(),
+            plan_name: "MiniMax Token Plan ($49/mo)".to_string(),
+            monthly_fee_micro_usd: 49_000_000,
+            windows: vec![
+                SubscriptionWindowRule {
+                    window_id: "5h".to_string(),
+                    label: "5h Token 窗口".to_string(),
+                    duration_hours: 5,
+                    rolling: true,
+                    unit: QuotaUnit::Tokens,
+                    limit_value: 20_000_000,
+                    warning_percent: 80,
+                    critical_percent: 95,
+                },
+                SubscriptionWindowRule {
+                    window_id: "30d".to_string(),
+                    label: "月度 Token 额度".to_string(),
+                    duration_hours: 720,
+                    rolling: false,
+                    unit: QuotaUnit::Tokens,
+                    limit_value: 120_000_000,
+                    warning_percent: 80,
+                    critical_percent: 95,
+                },
+            ],
+            description: "MiniMax Token Plan 按 Token 计量订阅参考模板（可按需修改额度）".to_string(),
+        },
     ]
 }
 
@@ -347,9 +385,9 @@ mod tests {
     }
 
     #[test]
-    fn templates_cover_all_seven_reference_plans() {
+    fn templates_cover_all_reference_plans() {
         let templates = subscription_plan_templates();
-        assert_eq!(templates.len(), 7);
+        assert_eq!(templates.len(), 9);
         let ids: Vec<&str> = templates.iter().map(|t| t.template_id.as_str()).collect();
         assert_eq!(
             ids,
@@ -361,10 +399,14 @@ mod tests {
                 "codex_pro",
                 "google_ai_pro",
                 "google_ai_ultra",
+                "minimax_coding_plan",
+                "minimax_token_plan",
             ]
         );
         assert_eq!(templates[5].monthly_fee_micro_usd, 19_990_000);
         assert_eq!(templates[6].monthly_fee_micro_usd, 249_990_000);
+        assert_eq!(templates[7].provider_id, provider_ids::MINIMAX_CODE);
+        assert_eq!(templates[8].windows[0].unit, QuotaUnit::Tokens);
     }
 
     #[test]

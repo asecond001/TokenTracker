@@ -74,22 +74,44 @@ pub fn default_pricing_catalog() -> Vec<ModelPricingEntry> {
         entry("antigravity-planner", provider_ids::ANTIGRAVITY, 1.25, 10.0, 0.125, 0.0, 10.0),
         entry("antigravity-default", provider_ids::ANTIGRAVITY, 1.25, 10.0, 0.125, 0.0, 10.0),
         entry("_default_antigravity", provider_ids::ANTIGRAVITY, 1.25, 10.0, 0.125, 0.0, 10.0),
-        // Public multi-vendor baseline models (used after remote sync or direct model queries)
-        entry("deepseek-chat", "deepseek", 0.28, 0.42, 0.028, 0.0, 0.42),
-        entry("deepseek-reasoner", "deepseek", 0.55, 2.19, 0.14, 0.0, 2.19),
-        entry("_default_deepseek", "deepseek", 0.28, 0.42, 0.028, 0.0, 0.42),
-        entry("kimi-k2", "kimi_code", 0.60, 2.50, 0.15, 0.0, 2.50),
-        entry("_default_kimi_code", "kimi_code", 0.60, 2.50, 0.15, 0.0, 2.50),
-        entry("minimax-m2", "minimax_code", 0.30, 1.20, 0.03, 0.0, 1.20),
-        entry("_default_minimax_code", "minimax_code", 0.30, 1.20, 0.03, 0.0, 1.20),
+        // Kimi Code / Moonshot AI models
+        entry("kimi-k2.5", provider_ids::KIMI_CODE, 0.60, 2.50, 0.15, 0.0, 2.50),
+        entry("kimi-k2", provider_ids::KIMI_CODE, 0.60, 2.50, 0.15, 0.0, 2.50),
+        entry("kimi-latest", provider_ids::KIMI_CODE, 0.28, 1.40, 0.07, 0.0, 1.40),
+        entry("moonshot-v1-128k", provider_ids::KIMI_CODE, 1.40, 2.80, 0.35, 0.0, 2.80),
+        entry("moonshot-v1-32k", provider_ids::KIMI_CODE, 0.68, 1.40, 0.17, 0.0, 1.40),
+        entry("moonshot-v1-8k", provider_ids::KIMI_CODE, 0.34, 0.68, 0.085, 0.0, 0.68),
+        entry("_default_kimi_code", provider_ids::KIMI_CODE, 0.60, 2.50, 0.15, 0.0, 2.50),
+        // DeepSeek Harness / Official DeepSeek V3 & R1 Prefix Cache pricing
+        entry("deepseek-chat", provider_ids::DEEPSEEK_HARNESS, 0.28, 0.42, 0.028, 0.0, 0.42),
+        entry("deepseek-reasoner", provider_ids::DEEPSEEK_HARNESS, 0.55, 2.19, 0.14, 0.0, 2.19),
+        entry("deepseek-v3", provider_ids::DEEPSEEK_HARNESS, 0.28, 0.42, 0.028, 0.0, 0.42),
+        entry("deepseek-r1", provider_ids::DEEPSEEK_HARNESS, 0.55, 2.19, 0.14, 0.0, 2.19),
+        entry("_default_deepseek_harness", provider_ids::DEEPSEEK_HARNESS, 0.28, 0.42, 0.028, 0.0, 0.42),
+        // MiniMax Code models
+        entry("minimax-m2.5", provider_ids::MINIMAX_CODE, 0.30, 1.20, 0.03, 0.0, 1.20),
+        entry("minimax-m2.1", provider_ids::MINIMAX_CODE, 0.30, 1.20, 0.03, 0.0, 1.20),
+        entry("minimax-m2", provider_ids::MINIMAX_CODE, 0.30, 1.20, 0.03, 0.0, 1.20),
+        entry("minimax-text-01", provider_ids::MINIMAX_CODE, 0.20, 1.10, 0.02, 0.0, 1.10),
+        entry("_default_minimax_code", provider_ids::MINIMAX_CODE, 0.30, 1.20, 0.03, 0.0, 1.20),
+        // QCode / Qwen models (gateway router also resolves routed models cross-provider)
+        entry("qwen3-coder-plus", provider_ids::QCODE, 0.40, 1.60, 0.08, 0.0, 1.60),
+        entry("qwen-max", provider_ids::QCODE, 1.60, 6.40, 0.32, 0.0, 6.40),
+        entry("qwen-plus", provider_ids::QCODE, 0.40, 1.20, 0.08, 0.0, 1.20),
+        entry("_default_qcode", provider_ids::QCODE, 1.50, 6.00, 0.15, 0.0, 6.00),
+        // Workbuddy router fallback (real routed models resolve via cross-provider match)
+        entry("_default_workbuddy", provider_ids::WORKBUDDY, 1.00, 4.00, 0.10, 0.0, 4.00),
     ]
 }
 
 /// Resolve the most specific pricing rule for `(provider_id, model_id)`.
 /// Priority:
-/// 1. User overrides (`is_user_override = true`) matching exact model > longest prefix/substring.
-/// 2. Built-in rules matching exact model > longest prefix/substring.
-/// 3. Provider-level `_default_<provider>` fallback.
+/// 1. User overrides (`is_user_override = true`) on matching provider > cross-provider override.
+/// 2. Same-provider built-in pattern (exact > prefix > substring, longest first).
+/// 3. Cross-provider built-in pattern (supports multi-backend routers like Workbuddy / QCode / custom rules).
+/// 4. Provider-level `_default_<provider>` fallback.
+type PricingRank = (u8, u8, u8, usize);
+
 pub fn resolve_pricing<'a>(
     catalog: &'a [ModelPricingEntry],
     provider_id: &str,
@@ -98,25 +120,22 @@ pub fn resolve_pricing<'a>(
     let model_lower = model_id.trim().to_ascii_lowercase();
     let provider_lower = provider_id.trim().to_ascii_lowercase();
 
-    let mut best: Option<((u8, u8, usize), &'a ModelPricingEntry)> = None;
+    let mut best: Option<(PricingRank, &'a ModelPricingEntry)> = None;
 
     for item in catalog {
         let pat_lower = item.model_pattern.trim().to_ascii_lowercase();
-        if pat_lower.starts_with("_default_") {
+        if pat_lower.is_empty() || pat_lower.starts_with("_default_") {
             continue;
         }
         let provider_match = item.provider_id.eq_ignore_ascii_case(&provider_lower)
             || item.provider_id.is_empty()
             || item.provider_id == "*";
-        if !provider_match {
-            continue;
-        }
 
         let match_kind = if model_lower == pat_lower {
             Some(3u8)
         } else if model_lower.starts_with(&pat_lower) {
             Some(2u8)
-        } else if !pat_lower.is_empty() && model_lower.contains(&pat_lower) {
+        } else if model_lower.contains(&pat_lower) {
             Some(1u8)
         } else {
             None
@@ -124,7 +143,8 @@ pub fn resolve_pricing<'a>(
 
         if let Some(kind) = match_kind {
             let override_rank = u8::from(item.is_user_override);
-            let score = (override_rank, kind, pat_lower.len());
+            let provider_rank = u8::from(provider_match);
+            let score = (override_rank, provider_rank, kind, pat_lower.len());
             if best.is_none_or(|(best_score, _)| score > best_score) {
                 best = Some((score, item));
             }
@@ -311,5 +331,23 @@ mod tests {
         let cny = convert_micro_usd_to_currency(1_500_000, CurrencyCode::Cny, rate)
             .expect("cny conversion");
         assert_eq!(cny.to_string(), "10.875");
+    }
+
+    #[test]
+    fn cross_provider_gateway_routing_uses_underlying_model_pricing() {
+        let catalog = default_pricing_catalog();
+        // Workbuddy routing to Claude Sonnet should resolve Claude's pricing rule instead of generic fallback
+        let wb_sonnet =
+            resolve_pricing(&catalog, "workbuddy", "claude-sonnet-4-5").expect("wb sonnet");
+        assert_eq!(wb_sonnet.provider_id, "claude_code");
+        assert_eq!(wb_sonnet.input_per_m_micro_usd, 3_000_000);
+
+        // QCode routing to deepseek-reasoner should resolve DeepSeek pricing before qcode fallback
+        let q_ds = resolve_pricing(&catalog, "qcode", "deepseek-reasoner").expect("qcode ds");
+        assert_eq!(q_ds.provider_id, "deepseek_harness");
+
+        // Unknown model under qcode falls back to _default_qcode rather than another provider's default
+        let q_unknown = resolve_pricing(&catalog, "qcode", "qcode-mystery-v9").expect("q default");
+        assert_eq!(q_unknown.model_pattern, "_default_qcode");
     }
 }

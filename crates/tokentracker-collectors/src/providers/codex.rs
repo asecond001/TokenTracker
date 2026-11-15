@@ -21,7 +21,7 @@ impl CodexParser {
 }
 
 impl ProviderLogParser for CodexParser {
-    fn provider_id(&self) -> &'static str {
+    fn provider_id(&self) -> &str {
         provider_ids::CODEX
     }
 

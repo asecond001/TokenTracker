@@ -1,16 +1,19 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
   Check,
   Copy,
+  FlaskConical,
   FolderPlus,
   KeyRound,
+  Plus,
   RefreshCw,
   ShieldCheck,
   Trash2,
 } from 'lucide-react';
 import {
+  formatCost,
   formatExactInt,
   formatRelativeTime,
   formatTokens,
@@ -18,10 +21,16 @@ import {
   providerDisplayName,
 } from '../lib/format';
 import { ipc, isTauriRuntime } from '../lib/ipc';
+import { useWorkspaceStore } from '../stores/workspaceStore';
 import type {
   AppPreferences,
+  BalanceRefreshOutcome,
   CollectionMode,
+  CustomProtocolKind,
+  CustomProviderRule,
+  CustomRuleTestResult,
   OfficialApiReconcileResult,
+  ProviderBalanceSnapshot,
   ProviderConfig,
 } from '../types/ipc';
 
@@ -29,7 +38,71 @@ const DEFAULT_PATH_HINTS: Record<string, string> = {
   claude_code: '~/.claude/projects/ 与 ~/.claude/stats-cache.json',
   codex: '~/.codex/sessions/**/rollout-*.jsonl',
   antigravity: '%APPDATA% / ~/.gemini/antigravity/brain/*/transcript.jsonl',
+  kimi_code: '~/.kimi/（sessions / usage JSON / JSONL）',
+  workbuddy: '~/.workbuddy/ 或 %APPDATA%/Workbuddy/（自动按 routed_model 归因）',
+  deepseek_harness: '~/.dsh/ 或 ~/.deepseek-harness/（精确区分 Prefix Cache 命中与未命中）',
+  qcode: '~/.qcode/（本地兼容网关日志 + 官方用量 API）',
+  minimax_code: '~/.minimax/（CLI 会话日志 + Token Plan 配额接口）',
 };
+
+const BALANCE_API_LABELS: Record<string, { label: string; placeholder: string }> = {
+  kimi_code: {
+    label: 'Moonshot / Kimi 官方 API Key',
+    placeholder: '粘贴 sk-... 查询 Moonshot 官方余额',
+  },
+  deepseek_harness: {
+    label: 'DeepSeek 官方 API Key',
+    placeholder: '粘贴 sk-... 查询 DeepSeek 余额与赠金',
+  },
+  qcode: {
+    label: 'QCode 只读 OpenAPI Token / API Key',
+    placeholder: '粘贴 qot_... 或 cr_... 查询用量限额',
+  },
+  minimax_code: {
+    label: 'MiniMax 官方 API Key',
+    placeholder: '粘贴 MiniMax Key 查询 Token Plan 余量',
+  },
+};
+
+const PROTOCOL_KINDS: Array<{ id: CustomProtocolKind; label: string }> = [
+  { id: 'openai_jsonl', label: 'OpenAI 兼容 JSONL (usage.prompt_tokens / completion_tokens)' },
+  { id: 'anthropic_jsonl', label: 'Anthropic 兼容 JSONL (usage.input_tokens / output_tokens)' },
+  { id: 'declarative_jsonl', label: '声明式 JSON Pointer 映射 (自定义字段路径)' },
+];
+
+function createEmptyCustomRule(): CustomProviderRule {
+  return {
+    rule_id: '',
+    display_name: '',
+    enabled: true,
+    protocol_kind: 'openai_jsonl',
+    log_roots: [],
+    mapping_spec: {
+      provider_id_override: null,
+      file_extensions: ['jsonl', 'json'],
+      timestamp_path: '/timestamp',
+      model_path: '/model',
+      session_id_path: '/session_id',
+      request_id_path: '/request_id',
+      input_tokens_path: '/usage/input_tokens',
+      output_tokens_path: '/usage/output_tokens',
+      cache_read_tokens_path: null,
+      cache_write_tokens_path: null,
+      reasoning_tokens_path: null,
+      duration_ms_path: null,
+      ttft_ms_path: null,
+    },
+    updated_at_ms: 0,
+  };
+}
+
+function formatNativeBalance(micro: number | null | undefined, currency: string): string {
+  if (micro === null || micro === undefined) {
+    return '—';
+  }
+  const code = currency?.trim() || 'USD';
+  return `${code} ${(micro / 1_000_000).toFixed(2)}`;
+}
 
 const COLLECTION_MODES: Array<{ id: CollectionMode; label: string }> = [
   { id: 'local_log', label: '本地只读日志 (Local Log)' },
@@ -58,15 +131,51 @@ export function DataSourcesPage() {
     refetchInterval: 15_000,
   });
 
+  const { data: providerBalances = [] } = useQuery({
+    queryKey: ['provider-balances'],
+    queryFn: () => ipc.getProviderBalances(),
+    refetchInterval: 30_000,
+  });
+
+  const { data: customRules = [] } = useQuery({
+    queryKey: ['custom-provider-rules'],
+    queryFn: () => ipc.listCustomProviderRules(),
+    refetchInterval: 30_000,
+  });
+
+  const { currency, usdToCnyRate } = useWorkspaceStore();
+
   const [pathDrafts, setPathDrafts] = useState<Record<string, string>>({});
   const [apiKeyDrafts, setApiKeyDrafts] = useState<Record<string, string>>({});
   const [reconcileResults, setReconcileResults] = useState<
     Record<string, OfficialApiReconcileResult>
   >({});
+  const [balanceOutcomes, setBalanceOutcomes] = useState<
+    Record<string, BalanceRefreshOutcome>
+  >({});
   const [otlpPortDraft, setOtlpPortDraft] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copiedSnippet, setCopiedSnippet] = useState(false);
+
+  const [ruleDraft, setRuleDraft] = useState<CustomProviderRule>(() => createEmptyCustomRule());
+  const [rootsTextDraft, setRootsTextDraft] = useState('');
+  const [extTextDraft, setExtTextDraft] = useState('jsonl, json');
+  const [sampleLineDraft, setSampleLineDraft] = useState(
+    '{"timestamp":"2026-10-16T10:00:00Z","model":"deepseek-chat","usage":{"prompt_tokens":1200,"completion_tokens":350,"prompt_tokens_details":{"cached_tokens":400}}}'
+  );
+  const [sampleTestResult, setSampleTestResult] = useState<CustomRuleTestResult | null>(null);
+
+  const balanceByProvider = useMemo(() => {
+    const map = new Map<string, ProviderBalanceSnapshot>();
+    for (const snap of providerBalances) {
+      map.set(snap.provider_id, snap);
+    }
+    for (const [pid, outcome] of Object.entries(balanceOutcomes)) {
+      map.set(pid, outcome.snapshot);
+    }
+    return map;
+  }, [providerBalances, balanceOutcomes]);
 
   const activeOtlpPort =
     otlpPortDraft ?? String(bootstrap?.preferences.otlp_port ?? 4318);
@@ -82,6 +191,8 @@ export function DataSourcesPage() {
   const invalidateAllSources = async () => {
     await queryClient.invalidateQueries({ queryKey: ['bootstrap'] });
     await queryClient.invalidateQueries({ queryKey: ['provider_configs'] });
+    await queryClient.invalidateQueries({ queryKey: ['provider-balances'] });
+    await queryClient.invalidateQueries({ queryKey: ['custom-provider-rules'] });
     await queryClient.invalidateQueries({ queryKey: ['ingestion_cursors'] });
     await queryClient.invalidateQueries({ queryKey: ['overview'] });
     await queryClient.invalidateQueries({ queryKey: ['subscriptions'] });
@@ -156,6 +267,85 @@ export function DataSourcesPage() {
     },
     onError: (err: unknown) => {
       setErrorMsg(err instanceof Error ? err.message : '调用官方 Usage API 对账失败');
+    },
+  });
+
+  const refreshBalanceMutation = useMutation({
+    mutationFn: (providerId: string) => ipc.refreshProviderBalance(providerId),
+    onSuccess: async (outcome) => {
+      setErrorMsg(null);
+      setBalanceOutcomes((prev) => ({
+        ...prev,
+        [outcome.snapshot.provider_id]: outcome,
+      }));
+      setNotice(
+        outcome.from_cache
+          ? `${providerDisplayName(outcome.snapshot.provider_id)} 命中 60s 缓存（冷却剩余 ${outcome.cooldown_remaining_secs}s）`
+          : `${providerDisplayName(outcome.snapshot.provider_id)} 官方余额已刷新（更新 ${outcome.rate_limits_updated} 条限额快照）`
+      );
+      await invalidateAllSources();
+    },
+    onError: (err: unknown) => {
+      setErrorMsg(err instanceof Error ? err.message : '刷新官方余额接口失败');
+    },
+  });
+
+  const buildNormalizedDraftRule = (sourceRule: CustomProviderRule): CustomProviderRule => {
+    const roots = rootsTextDraft
+      .split(/\r?\n|,/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const exts = extTextDraft
+      .split(',')
+      .map((s) => s.trim().replace(/^\./, ''))
+      .filter(Boolean);
+    return {
+      ...sourceRule,
+      rule_id: sourceRule.rule_id.trim(),
+      display_name: sourceRule.display_name.trim(),
+      log_roots: roots,
+      mapping_spec: {
+        ...sourceRule.mapping_spec,
+        provider_id_override: sourceRule.mapping_spec.provider_id_override?.trim() || null,
+        file_extensions: exts.length > 0 ? exts : ['jsonl'],
+      },
+      updated_at_ms: Date.now(),
+    };
+  };
+
+  const upsertCustomRuleMutation = useMutation({
+    mutationFn: (rule: CustomProviderRule) => ipc.upsertCustomProviderRule(rule),
+    onSuccess: async (_, saved) => {
+      setErrorMsg(null);
+      setNotice(`已保存自定义规则「${saved.display_name}」`);
+      await invalidateAllSources();
+    },
+    onError: (err: unknown) => {
+      setErrorMsg(err instanceof Error ? err.message : '保存自定义接入规则失败');
+    },
+  });
+
+  const deleteCustomRuleMutation = useMutation({
+    mutationFn: (ruleId: string) => ipc.deleteCustomProviderRule(ruleId),
+    onSuccess: async (_, ruleId) => {
+      setErrorMsg(null);
+      setNotice(`已移除自定义规则 ${ruleId}`);
+      await invalidateAllSources();
+    },
+    onError: (err: unknown) => {
+      setErrorMsg(err instanceof Error ? err.message : '删除自定义规则失败');
+    },
+  });
+
+  const testCustomRuleMutation = useMutation({
+    mutationFn: ({ rule, sampleLine }: { rule: CustomProviderRule; sampleLine: string }) =>
+      ipc.testCustomProviderSampleLine(rule, sampleLine),
+    onSuccess: (res) => {
+      setErrorMsg(null);
+      setSampleTestResult(res);
+    },
+    onError: (err: unknown) => {
+      setErrorMsg(err instanceof Error ? err.message : '样本行试跑验证失败');
     },
   });
 
@@ -330,9 +520,13 @@ export function DataSourcesPage() {
 
         <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
           {providers.map((cfg) => {
-            const supportsOfficialApi =
+            const supportsOrgUsageApi =
               cfg.provider_id === 'claude_code' || cfg.provider_id === 'codex';
+            const balanceApiMeta = BALANCE_API_LABELS[cfg.provider_id];
+            const supportsAnyApi = supportsOrgUsageApi || Boolean(balanceApiMeta);
             const reconcile = reconcileResults[cfg.provider_id];
+            const balanceSnap = balanceByProvider.get(cfg.provider_id);
+            const balanceOutcome = balanceOutcomes[cfg.provider_id];
 
             return (
               <div
@@ -499,8 +693,8 @@ export function DataSourcesPage() {
                   </div>
                 </div>
 
-                {/* Official Usage API Key & Reconciliation (Claude Code / Codex) */}
-                {supportsOfficialApi && (
+                {/* Official Usage / Balance API Key & Refresh */}
+                {supportsAnyApi && (
                   <div
                     className="pl-4.5 pt-2 flex flex-wrap items-center justify-between gap-3 text-[11.5px]"
                     style={{ borderTop: '1px dashed var(--border-subtle)' }}
@@ -508,9 +702,11 @@ export function DataSourcesPage() {
                     <div className="flex items-center gap-2">
                       <KeyRound className="w-3.5 h-3.5" style={{ color: 'var(--text-muted)' }} />
                       <span style={{ color: 'var(--text-secondary)' }}>
-                        {cfg.provider_id === 'claude_code'
-                          ? 'Anthropic Admin API Key'
-                          : 'OpenAI Admin / Usage API Key'}
+                        {supportsOrgUsageApi
+                          ? cfg.provider_id === 'claude_code'
+                            ? 'Anthropic Admin API Key'
+                            : 'OpenAI Admin / Usage API Key'
+                          : balanceApiMeta?.label}
                       </span>
                       <span
                         className="px-1.5 py-0.5 rounded text-[10.5px]"
@@ -532,7 +728,11 @@ export function DataSourcesPage() {
                       <input
                         type="password"
                         placeholder={
-                          cfg.has_credential ? '输入新密钥以覆盖' : '粘贴官方 Admin API Key'
+                          cfg.has_credential
+                            ? '输入新密钥以覆盖'
+                            : supportsOrgUsageApi
+                              ? '粘贴官方 Admin API Key'
+                              : balanceApiMeta?.placeholder
                         }
                         value={apiKeyDrafts[cfg.provider_id] ?? ''}
                         onChange={(e) =>
@@ -567,18 +767,33 @@ export function DataSourcesPage() {
                       </button>
                       {cfg.has_credential && (
                         <>
-                          <button
-                            type="button"
-                            onClick={() => reconcileMutation.mutate(cfg.provider_id)}
-                            disabled={reconcileMutation.isPending}
-                            className="px-2.5 py-1 rounded cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
-                            style={{
-                              backgroundColor: 'var(--accent-primary)',
-                              color: '#ffffff',
-                            }}
-                          >
-                            官方账单对账 (7d)
-                          </button>
+                          {supportsOrgUsageApi ? (
+                            <button
+                              type="button"
+                              onClick={() => reconcileMutation.mutate(cfg.provider_id)}
+                              disabled={reconcileMutation.isPending}
+                              className="px-2.5 py-1 rounded cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
+                              style={{
+                                backgroundColor: 'var(--accent-primary)',
+                                color: '#ffffff',
+                              }}
+                            >
+                              官方账单对账 (7d)
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => refreshBalanceMutation.mutate(cfg.provider_id)}
+                              disabled={refreshBalanceMutation.isPending}
+                              className="px-2.5 py-1 rounded cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
+                              style={{
+                                backgroundColor: 'var(--accent-primary)',
+                                color: '#ffffff',
+                              }}
+                            >
+                              刷新余额
+                            </button>
+                          )}
                           <button
                             type="button"
                             disabled={deleteApiKeyMutation.isPending}
@@ -607,6 +822,64 @@ export function DataSourcesPage() {
                         <span>输出: {formatTokens(reconcile.total_output_tokens)}</span>
                         {reconcile.reported_cost_usd !== null && (
                           <span>官方账单: {reconcile.reported_cost_usd.toFixed(4)} USD</span>
+                        )}
+                      </div>
+                    )}
+
+                    {balanceSnap && (
+                      <div
+                        className="w-full px-2.5 py-1.5 rounded text-[11px] tabular-nums flex flex-wrap items-center gap-4"
+                        style={{
+                          backgroundColor: 'var(--bg-elevated)',
+                          border: '1px solid var(--border-hairline)',
+                          color: 'var(--text-secondary)',
+                        }}
+                      >
+                        <span>
+                          可用余额:{' '}
+                          <strong style={{ color: 'var(--text-primary)' }}>
+                            {formatNativeBalance(balanceSnap.total_balance_micro, balanceSnap.currency)}
+                          </strong>
+                        </span>
+                        {balanceSnap.granted_balance_micro !== null && (
+                          <span>
+                            赠金/代金券:{' '}
+                            {formatNativeBalance(
+                              balanceSnap.granted_balance_micro,
+                              balanceSnap.currency
+                            )}
+                          </span>
+                        )}
+                        {balanceSnap.topped_up_balance_micro !== null && (
+                          <span>
+                            现金/充值:{' '}
+                            {formatNativeBalance(
+                              balanceSnap.topped_up_balance_micro,
+                              balanceSnap.currency
+                            )}
+                          </span>
+                        )}
+                        {balanceSnap.daily_quota_limit_micro !== null && (
+                          <span>
+                            今日限额:{' '}
+                            {formatNativeBalance(
+                              balanceSnap.daily_quota_used_micro ?? 0,
+                              balanceSnap.currency
+                            )}{' '}
+                            /{' '}
+                            {formatNativeBalance(
+                              balanceSnap.daily_quota_limit_micro,
+                              balanceSnap.currency
+                            )}
+                          </span>
+                        )}
+                        <span style={{ color: 'var(--text-muted)' }}>
+                          更新于 {formatRelativeTime(balanceSnap.fetched_at_ms)}
+                        </span>
+                        {balanceOutcome?.from_cache && (
+                          <span style={{ color: 'var(--accent-amber)' }}>
+                            60s 冷却缓存 · 剩余 {balanceOutcome.cooldown_remaining_secs}s
+                          </span>
                         )}
                       </div>
                     )}
@@ -730,7 +1003,419 @@ export function DataSourcesPage() {
         </div>
       </section>
 
-      {/* Section 3: Ingestion Cursors High-Density Table */}
+      {/* Section 3: Custom Compatible & Declarative JSONL Rules */}
+      <section
+        className="pt-5 space-y-4"
+        style={{ borderTop: '1px solid var(--border-subtle)' }}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2
+              className="text-[12px] font-semibold uppercase tracking-wider"
+              style={{ color: 'var(--text-muted)' }}
+            >
+              自定义兼容网关与声明式接入规则（custom_compatible）
+            </h2>
+            <p className="text-[11.5px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+              内置 OpenAI / Anthropic JSONL 预设与声明式 JSON Pointer 字段映射，无需重编译即可接入新工具日志
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setRuleDraft(createEmptyCustomRule());
+              setRootsTextDraft('');
+              setExtTextDraft('jsonl, json');
+              setSampleTestResult(null);
+            }}
+            className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1 px-2.5 py-1 text-[11.5px] rounded cursor-pointer"
+            style={{
+              color: 'var(--text-primary)',
+              border: '1px solid var(--border-subtle)',
+            }}
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>重置新建表单</span>
+          </button>
+        </div>
+
+        <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
+          {customRules.length === 0 ? (
+            <div
+              className="py-4 text-[11.5px]"
+              style={{
+                borderBottom: '1px solid var(--border-hairline)',
+                color: 'var(--text-muted)',
+              }}
+            >
+              尚未配置自定义规则。下方可直接配置日志目录、字段路径并试跑单行脱敏 JSONL 样本。
+            </div>
+          ) : (
+            customRules.map((rule) => {
+              const targetProviderId =
+                rule.mapping_spec.provider_id_override?.trim() ||
+                (rule.rule_id.startsWith('custom_')
+                  ? rule.rule_id
+                  : `custom_${rule.rule_id}`);
+              return (
+                <div
+                  key={rule.rule_id}
+                  className="py-3 flex flex-wrap items-center justify-between gap-3 text-[12px]"
+                  style={{ borderBottom: '1px solid var(--border-hairline)' }}
+                >
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className="inline-block w-2 h-2 rounded-full"
+                        style={{ backgroundColor: providerAccentColor(targetProviderId) }}
+                      />
+                      <span className="font-medium">{rule.display_name}</span>
+                      <code className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                        {rule.rule_id} → {targetProviderId}
+                      </code>
+                      <span
+                        className="px-1.5 py-0.5 rounded text-[10.5px]"
+                        style={{
+                          backgroundColor: 'var(--bg-hover)',
+                          border: '1px solid var(--border-hairline)',
+                          color: 'var(--text-secondary)',
+                        }}
+                      >
+                        {rule.protocol_kind}
+                      </span>
+                    </div>
+                    <div
+                      className="text-[11px] font-mono truncate"
+                      style={{ color: 'var(--text-muted)' }}
+                    >
+                      目录: {rule.log_roots.length > 0 ? rule.log_roots.join(' ; ') : '未指定目录'} ·
+                      后缀: {rule.mapping_spec.file_extensions.join(', ') || 'jsonl'}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-1 text-[11.5px] cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={rule.enabled}
+                        onChange={(e) =>
+                          upsertCustomRuleMutation.mutate({
+                            ...rule,
+                            enabled: e.target.checked,
+                            updated_at_ms: Date.now(),
+                          })
+                        }
+                      />
+                      <span>启用</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRuleDraft(rule);
+                        setRootsTextDraft(rule.log_roots.join('\n'));
+                        setExtTextDraft(
+                          (rule.mapping_spec.file_extensions ?? ['jsonl']).join(', ')
+                        );
+                        setSampleTestResult(null);
+                      }}
+                      className="btn-interactive bg-[var(--bg-elevated)] px-2 py-1 text-[11px] rounded cursor-pointer"
+                      style={{
+                        border: '1px solid var(--border-subtle)',
+                        color: 'var(--text-primary)',
+                      }}
+                    >
+                      编辑
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`删除自定义规则 ${rule.rule_id}`}
+                      onClick={() => deleteCustomRuleMutation.mutate(rule.rule_id)}
+                      className="btn-interactive inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded cursor-pointer"
+                      style={{ color: 'var(--accent-rose)' }}
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      <span>删除</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        <div
+          className="pt-3 space-y-3 text-[12px] pb-4"
+          style={{ borderBottom: '1px solid var(--border-hairline)' }}
+        >
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <label className="space-y-1">
+              <span className="block text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                规则 ID (字母数字下划线)
+              </span>
+              <input
+                type="text"
+                aria-label="自定义规则 ID"
+                placeholder="例如 my_gateway"
+                value={ruleDraft.rule_id}
+                onChange={(e) =>
+                  setRuleDraft((prev) => ({ ...prev, rule_id: e.target.value }))
+                }
+                className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none"
+                style={{
+                  backgroundColor: 'var(--bg-input)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                }}
+              />
+            </label>
+
+            <label className="space-y-1">
+              <span className="block text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                显示名称
+              </span>
+              <input
+                type="text"
+                aria-label="自定义规则显示名称"
+                placeholder="例如 OpenRouter 本地代理"
+                value={ruleDraft.display_name}
+                onChange={(e) =>
+                  setRuleDraft((prev) => ({ ...prev, display_name: e.target.value }))
+                }
+                className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none"
+                style={{
+                  backgroundColor: 'var(--bg-input)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                }}
+              />
+            </label>
+
+            <label className="space-y-1">
+              <span className="block text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                协议格式预设
+              </span>
+              <select
+                aria-label="自定义规则协议格式"
+                value={ruleDraft.protocol_kind}
+                onChange={(e) =>
+                  setRuleDraft((prev) => ({
+                    ...prev,
+                    protocol_kind: e.target.value as CustomProtocolKind,
+                  }))
+                }
+                className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none cursor-pointer"
+                style={{
+                  backgroundColor: 'var(--bg-input)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                }}
+              >
+                {PROTOCOL_KINDS.map((pk) => (
+                  <option key={pk.id} value={pk.id}>
+                    {pk.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="space-y-1">
+              <span className="block text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                文件扩展名 (逗号分隔)
+              </span>
+              <input
+                type="text"
+                placeholder="jsonl, json"
+                value={extTextDraft}
+                onChange={(e) => setExtTextDraft(e.target.value)}
+                className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none"
+                style={{
+                  backgroundColor: 'var(--bg-input)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                }}
+              />
+            </label>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <label className="md:col-span-2 space-y-1">
+              <span className="block text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                监控日志根目录 (每行或逗号分隔一个目录)
+              </span>
+              <textarea
+                rows={2}
+                placeholder="~/.my-cli/logs"
+                value={rootsTextDraft}
+                onChange={(e) => setRootsTextDraft(e.target.value)}
+                className="w-full px-2.5 py-1.5 text-[11.5px] font-mono rounded outline-none"
+                style={{
+                  backgroundColor: 'var(--bg-input)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                }}
+              />
+            </label>
+
+            <label className="space-y-1">
+              <span className="block text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                自定义归属 Provider ID (可选，留空自动加 custom_ 前缀)
+              </span>
+              <input
+                type="text"
+                placeholder="custom_my_gateway"
+                value={ruleDraft.mapping_spec.provider_id_override ?? ''}
+                onChange={(e) =>
+                  setRuleDraft((prev) => ({
+                    ...prev,
+                    mapping_spec: {
+                      ...prev.mapping_spec,
+                      provider_id_override: e.target.value || null,
+                    },
+                  }))
+                }
+                className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none"
+                style={{
+                  backgroundColor: 'var(--bg-input)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                }}
+              />
+            </label>
+          </div>
+
+          {ruleDraft.protocol_kind === 'declarative_jsonl' && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 pt-1">
+              {(
+                [
+                  ['timestamp_path', '时间戳 JSON 指针 (/timestamp)'],
+                  ['model_path', '模型 JSON 指针 (/model)'],
+                  ['input_tokens_path', '输入 Token 指针 (/usage/input)'],
+                  ['output_tokens_path', '输出 Token 指针 (/usage/output)'],
+                  ['cache_read_tokens_path', '缓存读指针 (可选)'],
+                  ['cache_write_tokens_path', '缓存写指针 (可选)'],
+                  ['reasoning_tokens_path', '推理 Token 指针 (可选)'],
+                  ['duration_ms_path', '耗时 ms 指针 (可选)'],
+                ] as const
+              ).map(([fieldKey, label]) => (
+                <label key={fieldKey} className="space-y-1">
+                  <span className="block text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                    {label}
+                  </span>
+                  <input
+                    type="text"
+                    value={ruleDraft.mapping_spec[fieldKey] ?? ''}
+                    onChange={(e) =>
+                      setRuleDraft((prev) => ({
+                        ...prev,
+                        mapping_spec: {
+                          ...prev.mapping_spec,
+                          [fieldKey]: e.target.value || null,
+                        },
+                      }))
+                    }
+                    className="w-full px-2 py-1 text-[11px] font-mono rounded outline-none"
+                    style={{
+                      backgroundColor: 'var(--bg-input)',
+                      border: '1px solid var(--border-subtle)',
+                      color: 'var(--text-primary)',
+                    }}
+                  />
+                </label>
+              ))}
+            </div>
+          )}
+
+          <div className="space-y-2 pt-1">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                脱敏单行 JSONL 样本本地校验（纯内存试跑，不写入数据库）
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={testCustomRuleMutation.isPending}
+                  onClick={() =>
+                    testCustomRuleMutation.mutate({
+                      rule: buildNormalizedDraftRule(ruleDraft),
+                      sampleLine: sampleLineDraft,
+                    })
+                  }
+                  className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1.5 px-2.5 py-1 text-[11.5px] rounded cursor-pointer disabled:opacity-50"
+                  style={{
+                    color: 'var(--text-primary)',
+                    border: '1px solid var(--border-subtle)',
+                  }}
+                >
+                  <FlaskConical className="w-3.5 h-3.5" />
+                  <span>试跑验证样本</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={upsertCustomRuleMutation.isPending}
+                  onClick={() =>
+                    upsertCustomRuleMutation.mutate(buildNormalizedDraftRule(ruleDraft))
+                  }
+                  className="px-3 py-1 text-[11.5px] font-medium rounded cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
+                  style={{
+                    backgroundColor: 'var(--accent-primary)',
+                    color: '#ffffff',
+                  }}
+                >
+                  保存规则
+                </button>
+              </div>
+            </div>
+
+            <textarea
+              rows={2}
+              aria-label="脱敏 JSONL 样本行"
+              value={sampleLineDraft}
+              onChange={(e) => setSampleLineDraft(e.target.value)}
+              className="w-full px-2.5 py-1.5 text-[11px] font-mono rounded outline-none"
+              style={{
+                backgroundColor: 'var(--bg-input)',
+                border: '1px solid var(--border-subtle)',
+                color: 'var(--text-primary)',
+              }}
+            />
+
+            {sampleTestResult && (
+              <div
+                className="px-3 py-2 rounded text-[11.5px] tabular-nums flex flex-wrap items-center gap-4"
+                style={{
+                  backgroundColor: 'var(--bg-elevated)',
+                  border: '1px solid var(--border-hairline)',
+                  color: sampleTestResult.matched
+                    ? 'var(--text-primary)'
+                    : 'var(--accent-rose)',
+                }}
+              >
+                <span className="font-semibold">
+                  {sampleTestResult.matched ? '匹配成功' : '未匹配'}
+                </span>
+                <span>Provider: {sampleTestResult.provider_id}</span>
+                <span>模型: {sampleTestResult.model_id ?? '—'}</span>
+                <span>输入: {formatExactInt(sampleTestResult.input_tokens)}</span>
+                <span>输出: {formatExactInt(sampleTestResult.output_tokens)}</span>
+                <span>缓存读: {formatExactInt(sampleTestResult.cache_read_tokens)}</span>
+                <span>
+                  等效成本:{' '}
+                  {formatCost(
+                    sampleTestResult.estimated_cost_micro_usd,
+                    currency,
+                    usdToCnyRate
+                  )}
+                </span>
+                <span style={{ color: 'var(--text-muted)' }}>
+                  {sampleTestResult.diagnostic}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* Section 4: Ingestion Cursors High-Density Table */}
       <section className="space-y-3 pb-4">
         <div className="flex items-center justify-between">
           <div>

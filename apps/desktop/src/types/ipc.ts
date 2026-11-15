@@ -1,4 +1,13 @@
-export type ProviderId = 'claude_code' | 'codex' | 'antigravity';
+export type BuiltInProviderId =
+  | 'claude_code'
+  | 'codex'
+  | 'antigravity'
+  | 'kimi_code'
+  | 'workbuddy'
+  | 'deepseek_harness'
+  | 'qcode'
+  | 'minimax_code';
+export type ProviderId = BuiltInProviderId | (string & {});
 export type CollectionMode = 'local_log' | 'otlp' | 'official_api';
 export type CurrencyCode = 'USD' | 'CNY';
 export type ThemeMode = 'system' | 'dark' | 'light';
@@ -49,6 +58,7 @@ export interface AppPreferences {
   bg_blur_px: number;
   auto_sync_pricing: boolean;
   exchange_rate_auto: boolean;
+  auto_check_updates: boolean;
   last_rate_sync_at_ms: number | null;
   last_pricing_sync_at_ms: number | null;
   updated_at_ms: number;
@@ -77,6 +87,7 @@ export interface AnalyticsFilter {
   start_ms: number;
   end_ms: number;
   provider_id: string | null;
+  device_id?: string | null;
   tz_offset_minutes: number;
   all_time?: boolean;
 }
@@ -109,9 +120,42 @@ export interface ProviderSummaryRow {
   last_error: string | null;
 }
 
+export interface UsageShareItem {
+  key: string;
+  label: string;
+  tokens: number;
+  token_share_percent: number;
+  cost_micro_usd: number;
+  cost_share_percent: number;
+}
+
+export interface ActiveSessionSummary {
+  session_key: string;
+  provider_id: string;
+  model_id: string;
+  project_label: string;
+  activity_state: 'active' | 'recent' | string;
+  started_at_ms: number;
+  last_active_at_ms: number;
+  request_count: number;
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  estimated_cost_micro_usd: number;
+  latest_output_tps: number | null;
+}
+
+export interface WorkspaceNavigatePayload {
+  page?: string | null;
+  provider_id?: string | null;
+}
+
 export interface OverviewReport {
   total_tokens: number;
   total_cost_micro_usd: number;
+  today_tokens: number;
+  today_cost_micro_usd: number;
   cache_hit_ratio: number;
   avg_output_tps: number;
   peak_output_tps: number;
@@ -126,6 +170,9 @@ export interface OverviewReport {
   series: TimeBucketPoint[];
   provider_series: TrendSeries[];
   providers: ProviderSummaryRow[];
+  provider_shares: UsageShareItem[];
+  top_model_shares: UsageShareItem[];
+  active_sessions: ActiveSessionSummary[];
 }
 
 export interface TrendsQuery {
@@ -171,6 +218,7 @@ export interface MonthlyQuery {
   year: number;
   month: number;
   provider_id: string | null;
+  device_id?: string | null;
   tz_offset_minutes: number;
 }
 
@@ -348,6 +396,8 @@ export interface TraySummary {
   today_requests: number;
   latest_output_tps: number | null;
   subscriptions: SubscriptionPlanStatus[];
+  provider_shares: UsageShareItem[];
+  active_sessions: ActiveSessionSummary[];
   currency: CurrencyCode;
   usd_to_cny_rate: string;
   active_providers_count: number;
@@ -422,4 +472,107 @@ export interface CatalogSyncResult {
   rate_source: string | null;
   pricing_source: string | null;
   warning: string | null;
+}
+
+export interface ProviderBalanceSnapshot {
+  provider_id: string;
+  currency: string;
+  total_balance_micro: number | null;
+  granted_balance_micro: number | null;
+  topped_up_balance_micro: number | null;
+  daily_quota_used_micro: number | null;
+  daily_quota_limit_micro: number | null;
+  fetched_at_ms: number;
+}
+
+export interface BalanceRefreshOutcome {
+  snapshot: ProviderBalanceSnapshot;
+  rate_limits_updated: number;
+  endpoint: string;
+  from_cache: boolean;
+  cooldown_remaining_secs: number;
+}
+
+export type CustomProtocolKind =
+  | 'openai_jsonl'
+  | 'anthropic_jsonl'
+  | 'declarative_jsonl';
+
+export interface DeclarativeMappingSpec {
+  provider_id_override: string | null;
+  file_extensions: string[];
+  timestamp_path: string | null;
+  model_path: string | null;
+  session_id_path: string | null;
+  request_id_path: string | null;
+  input_tokens_path: string | null;
+  output_tokens_path: string | null;
+  cache_read_tokens_path: string | null;
+  cache_write_tokens_path: string | null;
+  reasoning_tokens_path: string | null;
+  duration_ms_path: string | null;
+  ttft_ms_path: string | null;
+}
+
+export interface CustomProviderRule {
+  rule_id: string;
+  display_name: string;
+  enabled: boolean;
+  protocol_kind: CustomProtocolKind;
+  log_roots: string[];
+  mapping_spec: DeclarativeMappingSpec;
+  updated_at_ms: number;
+}
+
+export interface CustomRuleTestResult {
+  matched: boolean;
+  provider_id: string;
+  model_id: string | null;
+  timestamp_ms: number | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
+  estimated_cost_micro_usd: number;
+  diagnostic: string;
+}
+
+export interface SyncStatusView {
+  enabled: boolean;
+  worker_url: string | null;
+  e2ee_enabled: boolean;
+  e2ee_kdf_salt_hex: string | null;
+  has_bearer_token: boolean;
+  has_e2ee_passphrase: boolean;
+  sse_connected: boolean;
+  last_push_watermark_ms: number;
+  last_pull_watermark_ms: number;
+  last_sync_at_ms: number | null;
+  last_sync_error: string | null;
+  updated_at_ms: number;
+}
+
+export interface SyncRunReport {
+  pushed_hourly_deltas: number;
+  pushed_subscriptions: number;
+  pulled_items: number;
+  applied_hourly_buckets: number;
+  applied_subscriptions: number;
+  server_seq_ms: number | null;
+  synced_at_ms: number;
+}
+
+export interface RemoteSubscriptionSnapshot {
+  device_id: string;
+  device_display_name: string;
+  plan_id: string;
+  window_id: string;
+  provider_id: string;
+  plan_name: string;
+  window_label: string;
+  used_percent: number;
+  resets_at_ms: number | null;
+  source: string;
+  updated_at_ms: number;
 }

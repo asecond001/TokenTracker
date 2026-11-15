@@ -1,0 +1,3 @@
+{"timestamp":"2026-11-15T10:00:00Z","session_id":"kimi-sess-01","cwd":"/workspace/kimi-app","role":"user","content":"Analyze repo"}
+{"timestamp":"2026-11-15T10:00:04Z","session_id":"kimi-sess-01","cwd":"/workspace/kimi-app","id":"kimi-msg-1","model":"kimi-k2-0905-preview","usage":{"prompt_tokens":10000,"completion_tokens":500,"cached_tokens":7500,"reasoning_tokens":100}}
+{"timestamp":1763200815000,"message":{"type":"StatusUpdate","payload":{"model":"kimi-for-coding","token_usage":{"input_other":400,"output":250,"input_cache_read":3000,"input_cache_creation":200}}},"request_id":"kimi-wire-2"}

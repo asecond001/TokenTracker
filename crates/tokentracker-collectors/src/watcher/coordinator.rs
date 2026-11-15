@@ -16,6 +16,12 @@ use crate::error::CollectorResult;
 use crate::providers::antigravity::AntigravityParser;
 use crate::providers::claude_code::ClaudeCodeParser;
 use crate::providers::codex::CodexParser;
+use crate::providers::custom_compatible::CustomRuleLogParser;
+use crate::providers::deepseek_harness::DeepSeekHarnessParser;
+use crate::providers::kimi_code::KimiCodeParser;
+use crate::providers::minimax_code::MiniMaxCodeParser;
+use crate::providers::qcode::QCodeParser;
+use crate::providers::workbuddy::WorkbuddyParser;
 use crate::providers::ProviderLogParser;
 use crate::watcher::tailer::tail_file_incremental;
 
@@ -45,6 +51,11 @@ impl CollectorCoordinator {
             Arc::new(ClaudeCodeParser::new()),
             Arc::new(CodexParser::new()),
             Arc::new(AntigravityParser::new()),
+            Arc::new(KimiCodeParser::new()),
+            Arc::new(WorkbuddyParser::new()),
+            Arc::new(DeepSeekHarnessParser::new()),
+            Arc::new(QCodeParser::new()),
+            Arc::new(MiniMaxCodeParser::new()),
         ];
         Self {
             storage,
@@ -127,6 +138,31 @@ impl CollectorCoordinator {
                     Some(report.scanned_at_ms),
                     None,
                 );
+            }
+        }
+
+        if let Ok(custom_rules) = self.storage.list_custom_provider_rules() {
+            for rule in custom_rules.into_iter().filter(|r| r.enabled) {
+                let custom_parser = CustomRuleLogParser::new(rule);
+                let files = discover_files_for_parser(&custom_parser, None);
+                for file_path in files {
+                    match tail_file_incremental(&self.storage, &custom_parser, &file_path, &device_id)
+                    {
+                        Ok(out) => {
+                            report.files_scanned += 1;
+                            report.events_inserted += out.events_inserted;
+                            report.events_deduplicated += out.events_deduplicated;
+                        }
+                        Err(err) => {
+                            report.errors.push(format!(
+                                "[{}] {}: {}",
+                                custom_parser.provider_id(),
+                                file_path.display(),
+                                err
+                            ));
+                        }
+                    }
+                }
             }
         }
 
@@ -243,6 +279,24 @@ impl CollectorCoordinator {
             {
                 for custom in &cfg.custom_log_paths {
                     let p = PathBuf::from(custom);
+                    if p.is_file() {
+                        if let Some(parent) = p.parent() {
+                            roots.insert(parent.to_path_buf());
+                        }
+                    } else {
+                        roots.insert(p);
+                    }
+                }
+            }
+        }
+        if let Ok(custom_rules) = self.storage.list_custom_provider_rules() {
+            for rule in custom_rules.into_iter().filter(|r| r.enabled) {
+                for raw in rule.log_roots {
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let p = PathBuf::from(trimmed);
                     if p.is_file() {
                         if let Some(parent) = p.parent() {
                             roots.insert(parent.to_path_buf());

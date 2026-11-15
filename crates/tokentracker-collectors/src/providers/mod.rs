@@ -1,7 +1,14 @@
 pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
+pub mod compatible_common;
+pub mod custom_compatible;
+pub mod deepseek_harness;
+pub mod kimi_code;
+pub mod minimax_code;
 pub mod official_api;
+pub mod qcode;
+pub mod workbuddy;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -84,9 +91,9 @@ pub struct ParsedFileBatch {
     pub rate_limits: Vec<ObservedRateLimitWindow>,
 }
 
-/// Compliant local log parser contract for each Phase 1 provider.
+/// Compliant local log parser contract for built-in and declarative providers.
 pub trait ProviderLogParser: Send + Sync {
-    fn provider_id(&self) -> &'static str;
+    fn provider_id(&self) -> &str;
     fn default_roots(&self) -> Vec<PathBuf>;
     fn matches_file(&self, path: &Path) -> bool;
     fn init_context(&self, path: &Path, device_id: &str) -> FileParseContext;

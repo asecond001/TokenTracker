@@ -1,0 +1,2 @@
+{"timestamp":"2026-11-15T13:00:00Z","session_id":"qc-sess-01","cwd":"/projects/qcode-gw","id":"qc-1","model":"qcode-router","routed_model":"claude-sonnet-4-5","usage":{"input_tokens":800,"output_tokens":400,"cache_read_input_tokens":1200}}
+{"timestamp":"2026-11-15T13:00:08Z","session_id":"qc-sess-01","id":"qc-2","model":"qwen3-coder-plus","usage":{"prompt_tokens":5000,"completion_tokens":600,"prompt_tokens_details":{"cached_tokens":3500}}}

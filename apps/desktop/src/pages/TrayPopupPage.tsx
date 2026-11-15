@@ -5,8 +5,10 @@ import { InlineProgressBar } from '../components/InlineProgressBar';
 import {
   formatCost,
   formatCountdown,
+  formatRelativeTime,
   formatTokens,
   formatTps,
+  providerAccentColor,
   providerDisplayName,
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
@@ -89,33 +91,128 @@ export function TrayPopupPage() {
           </span>
         </div>
 
-        {/* Today Metrics Grid (Flat, Hairline Divided, No Shadow Cards) */}
+        {/* Today Metrics Grid + Provider Share Strip (Flat, Hairline Divided, No Shadow Cards) */}
         <div
-          className="grid grid-cols-2 gap-3 pb-3 tabular-nums"
+          className="space-y-2.5 pb-3 tabular-nums"
           style={{ borderBottom: '1px solid var(--border-subtle)' }}
         >
-          <div>
-            <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
-              今日等效金额
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                今日等效金额
+              </div>
+              <div className="text-[18px] font-semibold tracking-tight">
+                {formatCost(summary?.today_cost_micro_usd ?? 0, currency, rate)}
+              </div>
             </div>
-            <div className="text-[18px] font-semibold tracking-tight">
-              {formatCost(summary?.today_cost_micro_usd ?? 0, currency, rate)}
+            <div>
+              <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                今日总 Token
+              </div>
+              <div className="text-[18px] font-semibold tracking-tight">
+                {formatTokens(summary?.today_tokens ?? 0)}
+              </div>
+            </div>
+            <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+              今日请求：{summary?.today_requests ?? 0} 次
+            </div>
+            <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+              启用数据源：{summary?.active_providers_count ?? 0} 个
             </div>
           </div>
-          <div>
-            <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
-              今日总 Token
+
+          {(summary?.provider_shares ?? []).length > 0 && (
+            <div className="space-y-1.5 pt-0.5">
+              <div
+                className="h-1.5 w-full rounded-sm overflow-hidden flex"
+                style={{ backgroundColor: 'var(--bg-hover)' }}
+              >
+                {(summary?.provider_shares ?? []).map((share) => (
+                  <div
+                    key={share.key}
+                    style={{
+                      width: `${Math.max(2, share.token_share_percent)}%`,
+                      backgroundColor: providerAccentColor(share.key),
+                    }}
+                    title={`${providerDisplayName(share.key)} ${share.token_share_percent.toFixed(1)}%`}
+                  />
+                ))}
+              </div>
+              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[10.5px]">
+                {(summary?.provider_shares ?? []).slice(0, 4).map((share) => (
+                  <span key={share.key} className="inline-flex items-center gap-1">
+                    <span
+                      className="inline-block w-1.5 h-1.5 rounded-full"
+                      style={{ backgroundColor: providerAccentColor(share.key) }}
+                    />
+                    <span style={{ color: 'var(--text-secondary)' }}>
+                      {providerDisplayName(share.key)}
+                    </span>
+                    <span style={{ color: 'var(--text-muted)' }}>
+                      {share.token_share_percent.toFixed(0)}%
+                    </span>
+                  </span>
+                ))}
+              </div>
             </div>
-            <div className="text-[18px] font-semibold tracking-tight">
-              {formatTokens(summary?.today_tokens ?? 0)}
+          )}
+        </div>
+
+        {/* Active / Recent Sessions (Top 3, click opens Main Workspace) */}
+        <div
+          className="space-y-1.5 pb-2.5"
+          style={{ borderBottom: '1px solid var(--border-subtle)' }}
+        >
+          <div
+            className="text-[10.5px] font-semibold uppercase tracking-wider"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            活跃会话（15m）
+          </div>
+          {(summary?.active_sessions ?? []).slice(0, 3).map((session) => {
+            const isLive = session.activity_state === 'active';
+            return (
+              <button
+                key={`${session.provider_id}-${session.session_key}`}
+                type="button"
+                onClick={() => {
+                  void ipc.openMainWorkspace('overview', session.provider_id);
+                }}
+                className="row-interactive w-full text-left px-1.5 py-1 rounded flex items-center justify-between gap-2 cursor-pointer"
+                title="点击打开主工作台查看该 Provider 实时用量"
+              >
+                <div className="min-w-0 flex items-center gap-1.5">
+                  <span
+                    className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${isLive ? 'collector-dot-live' : ''}`}
+                    style={{
+                      backgroundColor: isLive ? 'var(--accent-emerald)' : 'var(--text-muted)',
+                    }}
+                  />
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-medium truncate">
+                      {providerDisplayName(session.provider_id)} · {session.model_id}
+                    </div>
+                    <div className="text-[10px] truncate" style={{ color: 'var(--text-muted)' }}>
+                      {session.project_label} · {formatRelativeTime(session.last_active_at_ms)}
+                    </div>
+                  </div>
+                </div>
+                <div className="shrink-0 text-right tabular-nums">
+                  <div className="text-[11px] font-medium">
+                    {formatTokens(session.total_tokens)}
+                  </div>
+                  <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                    {formatCost(session.estimated_cost_micro_usd, currency, rate)}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+          {(summary?.active_sessions ?? []).length === 0 && (
+            <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              15 分钟内暂无活跃或近期会话
             </div>
-          </div>
-          <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-            今日请求：{summary?.today_requests ?? 0} 次
-          </div>
-          <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-            启用数据源：{summary?.active_providers_count ?? 0} 个
-          </div>
+          )}
         </div>
 
         {/* Active Subscription Windows */}

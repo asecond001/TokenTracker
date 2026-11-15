@@ -106,8 +106,20 @@ export function providerDisplayName(providerId: string): string {
       return 'Codex';
     case 'antigravity':
       return 'Antigravity';
+    case 'kimi_code':
+      return 'Kimi Code';
+    case 'workbuddy':
+      return 'Workbuddy';
+    case 'deepseek_harness':
+      return 'DeepSeek Harness';
+    case 'qcode':
+      return 'QCode';
+    case 'minimax_code':
+      return 'MiniMax Code';
     default:
-      return providerId;
+      return providerId.startsWith('custom_')
+        ? `自定义 (${providerId.slice(7)})`
+        : providerId;
   }
 }
 
@@ -119,8 +131,18 @@ export function providerAccentColor(providerId: string): string {
       return '#10b981';
     case 'antigravity':
       return '#6366f1';
+    case 'kimi_code':
+      return '#0ea5e9';
+    case 'workbuddy':
+      return '#ec4899';
+    case 'deepseek_harness':
+      return '#3b82f6';
+    case 'qcode':
+      return '#14b8a6';
+    case 'minimax_code':
+      return '#a855f7';
     default:
-      return '#38bdf8';
+      return providerId.startsWith('custom_') ? '#8b5cf6' : '#38bdf8';
   }
 }
 

@@ -1,0 +1,3 @@
+{"timestamp":"2026-11-15T11:00:00Z","session_id":"wb-sess-01","cwd":"C:\\dev\\workbuddy-proj","role":"user","content":"Refactor"}
+{"timestamp":"2026-11-15T11:00:05Z","session_id":"wb-sess-01","id":"wb-1","model":"workbuddy-auto","routed_model":"claude-sonnet-4-5","usage":{"input_tokens":1200,"output_tokens":300,"cache_read_input_tokens":4000}}
+{"timestamp":"2026-11-15T11:00:10Z","session_id":"wb-sess-01","id":"wb-2","model":"workbuddy-auto","backend_model":"deepseek-chat","usage":{"prompt_tokens":2000,"completion_tokens":400,"prompt_cache_hit_tokens":1500,"prompt_cache_miss_tokens":500}}

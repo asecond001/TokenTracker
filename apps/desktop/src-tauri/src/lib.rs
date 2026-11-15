@@ -50,6 +50,8 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::get_bootstrap_state,
             commands::get_overview,
@@ -81,6 +83,19 @@ pub fn run() {
             commands::get_background_image_data_url,
             commands::export_monthly_report,
             commands::preview_sync_envelope_v1,
+            commands::list_custom_provider_rules,
+            commands::upsert_custom_provider_rule,
+            commands::delete_custom_provider_rule,
+            commands::test_custom_provider_sample_line,
+            commands::get_provider_balances,
+            commands::refresh_provider_balance,
+            commands::list_devices,
+            commands::get_sync_status,
+            commands::update_sync_config,
+            commands::set_sync_credentials,
+            commands::clear_sync_credentials,
+            commands::trigger_cloud_sync_now,
+            commands::get_remote_subscription_snapshots,
             commands::open_main_workspace,
             commands::quit_application,
         ])

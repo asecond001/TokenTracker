@@ -2,8 +2,12 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   AnalyticsFilter,
   AppPreferences,
+  BalanceRefreshOutcome,
   BootstrapState,
   CatalogSyncResult,
+  CustomProviderRule,
+  CustomRuleTestResult,
+  DeviceRecord,
   ExportReportResult,
   IngestionCursor,
   ModelPricingEntry,
@@ -13,13 +17,17 @@ import type {
   ObservedRateLimitWindow,
   OfficialApiReconcileResult,
   OverviewReport,
+  ProviderBalanceSnapshot,
   ProviderConfig,
+  RemoteSubscriptionSnapshot,
   ScanReport,
   SpeedLatencyReport,
   SubscriptionPlan,
   SubscriptionPlanStatus,
   SubscriptionPlanTemplate,
   SyncEnvelopeV1,
+  SyncRunReport,
+  SyncStatusView,
   TraySummary,
   TrendsQuery,
   TrendsReport,
@@ -56,6 +64,7 @@ function defaultPreviewPreferences(now: number): AppPreferences {
     bg_blur_px: 16,
     auto_sync_pricing: true,
     exchange_rate_auto: true,
+    auto_check_updates: true,
     last_rate_sync_at_ms: null,
     last_pricing_sync_at_ms: null,
     updated_at_ms: now,
@@ -320,6 +329,56 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
             last_error: null,
             updated_at_ms: now,
           },
+          {
+            provider_id: 'kimi_code',
+            enabled: true,
+            collection_mode: 'local_log',
+            custom_log_paths: [],
+            has_credential: false,
+            last_sync_at_ms: null,
+            last_error: null,
+            updated_at_ms: now,
+          },
+          {
+            provider_id: 'workbuddy',
+            enabled: true,
+            collection_mode: 'local_log',
+            custom_log_paths: [],
+            has_credential: false,
+            last_sync_at_ms: null,
+            last_error: null,
+            updated_at_ms: now,
+          },
+          {
+            provider_id: 'deepseek_harness',
+            enabled: true,
+            collection_mode: 'local_log',
+            custom_log_paths: [],
+            has_credential: false,
+            last_sync_at_ms: null,
+            last_error: null,
+            updated_at_ms: now,
+          },
+          {
+            provider_id: 'qcode',
+            enabled: true,
+            collection_mode: 'local_log',
+            custom_log_paths: [],
+            has_credential: false,
+            last_sync_at_ms: null,
+            last_error: null,
+            updated_at_ms: now,
+          },
+          {
+            provider_id: 'minimax_code',
+            enabled: true,
+            collection_mode: 'local_log',
+            custom_log_paths: [],
+            has_credential: false,
+            last_sync_at_ms: null,
+            last_error: null,
+            updated_at_ms: now,
+          },
         ],
         collector_watching: true,
         otlp_running: false,
@@ -338,6 +397,8 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
       const data: OverviewReport = {
         total_tokens: 0,
         total_cost_micro_usd: 0,
+        today_tokens: 0,
+        today_cost_micro_usd: 0,
         cache_hit_ratio: 0,
         avg_output_tps: 0,
         peak_output_tps: 0,
@@ -363,6 +424,9 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
         ],
         provider_series: [],
         providers: [],
+        provider_shares: [],
+        top_model_shares: [],
+        active_sessions: [],
       };
       return data as T;
     }
@@ -397,7 +461,42 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
     case 'get_provider_configs':
     case 'get_ingestion_cursors':
     case 'get_observed_rate_limits':
+    case 'list_custom_provider_rules':
+    case 'upsert_custom_provider_rule':
+    case 'delete_custom_provider_rule':
+    case 'get_provider_balances':
       return [] as T;
+    case 'test_custom_provider_sample_line':
+      return {
+        matched: false,
+        provider_id: 'custom_preview',
+        model_id: null,
+        timestamp_ms: null,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        estimated_cost_micro_usd: 0,
+        diagnostic: '浏览器预览模式暂未启用 Rust 声明式规则引擎',
+      } as T;
+    case 'refresh_provider_balance':
+      return {
+        snapshot: {
+          provider_id: (args?.providerId as string | undefined) ?? 'kimi_code',
+          currency: 'CNY',
+          total_balance_micro: null,
+          granted_balance_micro: null,
+          topped_up_balance_micro: null,
+          daily_quota_used_micro: null,
+          daily_quota_limit_micro: null,
+          fetched_at_ms: now,
+        },
+        rate_limits_updated: 0,
+        endpoint: 'preview://balance',
+        from_cache: true,
+        cooldown_remaining_secs: 60,
+      } as T;
     case 'get_subscription_templates':
       return previewSubscriptionTemplates() as T;
     case 'get_speed_latency':
@@ -409,6 +508,8 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
         today_requests: 0,
         latest_output_tps: null,
         subscriptions: [],
+        provider_shares: [],
+        active_sessions: [],
         currency: 'USD',
         usd_to_cny_rate: '7.25',
         active_providers_count: 3,
@@ -455,6 +556,91 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
         hourly_deltas: [],
         subscription_snapshots: [],
       } as T;
+    case 'list_devices':
+      return [
+        {
+          device_id: 'preview-local-device',
+          device_name: 'Local Workstation',
+          platform: 'windows',
+          created_at_ms: now - 86_400_000,
+        },
+      ] as T;
+    case 'get_sync_status':
+      return {
+        enabled: false,
+        worker_url: null,
+        e2ee_enabled: false,
+        e2ee_kdf_salt_hex: null,
+        has_bearer_token: false,
+        has_e2ee_passphrase: false,
+        sse_connected: false,
+        last_push_watermark_ms: 0,
+        last_pull_watermark_ms: 0,
+        last_sync_at_ms: null,
+        last_sync_error: null,
+        updated_at_ms: now,
+      } as T;
+    case 'update_sync_config': {
+      const enabled = Boolean(args?.enabled);
+      const workerUrl = (args?.workerUrl as string | null | undefined) ?? null;
+      const e2eeEnabled = Boolean(args?.e2eeEnabled);
+      return {
+        enabled,
+        worker_url: workerUrl,
+        e2ee_enabled: e2eeEnabled,
+        e2ee_kdf_salt_hex: e2eeEnabled ? '00112233445566778899aabbccddeeff' : null,
+        has_bearer_token: false,
+        has_e2ee_passphrase: false,
+        sse_connected: false,
+        last_push_watermark_ms: 0,
+        last_pull_watermark_ms: 0,
+        last_sync_at_ms: null,
+        last_sync_error: null,
+        updated_at_ms: now,
+      } as T;
+    }
+    case 'set_sync_credentials':
+      return {
+        enabled: false,
+        worker_url: null,
+        e2ee_enabled: false,
+        e2ee_kdf_salt_hex: null,
+        has_bearer_token: Boolean(args?.bearerToken),
+        has_e2ee_passphrase: Boolean(args?.e2eePassphrase),
+        sse_connected: false,
+        last_push_watermark_ms: 0,
+        last_pull_watermark_ms: 0,
+        last_sync_at_ms: null,
+        last_sync_error: null,
+        updated_at_ms: now,
+      } as T;
+    case 'clear_sync_credentials':
+      return {
+        enabled: false,
+        worker_url: null,
+        e2ee_enabled: false,
+        e2ee_kdf_salt_hex: null,
+        has_bearer_token: false,
+        has_e2ee_passphrase: false,
+        sse_connected: false,
+        last_push_watermark_ms: 0,
+        last_pull_watermark_ms: 0,
+        last_sync_at_ms: null,
+        last_sync_error: null,
+        updated_at_ms: now,
+      } as T;
+    case 'trigger_cloud_sync_now':
+      return {
+        pushed_hourly_deltas: 0,
+        pushed_subscriptions: 0,
+        pulled_items: 0,
+        applied_hourly_buckets: 0,
+        applied_subscriptions: 0,
+        server_seq_ms: null,
+        synced_at_ms: now,
+      } as T;
+    case 'get_remote_subscription_snapshots':
+      return [] as T;
     default:
       return {} as T;
   }
@@ -573,7 +759,56 @@ export const ipc = {
   previewSyncEnvelopeV1: (sinceWatermarkMs: number): Promise<SyncEnvelopeV1> =>
     callIpc('preview_sync_envelope_v1', { sinceWatermarkMs }),
 
-  openMainWorkspace: (): Promise<void> => callIpc('open_main_workspace'),
+  listCustomProviderRules: (): Promise<CustomProviderRule[]> =>
+    callIpc('list_custom_provider_rules'),
+
+  upsertCustomProviderRule: (rule: CustomProviderRule): Promise<CustomProviderRule[]> =>
+    callIpc('upsert_custom_provider_rule', { rule }),
+
+  deleteCustomProviderRule: (ruleId: string): Promise<CustomProviderRule[]> =>
+    callIpc('delete_custom_provider_rule', { ruleId }),
+
+  testCustomProviderSampleLine: (
+    rule: CustomProviderRule,
+    sampleLine: string
+  ): Promise<CustomRuleTestResult> =>
+    callIpc('test_custom_provider_sample_line', { rule, sampleLine }),
+
+  getProviderBalances: (): Promise<ProviderBalanceSnapshot[]> =>
+    callIpc('get_provider_balances'),
+
+  refreshProviderBalance: (providerId: string): Promise<BalanceRefreshOutcome> =>
+    callIpc('refresh_provider_balance', { providerId }),
+
+  listDevices: (): Promise<DeviceRecord[]> => callIpc('list_devices'),
+
+  getSyncStatus: (): Promise<SyncStatusView> => callIpc('get_sync_status'),
+
+  updateSyncConfig: (
+    enabled: boolean,
+    workerUrl: string | null,
+    e2eeEnabled: boolean
+  ): Promise<SyncStatusView> =>
+    callIpc('update_sync_config', { enabled, workerUrl, e2eeEnabled }),
+
+  setSyncCredentials: (
+    bearerToken: string | null,
+    e2eePassphrase: string | null
+  ): Promise<SyncStatusView> =>
+    callIpc('set_sync_credentials', { bearerToken, e2eePassphrase }),
+
+  clearSyncCredentials: (): Promise<SyncStatusView> => callIpc('clear_sync_credentials'),
+
+  triggerCloudSyncNow: (): Promise<SyncRunReport> => callIpc('trigger_cloud_sync_now'),
+
+  getRemoteSubscriptionSnapshots: (): Promise<RemoteSubscriptionSnapshot[]> =>
+    callIpc('get_remote_subscription_snapshots'),
+
+  openMainWorkspace: (page?: string, providerId?: string | null): Promise<void> =>
+    callIpc('open_main_workspace', {
+      page: page ?? null,
+      providerId: providerId ?? null,
+    }),
 
   quitApplication: (): Promise<void> => callIpc('quit_application'),
 };

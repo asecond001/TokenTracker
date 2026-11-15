@@ -16,6 +16,7 @@ import type {
   CurrencyCode,
   ObservedRateLimitWindow,
   QuotaUnit,
+  RemoteSubscriptionSnapshot,
   SubscriptionPlan,
   SubscriptionPlanStatus,
   SubscriptionPlanTemplate,
@@ -26,6 +27,11 @@ const PROVIDERS: Array<{ id: string; label: string }> = [
   { id: 'claude_code', label: 'Claude Code' },
   { id: 'codex', label: 'Codex' },
   { id: 'antigravity', label: 'Antigravity' },
+  { id: 'kimi_code', label: 'Kimi Code' },
+  { id: 'workbuddy', label: 'Workbuddy' },
+  { id: 'deepseek_harness', label: 'DeepSeek Harness' },
+  { id: 'qcode', label: 'QCode' },
+  { id: 'minimax_code', label: 'MiniMax Code' },
 ];
 
 interface WindowFormDraft {
@@ -186,6 +192,33 @@ export function SubscriptionsPage() {
     queryFn: () => ipc.getSubscriptionTemplates(),
     staleTime: Infinity,
   });
+
+  const { data: remoteSnapshots = [] } = useQuery({
+    queryKey: ['remote-subscriptions'],
+    queryFn: () => ipc.getRemoteSubscriptionSnapshots(),
+    refetchInterval: 15_000,
+  });
+
+  const remoteDeviceGroups = useMemo(() => {
+    const safeSnapshots = Array.isArray(remoteSnapshots) ? remoteSnapshots : [];
+    const grouped = new Map<
+      string,
+      { device_id: string; device_display_name: string; items: RemoteSubscriptionSnapshot[] }
+    >();
+    for (const snap of safeSnapshots) {
+      const existing = grouped.get(snap.device_id);
+      if (existing) {
+        existing.items.push(snap);
+      } else {
+        grouped.set(snap.device_id, {
+          device_id: snap.device_id,
+          device_display_name: snap.device_display_name || snap.device_id,
+          items: [snap],
+        });
+      }
+    }
+    return Array.from(grouped.values());
+  }, [remoteSnapshots]);
 
   const configuredPlans = useMemo(
     () => plans.filter((s) => s.plan.is_user_configured),
@@ -812,6 +845,94 @@ export function SubscriptionsPage() {
                         <Plus className="w-3.5 h-3.5" />
                         <span>绑定订阅</span>
                       </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* Section 3: Cross-Device Synced Remote Subscription Snapshots (Read-only) */}
+          {remoteDeviceGroups.length > 0 && (
+            <section className="space-y-2">
+              <div>
+                <h2
+                  className="text-[11px] font-semibold uppercase tracking-wider"
+                  style={{ color: 'var(--text-muted)' }}
+                >
+                  跨设备同步配额快照（只读）
+                </h2>
+                <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+                  来自 Cloudflare Worker 同步的远端设备订阅窗口状态，与本机可编辑套餐完全隔离展示
+                </p>
+              </div>
+
+              <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                {remoteDeviceGroups.map((devGroup) => (
+                  <div
+                    key={devGroup.device_id}
+                    className="py-5 px-2 grid grid-cols-12 gap-5 items-start"
+                    style={{ borderBottom: '1px solid var(--border-hairline)' }}
+                  >
+                    <div className="col-span-12 lg:col-span-3 space-y-1">
+                      <div className="text-[14px] font-semibold">{devGroup.device_display_name}</div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span
+                          className="px-1.5 py-0.5 rounded text-[10.5px]"
+                          style={{
+                            backgroundColor: 'var(--bg-elevated)',
+                            border: '1px solid var(--border-hairline)',
+                            color: 'var(--accent-sky)',
+                          }}
+                        >
+                          只读远端快照
+                        </span>
+                        <span
+                          className="text-[10.5px] font-mono"
+                          style={{ color: 'var(--text-muted)' }}
+                        >
+                          {devGroup.device_id.slice(0, 8)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="col-span-12 lg:col-span-9 space-y-3">
+                      {devGroup.items.map((snap) => {
+                        const pct = Number.isFinite(snap.used_percent)
+                          ? Math.max(0, Math.min(100, snap.used_percent))
+                          : 0;
+                        const resetSecs =
+                          snap.resets_at_ms !== null
+                            ? Math.max(0, Math.floor((snap.resets_at_ms - Date.now()) / 1000))
+                            : null;
+                        return (
+                          <div
+                            key={`${snap.device_id}-${snap.plan_id}-${snap.window_id}`}
+                            className="space-y-1"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2 text-[12px] tabular-nums">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span
+                                  className="inline-block w-2 h-2 rounded-full shrink-0"
+                                  style={{ backgroundColor: providerAccentColor(snap.provider_id) }}
+                                />
+                                <span className="font-medium">
+                                  {providerDisplayName(snap.provider_id)} · {snap.plan_name} ·{' '}
+                                  {snap.window_label}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-3">
+                                <span style={{ color: 'var(--text-muted)' }}>
+                                  {resetSecs !== null ? `重置 ${formatCountdown(resetSecs)} · ` : ''}
+                                  同步于 {formatRelativeTime(snap.updated_at_ms)}
+                                </span>
+                                <span className="font-semibold">{pct.toFixed(1)}%</span>
+                              </div>
+                            </div>
+                            <InlineProgressBar percent={pct} heightPx={6} />
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 ))}

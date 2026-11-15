@@ -5,6 +5,7 @@ import { Sidebar } from './components/Sidebar';
 import { TitleBar } from './components/TitleBar';
 import { WorkspaceBackdrop } from './components/WorkspaceBackdrop';
 import { ipc, isTauriRuntime } from './lib/ipc';
+import { checkForUpdates } from './lib/updater';
 import { DataSourcesPage } from './pages/DataSourcesPage';
 import { ModelsPricingPage } from './pages/ModelsPricingPage';
 import { MonthlyPage } from './pages/MonthlyPage';
@@ -14,14 +15,30 @@ import { SpeedLatencyPage } from './pages/SpeedLatencyPage';
 import { SubscriptionsPage } from './pages/SubscriptionsPage';
 import { TrayPopupPage } from './pages/TrayPopupPage';
 import { TrendsPage } from './pages/TrendsPage';
-import { syncDocumentAndNativeTheme, useWorkspaceStore } from './stores/workspaceStore';
+import {
+  type NavPage,
+  syncDocumentAndNativeTheme,
+  useWorkspaceStore,
+} from './stores/workspaceStore';
 import type {
   AppPreferences,
   BootstrapState,
   CurrencyCode,
   ThemeMode,
   TraySummary,
+  WorkspaceNavigatePayload,
 } from './types/ipc';
+
+const VALID_NAV_PAGES: ReadonlyArray<NavPage> = [
+  'overview',
+  'trends',
+  'monthly',
+  'models',
+  'subscriptions',
+  'speed',
+  'sources',
+  'preferences',
+];
 
 function normalizeThemeMode(raw: string | undefined | null): ThemeMode {
   return raw === 'light' || raw === 'dark' || raw === 'system' ? raw : 'dark';
@@ -74,6 +91,8 @@ export function App() {
     activePage,
     theme,
     tzOffsetMinutes,
+    setActivePage,
+    setProviderFilter,
     setCurrency,
     setUsdToCnyRate,
     setTheme,
@@ -174,13 +193,53 @@ export function App() {
       })
       .catch(() => {});
 
+    void listen<WorkspaceNavigatePayload>('navigate-workspace', (event) => {
+      const payload = event.payload;
+      if (!payload) return;
+      if (payload.page && VALID_NAV_PAGES.includes(payload.page as NavPage)) {
+        setActivePage(payload.page as NavPage);
+      }
+      if (payload.provider_id !== undefined) {
+        setProviderFilter(payload.provider_id || 'all');
+      }
+    })
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+        } else {
+          unlisteners.push(unlisten);
+        }
+      })
+      .catch(() => {});
+
     return () => {
       disposed = true;
       for (const unlisten of unlisteners) {
         unlisten();
       }
     };
-  }, [queryClient]);
+  }, [queryClient, setActivePage, setProviderFilter]);
+
+  const autoCheckUpdates =
+    (preferences ?? bootstrap?.preferences)?.auto_check_updates ?? true;
+
+  // Periodic quiet background check for signed desktop releases (offline-safe)
+  useEffect(() => {
+    if (isTrayView || !autoCheckUpdates || !isTauriRuntime()) {
+      return;
+    }
+    const startupTimer = window.setTimeout(() => {
+      void checkForUpdates(false);
+    }, 10_000);
+    const periodicTimer = window.setInterval(() => {
+      void checkForUpdates(false);
+    }, 12 * 60 * 60 * 1000);
+
+    return () => {
+      window.clearTimeout(startupTimer);
+      window.clearInterval(periodicTimer);
+    };
+  }, [isTrayView, autoCheckUpdates]);
 
   const applyPreferencesOptimistically = useCallback(
     (patch: Partial<AppPreferences>): AppPreferences | null => {
