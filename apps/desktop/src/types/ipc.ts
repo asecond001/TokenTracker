@@ -510,6 +510,27 @@ export interface BalanceRefreshOutcome {
   cooldown_remaining_secs: number;
 }
 
+export interface PaygAccount {
+  account_id: string;
+  provider_id: string;
+  account_name: string;
+  enabled: boolean;
+  manual_balance_micro_usd: number | null;
+  balance_anchor_ms: number | null;
+  monthly_budget_micro_usd: number | null;
+  is_auto: boolean;
+  updated_at_ms: number;
+}
+
+export interface PaygAccountStatus {
+  account: PaygAccount;
+  official_balance: ProviderBalanceSnapshot | null;
+  remaining_manual_balance_micro_usd: number | null;
+  today_cost_micro_usd: number;
+  month_cost_micro_usd: number;
+  budget_used_percent: number | null;
+}
+
 export type CustomProtocolKind =
   | 'openai_jsonl'
   | 'anthropic_jsonl'

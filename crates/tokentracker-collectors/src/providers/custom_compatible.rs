@@ -83,6 +83,7 @@ impl ProviderLogParser for CustomRuleLogParser {
         Some(ParsedLineResult {
             event: Some(event),
             rate_limits: Vec::new(),
+            balance: None,
         })
     }
 

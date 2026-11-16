@@ -393,11 +393,9 @@ pub fn parse_compatible_jsonl_line(
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    if let Some(explicit_title) = first_str(&val, &["title", "session_title", "summary"])
-        .or_else(|| envelope.and_then(|e| first_str(e, &["title", "session_title", "summary"])))
-        .or_else(|| {
-            nested_payload.and_then(|p| first_str(p, &["title", "session_title", "summary"]))
-        })
+    if let Some(explicit_title) = first_str(&val, &["title", "session_title"])
+        .or_else(|| envelope.and_then(|e| first_str(e, &["title", "session_title"])))
+        .or_else(|| nested_payload.and_then(|p| first_str(p, &["title", "session_title"])))
     {
         ctx.record_session_title(explicit_title, "explicit", ts_ms);
     }
@@ -562,5 +560,6 @@ pub fn parse_compatible_jsonl_line(
             cache_saved_micro_usd: 0,
         }),
         rate_limits: Vec::new(),
+        balance: None,
     })
 }

@@ -8,11 +8,12 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use crate::domain::{
     is_valid_tps_sample, provider_ids, sanitize_session_title, AppPreferences, CollectionMode,
     CurrencyCode, CustomProtocolKind, CustomProviderRule, DeclarativeMappingSpec, DeviceRecord,
-    IngestionCursor, ModelPricingEntry, NormalizedUsageEvent, ObservedRateLimitWindow,
-    ProviderBalanceSnapshot, ProviderConfig, QuotaUnit, RemoteSubscriptionSnapshot,
-    RemoteSyncApplyResult, SessionTitleRecord, SubscriptionPlan, SubscriptionWindowRule,
-    SyncConfigState, SyncEnvelopeV1, SyncHourlyDelta, SyncSubscriptionSnapshot,
-    MAX_VALID_OUTPUT_TPS, MIN_VALID_TPS_DURATION_MS, MIN_VALID_TPS_OUTPUT_TOKENS,
+    IngestionCursor, ModelPricingEntry, NormalizedUsageEvent, ObservedRateLimitWindow, PaygAccount,
+    PaygAccountStatus, ProviderBalanceSnapshot, ProviderConfig, QuotaUnit,
+    RemoteSubscriptionSnapshot, RemoteSyncApplyResult, SessionTitleRecord, SubscriptionPlan,
+    SubscriptionWindowRule, SyncConfigState, SyncEnvelopeV1, SyncHourlyDelta,
+    SyncSubscriptionSnapshot, MAX_VALID_OUTPUT_TPS, MIN_VALID_TPS_DURATION_MS,
+    MIN_VALID_TPS_OUTPUT_TOKENS,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::pricing::{
@@ -471,45 +472,7 @@ impl Storage {
             }
 
             if !session_titles.is_empty() {
-                let mut title_stmt = tx.prepare_cached(
-                    r#"
-                    INSERT INTO session_titles (session_key, provider_id, title, source, updated_at_ms)
-                    VALUES (?1, ?2, ?3, ?4, ?5)
-                    ON CONFLICT(session_key) DO UPDATE SET
-                        title = excluded.title,
-                        source = excluded.source,
-                        updated_at_ms = excluded.updated_at_ms
-                    WHERE excluded.source = 'explicit'
-                       OR (
-                           session_titles.source = 'derived'
-                           AND excluded.source = 'user_prompt'
-                       )
-                       OR (
-                           session_titles.source = excluded.source
-                           AND session_titles.source != 'explicit'
-                           AND (
-                               excluded.updated_at_ms < session_titles.updated_at_ms
-                               OR LENGTH(TRIM(session_titles.title)) = 0
-                           )
-                       )
-                    "#,
-                )?;
-                for rec in session_titles {
-                    if let Some(clean_title) = sanitize_session_title(&rec.title) {
-                        let source = if rec.source == "explicit" {
-                            "explicit"
-                        } else {
-                            "derived"
-                        };
-                        title_stmt.execute(params![
-                            rec.session_key,
-                            rec.provider_id,
-                            clean_title,
-                            source,
-                            rec.updated_at_ms,
-                        ])?;
-                    }
-                }
+                upsert_session_titles_conn(&tx, session_titles)?;
             }
 
             if let Some(cur) = cursor {
@@ -572,6 +535,18 @@ impl Storage {
                 inserted,
                 deduplicated: events.len().saturating_sub(inserted),
             })
+        })
+    }
+
+    pub fn upsert_session_titles(&self, session_titles: &[SessionTitleRecord]) -> CoreResult<usize> {
+        if session_titles.is_empty() {
+            return Ok(0);
+        }
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let count = upsert_session_titles_conn(&tx, session_titles)?;
+            tx.commit()?;
+            Ok(count)
         })
     }
 
@@ -917,7 +892,7 @@ impl Storage {
     pub fn upsert_subscription_plan(&self, plan: &SubscriptionPlan) -> CoreResult<()> {
         let now_ms = Utc::now().timestamp_millis();
         let windows_json = serde_json::to_string(&plan.windows)?;
-        let is_auto = plan.plan_id.starts_with("auto_") || plan.auto_source.is_some();
+        let is_auto = plan.auto_source.is_some();
         self.with_conn_mut(|conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if !is_auto {
@@ -925,17 +900,18 @@ impl Storage {
                     r#"
                     DELETE FROM subscription_plans
                     WHERE provider_id = ?1
+                      AND plan_id != ?2
                       AND (plan_id LIKE 'auto_%' OR auto_source IS NOT NULL)
                       AND user_customized = 0
                     "#,
-                    params![plan.provider_id],
+                    params![plan.provider_id, plan.plan_id],
                 )?;
             }
             tx.execute(
                 r#"
                 INSERT INTO subscription_plans
                     (plan_id, provider_id, plan_name, enabled, monthly_fee_micro_usd, windows_json, is_user_configured, auto_source, user_customized, user_dismissed, updated_at_ms)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, 0, ?9)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, 1, 0, ?8)
                 ON CONFLICT(plan_id) DO UPDATE SET
                     provider_id = excluded.provider_id,
                     plan_name = excluded.plan_name,
@@ -943,7 +919,7 @@ impl Storage {
                     monthly_fee_micro_usd = excluded.monthly_fee_micro_usd,
                     windows_json = excluded.windows_json,
                     is_user_configured = 1,
-                    auto_source = COALESCE(excluded.auto_source, subscription_plans.auto_source),
+                    auto_source = excluded.auto_source,
                     user_customized = 1,
                     user_dismissed = 0,
                     updated_at_ms = excluded.updated_at_ms
@@ -956,7 +932,6 @@ impl Storage {
                     plan.monthly_fee_micro_usd,
                     windows_json,
                     plan.auto_source,
-                    i64::from(is_auto),
                     now_ms,
                 ],
             )?;
@@ -1012,6 +987,14 @@ impl Storage {
                 "#,
                 params![provider_id, now_ms],
             )?;
+            conn.execute(
+                r#"
+                UPDATE payg_accounts
+                SET user_dismissed = 0, enabled = 1, updated_at_ms = ?2
+                WHERE provider_id = ?1 AND is_auto = 1
+                "#,
+                params![provider_id, now_ms],
+            )?;
             Ok(())
         })
     }
@@ -1029,6 +1012,10 @@ impl Storage {
             )?;
             tx.execute(
                 "DELETE FROM subscription_plans WHERE provider_id = ?1 AND auto_source = 'official_api' AND user_customized = 0",
+                params![provider_id],
+            )?;
+            tx.execute(
+                "DELETE FROM payg_accounts WHERE provider_id = ?1 AND is_auto = 1",
                 params![provider_id],
             )?;
             tx.commit()?;
@@ -1415,8 +1402,9 @@ impl Storage {
     }
 
     pub fn upsert_provider_balance(&self, balance: &ProviderBalanceSnapshot) -> CoreResult<()> {
-        self.with_conn(|conn| {
-            conn.execute(
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
                 r#"
                 INSERT INTO provider_balances (
                     provider_id, currency, total_balance_micro, granted_balance_micro,
@@ -1443,7 +1431,293 @@ impl Storage {
                     balance.fetched_at_ms,
                 ],
             )?;
+            sync_auto_payg_for_balance_conn(&tx, balance)?;
+            tx.commit()?;
             Ok(())
+        })
+    }
+
+    pub fn upsert_provider_balance_if_newer(
+        &self,
+        balance: &ProviderBalanceSnapshot,
+    ) -> CoreResult<()> {
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
+                r#"
+                INSERT INTO provider_balances (
+                    provider_id, currency, total_balance_micro, granted_balance_micro,
+                    topped_up_balance_micro, daily_quota_used_micro, daily_quota_limit_micro,
+                    fetched_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(provider_id) DO UPDATE SET
+                    currency = excluded.currency,
+                    total_balance_micro = excluded.total_balance_micro,
+                    granted_balance_micro = excluded.granted_balance_micro,
+                    topped_up_balance_micro = excluded.topped_up_balance_micro,
+                    daily_quota_used_micro = excluded.daily_quota_used_micro,
+                    daily_quota_limit_micro = excluded.daily_quota_limit_micro,
+                    fetched_at_ms = excluded.fetched_at_ms
+                WHERE excluded.fetched_at_ms >= provider_balances.fetched_at_ms
+                "#,
+                params![
+                    balance.provider_id,
+                    balance.currency,
+                    balance.total_balance_micro,
+                    balance.granted_balance_micro,
+                    balance.topped_up_balance_micro,
+                    balance.daily_quota_used_micro,
+                    balance.daily_quota_limit_micro,
+                    balance.fetched_at_ms,
+                ],
+            )?;
+            sync_auto_payg_for_balance_conn(&tx, balance)?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn upsert_payg_account(&self, account: &PaygAccount) -> CoreResult<()> {
+        let account_id = account.account_id.trim();
+        let provider_id = account.provider_id.trim();
+        let account_name = account.account_name.trim();
+        if account_id.is_empty() || provider_id.is_empty() || account_name.is_empty() {
+            return Err(CoreError::Validation(
+                "PAYG account_id, provider_id, and account_name cannot be empty".to_string(),
+            ));
+        }
+        let now_ms = Utc::now().timestamp_millis();
+        let updated_at_ms = if account.updated_at_ms > 0 {
+            account.updated_at_ms
+        } else {
+            now_ms
+        };
+        let is_auto = account.is_auto || account_id.starts_with("auto_");
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if !is_auto {
+                tx.execute(
+                    "DELETE FROM payg_accounts WHERE provider_id = ?1 AND account_id != ?2 AND is_auto = 1",
+                    params![provider_id, account_id],
+                )?;
+            }
+            tx.execute(
+                r#"
+                INSERT INTO payg_accounts (
+                    account_id, provider_id, account_name, enabled,
+                    manual_balance_micro_usd, balance_anchor_ms, monthly_budget_micro_usd,
+                    is_auto, user_dismissed, updated_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    provider_id = excluded.provider_id,
+                    account_name = excluded.account_name,
+                    enabled = excluded.enabled,
+                    manual_balance_micro_usd = excluded.manual_balance_micro_usd,
+                    balance_anchor_ms = excluded.balance_anchor_ms,
+                    monthly_budget_micro_usd = excluded.monthly_budget_micro_usd,
+                    is_auto = CASE
+                        WHEN payg_accounts.account_id LIKE 'auto_%' THEN payg_accounts.is_auto
+                        ELSE excluded.is_auto
+                    END,
+                    user_dismissed = 0,
+                    updated_at_ms = excluded.updated_at_ms
+                "#,
+                params![
+                    account_id,
+                    provider_id,
+                    account_name,
+                    i64::from(account.enabled),
+                    account.manual_balance_micro_usd,
+                    account.balance_anchor_ms,
+                    account.monthly_budget_micro_usd,
+                    i64::from(account.is_auto),
+                    updated_at_ms,
+                ],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn delete_payg_account(&self, account_id: &str) -> CoreResult<()> {
+        let trimmed = account_id.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::Validation(
+                "PAYG account_id cannot be empty".to_string(),
+            ));
+        }
+        let now_ms = Utc::now().timestamp_millis();
+        self.with_conn(|conn| {
+            let is_auto: Option<i64> = conn
+                .query_row(
+                    "SELECT is_auto FROM payg_accounts WHERE account_id = ?1",
+                    params![trimmed],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if is_auto == Some(1) || trimmed.starts_with("auto_") {
+                conn.execute(
+                    "UPDATE payg_accounts SET enabled = 0, user_dismissed = 1, updated_at_ms = ?2 WHERE account_id = ?1",
+                    params![trimmed, now_ms],
+                )?;
+            } else {
+                conn.execute(
+                    "DELETE FROM payg_accounts WHERE account_id = ?1",
+                    params![trimmed],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn query_payg_accounts(
+        &self,
+        now_ms: i64,
+        tz_offset_minutes: i32,
+    ) -> CoreResult<Vec<PaygAccountStatus>> {
+        self.with_conn_mut(|conn| {
+            let balances = {
+                let mut stmt = conn.prepare(
+                    r#"
+                    SELECT provider_id, currency, total_balance_micro, granted_balance_micro,
+                           topped_up_balance_micro, daily_quota_used_micro, daily_quota_limit_micro,
+                           fetched_at_ms
+                    FROM provider_balances
+                    WHERE UPPER(currency) != 'QUOTA'
+                    ORDER BY provider_id ASC
+                    "#,
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(ProviderBalanceSnapshot {
+                        provider_id: row.get(0)?,
+                        currency: row.get(1)?,
+                        total_balance_micro: row.get(2)?,
+                        granted_balance_micro: row.get(3)?,
+                        topped_up_balance_micro: row.get(4)?,
+                        daily_quota_used_micro: row.get(5)?,
+                        daily_quota_limit_micro: row.get(6)?,
+                        fetched_at_ms: row.get(7)?,
+                    })
+                })?;
+                let mut map: HashMap<String, ProviderBalanceSnapshot> = HashMap::new();
+                for row in rows {
+                    let bal = row?;
+                    sync_auto_payg_for_balance_conn(conn, &bal)?;
+                    map.insert(bal.provider_id.to_ascii_lowercase(), bal);
+                }
+                map
+            };
+
+            let accounts = {
+                let mut stmt = conn.prepare(
+                    r#"
+                    SELECT account_id, provider_id, account_name, enabled,
+                           manual_balance_micro_usd, balance_anchor_ms, monthly_budget_micro_usd,
+                           is_auto, updated_at_ms
+                    FROM payg_accounts
+                    WHERE user_dismissed = 0
+                    ORDER BY enabled DESC, provider_id ASC, updated_at_ms DESC
+                    "#,
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(PaygAccount {
+                        account_id: row.get(0)?,
+                        provider_id: row.get(1)?,
+                        account_name: row.get(2)?,
+                        enabled: row.get::<_, i64>(3)? != 0,
+                        manual_balance_micro_usd: row.get(4)?,
+                        balance_anchor_ms: row.get(5)?,
+                        monthly_budget_micro_usd: row.get(6)?,
+                        is_auto: row.get::<_, i64>(7)? != 0,
+                        updated_at_ms: row.get(8)?,
+                    })
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+
+            let (today_start_ms, month_start_ms) =
+                crate::analytics::local_day_bounds_ms(now_ms, tz_offset_minutes);
+            let today_bucket_start = today_start_ms.div_euclid(HOUR_MS) * HOUR_MS;
+            let month_bucket_start = month_start_ms.div_euclid(HOUR_MS) * HOUR_MS;
+
+            let mut today_costs: HashMap<String, i64> = HashMap::new();
+            {
+                let mut stmt = conn.prepare(
+                    r#"
+                    SELECT LOWER(provider_id), COALESCE(SUM(estimated_cost_micro_usd), 0)
+                    FROM usage_hourly_rollups
+                    WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2
+                    GROUP BY LOWER(provider_id)
+                    "#,
+                )?;
+                let rows = stmt.query_map(params![today_bucket_start, now_ms], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })?;
+                for row in rows {
+                    let (pid, cost) = row?;
+                    today_costs.insert(pid, cost);
+                }
+            }
+
+            let mut month_costs: HashMap<String, i64> = HashMap::new();
+            {
+                let mut stmt = conn.prepare(
+                    r#"
+                    SELECT LOWER(provider_id), COALESCE(SUM(estimated_cost_micro_usd), 0)
+                    FROM usage_hourly_rollups
+                    WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2
+                    GROUP BY LOWER(provider_id)
+                    "#,
+                )?;
+                let rows = stmt.query_map(params![month_bucket_start, now_ms], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })?;
+                for row in rows {
+                    let (pid, cost) = row?;
+                    month_costs.insert(pid, cost);
+                }
+            }
+
+            let mut statuses = Vec::with_capacity(accounts.len());
+            for account in accounts {
+                let key = account.provider_id.to_ascii_lowercase();
+                let official_balance = balances.get(&key).cloned();
+                let today_cost_micro_usd = *today_costs.get(&key).unwrap_or(&0);
+                let month_cost_micro_usd = *month_costs.get(&key).unwrap_or(&0);
+
+                let remaining_manual_balance_micro_usd =
+                    if let Some(initial) = account.manual_balance_micro_usd {
+                        let anchor = account.balance_anchor_ms.unwrap_or(0);
+                        let spent_since: i64 = conn.query_row(
+                            r#"
+                            SELECT COALESCE(SUM(estimated_cost_micro_usd), 0)
+                            FROM usage_events
+                            WHERE LOWER(provider_id) = ?1 AND timestamp_ms >= ?2 AND timestamp_ms <= ?3
+                            "#,
+                            params![key, anchor, now_ms],
+                            |r| r.get(0),
+                        )?;
+                        Some(initial - spent_since)
+                    } else {
+                        None
+                    };
+
+                let budget_used_percent = account
+                    .monthly_budget_micro_usd
+                    .filter(|&budget| budget > 0)
+                    .map(|budget| (month_cost_micro_usd as f64 / budget as f64) * 100.0);
+
+                statuses.push(PaygAccountStatus {
+                    account,
+                    official_balance,
+                    remaining_manual_balance_micro_usd,
+                    today_cost_micro_usd,
+                    month_cost_micro_usd,
+                    budget_used_percent,
+                });
+            }
+
+            Ok(statuses)
         })
     }
 
@@ -2479,21 +2753,8 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         .into_iter()
         .filter(|o| o.provider_id.eq_ignore_ascii_case(trimmed))
         .collect();
-    if obs_rows.is_empty() {
-        if trimmed == provider_ids::ANTIGRAVITY {
-            let has_ag_events: Option<i64> = conn
-                .query_row(
-                    "SELECT 1 FROM usage_events WHERE provider_id = ?1 LIMIT 1",
-                    params![provider_ids::ANTIGRAVITY],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if has_ag_events.is_none() {
-                return Ok(());
-            }
-        } else {
-            return Ok(());
-        }
+    if obs_rows.is_empty() && trimmed != provider_ids::ANTIGRAVITY {
+        return Ok(());
     }
 
     let bal_info: Option<(String, Option<i64>)> = conn
@@ -2547,21 +2808,33 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
                     .ok()?
                     .flatten()
                     .collect();
-                if models.iter().any(|m| m.contains("ultra") && m.contains("20x")) {
-                    Some("ultra_20x".to_string())
-                } else if models.iter().any(|m| m.contains("ultra") && m.contains("5x")) {
+                if models
+                    .iter()
+                    .any(|m| m.contains("ultra") && (m.contains("5x") || m.contains("99")))
+                {
                     Some("ultra_5x".to_string())
-                } else if models.iter().any(|m| m.contains("ultra")) {
+                } else if models
+                    .iter()
+                    .any(|m| m.contains("ultra") || m.contains("carbon") || m.contains("g1-ultra"))
+                {
                     Some("ultra".to_string())
                 } else if models.iter().any(|m| m.contains("enterprise")) {
                     Some("enterprise".to_string())
                 } else {
-                    Some("pro".to_string())
+                    None
                 }
             } else {
                 None
             }
         });
+
+    let real_obs_rows: Vec<&ObservedRateLimitWindow> = obs_rows
+        .iter()
+        .filter(|o| o.source.as_deref() != Some("local_log_hint"))
+        .collect();
+    if trimmed == provider_ids::ANTIGRAVITY && plan_hint.is_none() && real_obs_rows.is_empty() {
+        return Ok(());
+    }
 
     let hint_lower = plan_hint
         .as_deref()
@@ -2630,10 +2903,6 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         .map(|t| t.windows.clone())
         .unwrap_or_default();
 
-    let real_obs_rows: Vec<&ObservedRateLimitWindow> = obs_rows
-        .iter()
-        .filter(|o| o.source.as_deref() != Some("local_log_hint"))
-        .collect();
     let mut rules_by_id: BTreeMap<String, SubscriptionWindowRule> = BTreeMap::new();
     for obs in &real_obs_rows {
         let rule = infer_window_rule_from_observed(
@@ -2724,7 +2993,7 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
             } else if hint_lower.contains("ultra") && hint_lower.contains("249") {
                 ("Google AI Ultra".to_string(), 249_990_000)
             } else if hint_lower.contains("ultra") {
-                ("Google AI Ultra 20x".to_string(), 199_990_000)
+                ("Google AI Ultra".to_string(), 199_990_000)
             } else if hint_lower.contains("enterprise") || hint_lower.contains("business") {
                 ("Gemini Enterprise / Antigravity".to_string(), 30_000_000)
             } else if hint_lower.contains("plus") {
@@ -2802,6 +3071,119 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         ],
     )?;
 
+    Ok(())
+}
+
+pub(crate) fn upsert_session_titles_conn(
+    conn: &Connection,
+    session_titles: &[SessionTitleRecord],
+) -> CoreResult<usize> {
+    if session_titles.is_empty() {
+        return Ok(0);
+    }
+    let mut stmt = conn.prepare_cached(
+        r#"
+        INSERT INTO session_titles (session_key, provider_id, title, source, updated_at_ms)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(session_key) DO UPDATE SET
+            title = excluded.title,
+            source = excluded.source,
+            updated_at_ms = excluded.updated_at_ms
+        WHERE (excluded.source = 'explicit' AND (
+                session_titles.source != 'explicit'
+                OR excluded.updated_at_ms >= session_titles.updated_at_ms
+            ))
+           OR (excluded.source = 'user_prompt' AND (
+                session_titles.source = 'derived'
+                OR (session_titles.source = 'user_prompt' AND (
+                    excluded.updated_at_ms < session_titles.updated_at_ms
+                    OR LENGTH(TRIM(session_titles.title)) = 0
+                ))
+            ))
+           OR (excluded.source = 'derived' AND session_titles.source = 'derived' AND (
+                excluded.updated_at_ms < session_titles.updated_at_ms
+                OR LENGTH(TRIM(session_titles.title)) = 0
+            ))
+        "#,
+    )?;
+    let mut affected = 0usize;
+    for rec in session_titles {
+        if let Some(clean_title) = sanitize_session_title(&rec.title) {
+            let source = match rec.source.as_str() {
+                "explicit" => "explicit",
+                "user_prompt" => "user_prompt",
+                _ => "derived",
+            };
+            affected += stmt.execute(params![
+                rec.session_key,
+                rec.provider_id,
+                clean_title,
+                source,
+                rec.updated_at_ms,
+            ])?;
+        }
+    }
+    Ok(affected)
+}
+
+fn default_payg_account_name(provider_id: &str, currency: &str) -> String {
+    match (provider_id, currency) {
+        (provider_ids::CODEX, c) if c.starts_with("CREDITS") => "Codex Credits".to_string(),
+        (provider_ids::CODEX, _) => "Codex 按量余额".to_string(),
+        (provider_ids::DEEPSEEK_HARNESS, _) => "DeepSeek 官方账户余额".to_string(),
+        (provider_ids::KIMI_CODE, _) => "Kimi Code 账户余额".to_string(),
+        (provider_ids::QCODE, _) => "QCode 账户余额".to_string(),
+        (provider_ids::MINIMAX_CODE, _) => "MiniMax 账户余额".to_string(),
+        (other, _) => format!("{} 账户余额", provider_ids::display_name(other)),
+    }
+}
+
+pub(crate) fn sync_auto_payg_for_balance_conn(
+    conn: &Connection,
+    balance: &ProviderBalanceSnapshot,
+) -> CoreResult<()> {
+    let provider_id = balance.provider_id.trim();
+    if provider_id.is_empty() || balance.currency.eq_ignore_ascii_case("QUOTA") {
+        return Ok(());
+    }
+    let has_manual: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM payg_accounts WHERE provider_id = ?1 AND is_auto = 0 AND user_dismissed = 0 LIMIT 1",
+            params![provider_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if has_manual.is_some() {
+        return Ok(());
+    }
+
+    let auto_id = format!("auto_{provider_id}");
+    let dismissed: Option<i64> = conn
+        .query_row(
+            "SELECT user_dismissed FROM payg_accounts WHERE account_id = ?1",
+            params![auto_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if dismissed == Some(1) {
+        return Ok(());
+    }
+
+    let account_name = default_payg_account_name(provider_id, &balance.currency);
+    conn.execute(
+        r#"
+        INSERT INTO payg_accounts (
+            account_id, provider_id, account_name, enabled,
+            manual_balance_micro_usd, balance_anchor_ms, monthly_budget_micro_usd,
+            is_auto, user_dismissed, updated_at_ms
+        ) VALUES (?1, ?2, ?3, 1, NULL, NULL, NULL, 1, 0, ?4)
+        ON CONFLICT(account_id) DO UPDATE SET
+            account_name = excluded.account_name,
+            updated_at_ms = excluded.updated_at_ms
+        WHERE payg_accounts.user_dismissed = 0 AND payg_accounts.is_auto = 1
+        "#,
+        params![auto_id, provider_id, account_name, balance.fetched_at_ms],
+    )?;
     Ok(())
 }
 
@@ -3926,5 +4308,211 @@ mod tests {
         // 1M input ($2.00) + 100k output ($1.20) = $3.20 used out of $100 5h window = 3.2%
         assert_eq!(subs[0].windows[0].used_value, 3_200_000);
         assert!((subs[0].windows[0].used_percent - 3.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn v9_fixes_session_title_lock_antigravity_false_pro_and_payg_accounts() {
+        let storage = Storage::open_in_memory().expect("db");
+        let dev = storage.local_device().expect("device").device_id;
+        let now_ms = 1_795_000_000_000i64;
+
+        // 1. Antigravity event with Gemini Pro model (WITHOUT Carbon/Ultra or explicit tier hint)
+        //    MUST NOT fabricate "Google AI Pro".
+        let pro_ev = NormalizedUsageEvent {
+            event_id: "ag-pro-model-only".to_string(),
+            device_id: dev.clone(),
+            provider_id: provider_ids::ANTIGRAVITY.to_string(),
+            session_id: "conv-gemini".to_string(),
+            project_label: "antigravity".to_string(),
+            model_id: "Gemini 3.1 Pro (High)".to_string(),
+            timestamp_ms: now_ms - 120_000,
+            input_tokens: 100_000,
+            output_tokens: 20_000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            observable_only: false,
+            duration_ms: Some(3_000),
+            ttft_ms: None,
+            output_tps: Some(25.0),
+            estimated_cost_micro_usd: 0,
+            cache_saved_micro_usd: 0,
+        };
+        let first_prompt = SessionTitleRecord {
+            session_key: "antigravity:conv-gemini".to_string(),
+            provider_id: provider_ids::ANTIGRAVITY.to_string(),
+            title: "First user prompt for this session".to_string(),
+            source: "user_prompt".to_string(),
+            updated_at_ms: now_ms - 120_000,
+        };
+        let later_prompt = SessionTitleRecord {
+            session_key: "antigravity:conv-gemini".to_string(),
+            provider_id: provider_ids::ANTIGRAVITY.to_string(),
+            title: "Second user prompt much later".to_string(),
+            source: "user_prompt".to_string(),
+            updated_at_ms: now_ms - 10_000,
+        };
+        storage
+            .ingest_events_with_cursor_and_titles(&[pro_ev], None, &[], &[first_prompt, later_prompt])
+            .expect("ingest gemini pro");
+
+        assert!(
+            storage
+                .query_subscriptions(now_ms)
+                .expect("subs")
+                .is_empty(),
+            "Gemini Pro model alone must not fabricate Google AI Pro auto subscription"
+        );
+
+        let stored_title: String = storage
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT title FROM session_titles WHERE session_key = 'antigravity:conv-gemini'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(CoreError::from)
+            })
+            .expect("title query");
+        assert_eq!(stored_title, "First user prompt for this session");
+
+        // Explicit rename (e.g. session_index.jsonl) overrides user_prompt, and newer explicit rename wins
+        storage
+            .upsert_session_titles(&[SessionTitleRecord {
+                session_key: "antigravity:conv-gemini".to_string(),
+                provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                title: "Explicit Thread Name v1".to_string(),
+                source: "explicit".to_string(),
+                updated_at_ms: now_ms - 5_000,
+            }])
+            .expect("explicit v1");
+        storage
+            .upsert_session_titles(&[SessionTitleRecord {
+                session_key: "antigravity:conv-gemini".to_string(),
+                provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                title: "Explicit Thread Name v2".to_string(),
+                source: "explicit".to_string(),
+                updated_at_ms: now_ms,
+            }])
+            .expect("explicit v2");
+        let renamed: String = storage
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT title FROM session_titles WHERE session_key = 'antigravity:conv-gemini'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(CoreError::from)
+            })
+            .expect("renamed query");
+        assert_eq!(renamed, "Explicit Thread Name v2");
+
+        // 2. Orchestrator (Carbon) infers Google AI Ultra (without any hint_obs)
+        let carbon_ev = NormalizedUsageEvent {
+            event_id: "ag-carbon-model".to_string(),
+            device_id: dev.clone(),
+            provider_id: provider_ids::ANTIGRAVITY.to_string(),
+            session_id: "conv-carbon".to_string(),
+            project_label: "antigravity".to_string(),
+            model_id: "Orchestrator (Carbon)".to_string(),
+            timestamp_ms: now_ms - 30_000,
+            input_tokens: 100_000,
+            output_tokens: 20_000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            observable_only: false,
+            duration_ms: Some(3_000),
+            ttft_ms: None,
+            output_tps: Some(25.0),
+            estimated_cost_micro_usd: 0,
+            cache_saved_micro_usd: 0,
+        };
+        storage
+            .ingest_events_with_cursor(&[carbon_ev], None, &[])
+            .expect("ingest carbon");
+        let subs = storage.query_subscriptions(now_ms).expect("ultra sub");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].plan.plan_name, "Google AI Ultra");
+        assert_eq!(subs[0].plan.monthly_fee_micro_usd, 199_990_000);
+
+        // 3. PAYG auto-discovery from Codex Credits + DeepSeek CNY + manual budget spend tracking
+        let codex_ev = NormalizedUsageEvent {
+            event_id: "codex-payg-ev".to_string(),
+            device_id: dev,
+            provider_id: provider_ids::CODEX.to_string(),
+            session_id: "s-payg".to_string(),
+            project_label: "app".to_string(),
+            model_id: "gpt-5-codex".to_string(),
+            timestamp_ms: now_ms - 5_000,
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            observable_only: false,
+            duration_ms: None,
+            ttft_ms: None,
+            output_tps: None,
+            estimated_cost_micro_usd: 2_500_000,
+            cache_saved_micro_usd: 0,
+        };
+        storage
+            .ingest_events_with_cursor(&[codex_ev], None, &[])
+            .expect("codex ev");
+
+        storage
+            .upsert_provider_balance_if_newer(&ProviderBalanceSnapshot {
+                provider_id: provider_ids::CODEX.to_string(),
+                currency: "CREDITS".to_string(),
+                total_balance_micro: Some(766_760_000),
+                granted_balance_micro: None,
+                topped_up_balance_micro: None,
+                daily_quota_used_micro: None,
+                daily_quota_limit_micro: None,
+                fetched_at_ms: now_ms - 2_000,
+            })
+            .expect("codex credits");
+        storage
+            .upsert_provider_balance(&ProviderBalanceSnapshot {
+                provider_id: provider_ids::DEEPSEEK_HARNESS.to_string(),
+                currency: "CNY".to_string(),
+                total_balance_micro: Some(45_200_000),
+                granted_balance_micro: Some(10_000_000),
+                topped_up_balance_micro: Some(35_200_000),
+                daily_quota_used_micro: None,
+                daily_quota_limit_micro: None,
+                fetched_at_ms: now_ms - 1_000,
+            })
+            .expect("deepseek balance");
+        storage
+            .upsert_payg_account(&PaygAccount {
+                account_id: "payg_claude_manual".to_string(),
+                provider_id: provider_ids::CLAUDE_CODE.to_string(),
+                account_name: "Anthropic Console".to_string(),
+                enabled: true,
+                manual_balance_micro_usd: Some(50_000_000),
+                balance_anchor_ms: Some(now_ms - 60_000),
+                monthly_budget_micro_usd: Some(100_000_000),
+                is_auto: false,
+                updated_at_ms: now_ms,
+            })
+            .expect("manual payg");
+
+        let payg_list = storage.query_payg_accounts(now_ms, 480).expect("query payg");
+        assert_eq!(payg_list.len(), 3);
+        let codex_payg = payg_list
+            .iter()
+            .find(|p| p.account.provider_id == provider_ids::CODEX)
+            .expect("codex payg");
+        assert_eq!(codex_payg.account.account_name, "Codex Credits");
+        assert_eq!(codex_payg.month_cost_micro_usd, 2_500_000);
+        assert_eq!(
+            codex_payg
+                .official_balance
+                .as_ref()
+                .and_then(|b| b.total_balance_micro),
+            Some(766_760_000)
+        );
     }
 }

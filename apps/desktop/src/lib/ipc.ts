@@ -17,6 +17,8 @@ import type {
   ObservedRateLimitWindow,
   OfficialApiReconcileResult,
   OverviewReport,
+  PaygAccount,
+  PaygAccountStatus,
   ProviderBalanceSnapshot,
   ProviderConfig,
   RemoteSubscriptionSnapshot,
@@ -598,7 +600,11 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
         synced_at_ms: now,
       } as T;
     case 'get_remote_subscription_snapshots':
+    case 'get_payg_accounts':
       return [] as T;
+    case 'upsert_payg_account':
+    case 'delete_payg_account':
+      return undefined as T;
     case 'toggle_floating_window':
       previewFloatingVisible = !previewFloatingVisible;
       return previewFloatingVisible as T;
@@ -744,6 +750,17 @@ export const ipc = {
 
   refreshProviderBalance: (providerId: string): Promise<BalanceRefreshOutcome> =>
     callIpc('refresh_provider_balance', { providerId }),
+
+  getPaygAccounts: (tzOffsetMinutes?: number): Promise<PaygAccountStatus[]> =>
+    callIpc('get_payg_accounts', {
+      tzOffsetMinutes: tzOffsetMinutes ?? -new Date().getTimezoneOffset(),
+    }),
+
+  upsertPaygAccount: (account: PaygAccount): Promise<void> =>
+    callIpc('upsert_payg_account', { account }),
+
+  deletePaygAccount: (accountId: string): Promise<void> =>
+    callIpc('delete_payg_account', { accountId }),
 
   listDevices: (): Promise<DeviceRecord[]> => callIpc('list_devices'),
 

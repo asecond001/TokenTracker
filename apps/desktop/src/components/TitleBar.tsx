@@ -22,6 +22,7 @@ export interface TitleBarProps {
   isScanning: boolean;
   livePulseSeq?: number;
   hasBackdrop?: boolean;
+  floatingEnabled?: boolean;
   onScanNow: () => void;
   onPersistCurrency?: (currency: CurrencyCode) => void;
   onPersistTheme?: (theme: ThemeMode) => void;
@@ -61,6 +62,7 @@ export function TitleBar({
   isScanning,
   livePulseSeq = 0,
   hasBackdrop = false,
+  floatingEnabled,
   onScanNow,
   onPersistCurrency,
   onPersistTheme,
@@ -101,6 +103,22 @@ export function TitleBar({
     },
     queryClient
   );
+
+  const { data: queriedFloatingVisible } = useQuery(
+    {
+      queryKey: ['floating-visible'],
+      queryFn: () => ipc.getFloatingWindowVisible(),
+      staleTime: 5_000,
+    },
+    queryClient
+  );
+  const isFloatingActive = floatingEnabled ?? queriedFloatingVisible ?? false;
+
+  const handleToggleFloating = async () => {
+    const next = await ipc.toggleFloatingWindow();
+    queryClient.setQueryData(['floating-visible'], next);
+    void queryClient.invalidateQueries({ queryKey: ['preferences'] });
+  };
 
   const safeDevices = useMemo(() => (Array.isArray(devices) ? devices : []), [devices]);
 
@@ -207,12 +225,10 @@ export function TitleBar({
 
   return (
     <header
-      className="relative z-20 flex items-center justify-between px-3 shrink-0 select-none"
+      className="liquid-chrome relative z-20 flex items-center justify-between px-3 shrink-0 select-none"
       style={{
-        height: '38px',
-        backgroundColor: hasBackdrop ? 'var(--bg-translucent-chrome)' : 'var(--bg-sidebar)',
-        backdropFilter: hasBackdrop ? 'blur(14px)' : undefined,
-        WebkitBackdropFilter: hasBackdrop ? 'blur(14px)' : undefined,
+        height: '40px',
+        backgroundColor: hasBackdrop ? 'var(--bg-translucent-chrome)' : 'var(--surface-glass-chrome)',
         borderBottom: `1px solid ${borderToken}`,
       }}
     >
@@ -222,11 +238,12 @@ export function TitleBar({
         className="flex items-center gap-2 h-full min-w-[196px]"
       >
         <span
-          className="inline-flex items-center justify-center w-5 h-5 rounded text-[11px] font-semibold tracking-tight"
+          className="inline-flex items-center justify-center w-5 h-5 rounded-lg text-[10.5px] font-semibold tracking-tight"
           style={{
-            backgroundColor: 'var(--bg-elevated)',
-            border: `1px solid ${hasBackdrop ? 'var(--border-hairline)' : 'var(--border-strong)'}`,
-            color: 'var(--text-primary)',
+            backgroundColor: 'var(--accent-tonal-bg)',
+            boxShadow: 'var(--border-specular)',
+            border: '1px solid var(--border-hairline)',
+            color: 'var(--accent-tonal-text)',
           }}
         >
           TT
@@ -291,10 +308,11 @@ export function TitleBar({
 
         {/* Currency Switcher */}
         <div
-          className="flex items-center p-0.5 rounded"
+          className="flex items-center p-0.5 rounded-full"
           style={{
             backgroundColor: controlBgToken,
             border: `1px solid ${borderToken}`,
+            boxShadow: 'var(--border-specular)',
           }}
         >
           {(['USD', 'CNY'] as const).map((code) => {
@@ -305,9 +323,9 @@ export function TitleBar({
                 type="button"
                 data-active={active ? 'true' : undefined}
                 onClick={() => handleCurrencyToggle(code)}
-                className="seg-pill px-2 py-0.5 text-[11px] font-medium rounded-sm tabular-nums cursor-pointer"
+                className="seg-pill px-2.5 py-0.5 text-[11px] font-medium tabular-nums cursor-pointer"
                 style={{
-                  color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  color: active ? 'var(--accent-tonal-text)' : 'var(--text-secondary)',
                 }}
               >
                 {code}
@@ -325,7 +343,7 @@ export function TitleBar({
               title={`发现新版本 v${updater.availableUpdate.version}，点击立即更新`}
               disabled={updater.status === 'downloading' || updater.status === 'installing'}
               onClick={() => void downloadAndInstallUpdate()}
-              className="btn-interactive inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium tabular-nums cursor-pointer disabled:opacity-60"
+              className="btn-interactive inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium tabular-nums cursor-pointer disabled:opacity-60"
               style={{
                 backgroundColor: 'rgba(16, 185, 129, 0.14)',
                 border: '1px solid var(--accent-emerald)',
@@ -353,7 +371,7 @@ export function TitleBar({
             aria-label="立即增量扫描"
             title="立即增量扫描"
             onClick={onScanNow}
-            className="btn-interactive p-1 rounded cursor-pointer"
+            className="btn-interactive p-1 rounded-lg cursor-pointer"
             style={{ color: 'var(--text-secondary)' }}
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin' : ''}`} />
@@ -361,10 +379,15 @@ export function TitleBar({
           <button
             type="button"
             aria-label="切换桌面悬浮窗"
-            title="开启 / 关闭实时桌面悬浮窗"
-            onClick={() => void ipc.toggleFloatingWindow()}
-            className="btn-interactive p-1 rounded cursor-pointer"
-            style={{ color: 'var(--text-secondary)' }}
+            aria-pressed={isFloatingActive}
+            data-active={isFloatingActive ? 'true' : undefined}
+            title={isFloatingActive ? '隐藏实时桌面悬浮窗' : '开启实时桌面悬浮窗'}
+            onClick={() => void handleToggleFloating()}
+            className="btn-interactive p-1 rounded-lg cursor-pointer"
+            style={{
+              backgroundColor: isFloatingActive ? 'var(--accent-tonal-bg)' : undefined,
+              color: isFloatingActive ? 'var(--accent-tonal-text)' : 'var(--text-secondary)',
+            }}
           >
             <PictureInPicture2 className="w-3.5 h-3.5" />
           </button>

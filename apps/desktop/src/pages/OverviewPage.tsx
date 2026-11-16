@@ -543,11 +543,8 @@ export function OverviewPage() {
         </div>
       </section>
 
-      {/* Top Flat Single-Row 4-Metric Strip (Separated by 1px Vertical Hairlines — No Bento Cards) */}
-      <section
-        className="grid grid-cols-4 pb-6"
-        style={{ borderBottom: '1px solid var(--border-hairline)' }}
-      >
+      {/* Top Tonal Single-Row 4-Metric Strip (Separated by 1px Vertical Hairlines — No Bento Cards) */}
+      <section className="surface-tonal-band px-5 py-4 grid grid-cols-4">
         <div className="pr-5">
           <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
             总 Token 消耗
@@ -671,10 +668,11 @@ export function OverviewPage() {
 
             {/* Dimension Toggle */}
             <div
-              className="flex items-center p-0.5 rounded"
+              className="flex items-center p-0.5 rounded-full"
               style={{
-                backgroundColor: 'var(--bg-sidebar)',
+                backgroundColor: 'var(--surface-glass)',
                 border: '1px solid var(--border-hairline)',
+                boxShadow: 'var(--border-specular)',
               }}
             >
               {(
@@ -693,9 +691,9 @@ export function OverviewPage() {
                       setChartDimension(dim.id);
                       setFocusedSeriesId(null);
                     }}
-                    className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
+                    className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer"
                     style={{
-                      color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      color: active ? 'var(--accent-tonal-text)' : 'var(--text-secondary)',
                       fontWeight: active ? 500 : 400,
                     }}
                   >
@@ -707,10 +705,11 @@ export function OverviewPage() {
 
             {/* Chart Type Toggle */}
             <div
-              className="flex items-center p-0.5 rounded"
+              className="flex items-center p-0.5 rounded-full"
               style={{
-                backgroundColor: 'var(--bg-sidebar)',
+                backgroundColor: 'var(--surface-glass)',
                 border: '1px solid var(--border-hairline)',
+                boxShadow: 'var(--border-specular)',
               }}
             >
               {(['bar', 'line'] as const).map((kind) => {
@@ -721,9 +720,9 @@ export function OverviewPage() {
                     type="button"
                     data-active={active}
                     onClick={() => setChartType(kind)}
-                    className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
+                    className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer"
                     style={{
-                      color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      color: active ? 'var(--accent-tonal-text)' : 'var(--text-secondary)',
                       fontWeight: active ? 500 : 400,
                     }}
                   >

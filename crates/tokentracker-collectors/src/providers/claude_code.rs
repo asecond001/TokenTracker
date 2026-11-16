@@ -253,6 +253,7 @@ impl ProviderLogParser for ClaudeCodeParser {
                 cache_saved_micro_usd: 0,
             }),
             rate_limits: Vec::new(),
+            balance: None,
         })
     }
 

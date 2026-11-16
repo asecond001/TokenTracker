@@ -773,14 +773,15 @@ export function PreferencesPage({
         <div className="flex items-center gap-2">
           <h1 className="text-[16px] font-semibold tracking-tight">偏好设置</h1>
           <span
-            className="px-1.5 py-0.5 rounded text-[10.5px] font-mono tabular-nums"
+            className="px-2 py-0.5 rounded-full text-[10.5px] font-mono tabular-nums"
             style={{
-              backgroundColor: 'var(--bg-hover)',
+              backgroundColor: 'var(--accent-tonal-bg)',
+              boxShadow: 'var(--border-specular)',
               border: '1px solid var(--border-hairline)',
-              color: 'var(--text-secondary)',
+              color: 'var(--accent-tonal-text)',
             }}
           >
-            v0.2.4
+            v0.2.5
           </span>
         </div>
 

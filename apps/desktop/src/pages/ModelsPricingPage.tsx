@@ -566,8 +566,8 @@ export function ModelsPricingPage() {
       {/* Flat Slide-Over Pricing & Exchange Rate Drawer */}
       {drawerOpen && (
         <div
-          className="drawer-backdrop-enter fixed inset-0 z-50 flex justify-end"
-          style={{ backgroundColor: 'rgba(0, 0, 0, 0.45)' }}
+          className="drawer-backdrop-enter fixed inset-0 z-50 flex justify-end backdrop-blur-sm"
+          style={{ backgroundColor: 'rgba(6, 8, 14, 0.42)' }}
           onClick={(e) => {
             if (e.target === e.currentTarget) {
               setDrawerOpen(false);
@@ -575,9 +575,8 @@ export function ModelsPricingPage() {
           }}
         >
           <div
-            className="drawer-panel-enter w-full max-w-[460px] h-full flex flex-col justify-between p-5 overflow-y-auto"
+            className="drawer-panel-enter liquid-drawer w-full max-w-[460px] h-full flex flex-col justify-between p-5 overflow-y-auto"
             style={{
-              backgroundColor: 'var(--bg-sidebar)',
               borderLeft: '1px solid var(--border-strong)',
               color: 'var(--text-primary)',
             }}

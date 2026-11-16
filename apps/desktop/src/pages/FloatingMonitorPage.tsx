@@ -237,25 +237,30 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
 
   const isLight = resolvedTheme === 'light';
   const alpha = floatingConfig.opacity;
-  const surfaceBg = isLight
-    ? `rgba(250, 250, 252, ${alpha})`
-    : `rgba(17, 19, 24, ${alpha})`;
+  const lowAlpha = Math.max(0.5, alpha - 0.1);
+  const surfaceGradient = isLight
+    ? `linear-gradient(155deg, rgba(255, 255, 255, ${alpha}) 0%, rgba(242, 245, 252, ${lowAlpha}) 100%)`
+    : `linear-gradient(155deg, rgba(26, 30, 44, ${alpha}) 0%, rgba(13, 16, 25, ${lowAlpha}) 100%)`;
   const borderColor = isLight
-    ? 'rgba(17, 24, 39, 0.14)'
-    : 'rgba(255, 255, 255, 0.12)';
+    ? 'rgba(15, 23, 42, 0.14)'
+    : 'rgba(255, 255, 255, 0.14)';
+  const specularRim = isLight
+    ? 'inset 0 1px 0 rgba(255, 255, 255, 0.92), 0 12px 32px -10px rgba(15, 23, 42, 0.22)'
+    : 'inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 14px 36px -10px rgba(0, 0, 0, 0.65)';
 
   if (isCompactViewport) {
     return (
       <div
         ref={rootRef}
         data-theme={resolvedTheme}
-        className="h-screen w-screen flex items-center justify-between gap-2 px-3 select-none overflow-visible"
+        className="h-screen w-screen flex items-center justify-between gap-2 px-3.5 select-none overflow-visible rounded-full"
         style={{
-          backgroundColor: surfaceBg,
-          backdropFilter: 'blur(18px) saturate(140%)',
-          WebkitBackdropFilter: 'blur(18px) saturate(140%)',
+          backgroundImage: surfaceGradient,
+          backdropFilter: 'blur(24px) saturate(180%)',
+          WebkitBackdropFilter: 'blur(24px) saturate(180%)',
           color: 'var(--text-primary)',
           border: `1px solid ${borderColor}`,
+          boxShadow: specularRim,
         }}
       >
         <div
@@ -356,13 +361,14 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
     <div
       ref={rootRef}
       data-theme={resolvedTheme}
-      className={`relative h-screen w-screen flex flex-col justify-between ${containerPaddingClass} select-none overflow-hidden`}
+      className={`relative h-screen w-screen flex flex-col justify-between ${containerPaddingClass} select-none overflow-hidden rounded-2xl`}
       style={{
-        backgroundColor: surfaceBg,
-        backdropFilter: 'blur(18px) saturate(140%)',
-        WebkitBackdropFilter: 'blur(18px) saturate(140%)',
+        backgroundImage: surfaceGradient,
+        backdropFilter: 'blur(24px) saturate(180%)',
+        WebkitBackdropFilter: 'blur(24px) saturate(180%)',
         color: 'var(--text-primary)',
         border: `1px solid ${borderColor}`,
+        boxShadow: specularRim,
       }}
     >
       {/* Top Drag Header */}

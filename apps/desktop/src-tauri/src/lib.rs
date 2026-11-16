@@ -89,6 +89,9 @@ pub fn run() {
             commands::test_custom_provider_sample_line,
             commands::get_provider_balances,
             commands::refresh_provider_balance,
+            commands::get_payg_accounts,
+            commands::upsert_payg_account,
+            commands::delete_payg_account,
             commands::list_devices,
             commands::get_sync_status,
             commands::update_sync_config,
@@ -111,7 +114,10 @@ pub fn run() {
             if let Ok(prefs) = state.storage.get_preferences() {
                 commands::apply_theme_to_app(app.handle(), &prefs.theme);
                 if prefs.floating_window_enabled {
-                    tray::set_floating_window_visible(app.handle(), true);
+                    let handle = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = tray::set_floating_window_visible(&handle, true);
+                    });
                 }
                 if prefs.launch_at_startup {
                     if let Err(err) = app.autolaunch().enable() {

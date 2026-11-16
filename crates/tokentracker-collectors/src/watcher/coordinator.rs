@@ -8,14 +8,14 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tokentracker_core::domain::ProviderConfig;
+use tokentracker_core::domain::{provider_ids, ProviderConfig};
 use tokentracker_core::Storage;
 use walkdir::WalkDir;
 
 use crate::error::CollectorResult;
 use crate::providers::antigravity::AntigravityParser;
 use crate::providers::claude_code::ClaudeCodeParser;
-use crate::providers::codex::CodexParser;
+use crate::providers::codex::{load_codex_session_index_titles, CodexParser};
 use crate::providers::custom_compatible::CustomRuleLogParser;
 use crate::providers::deepseek_harness::DeepSeekHarnessParser;
 use crate::providers::kimi_code::KimiCodeParser;
@@ -126,6 +126,22 @@ impl CollectorCoordinator {
                         provider_err = Some(msg.clone());
                         report.errors.push(msg);
                     }
+                }
+            }
+
+            if parser.provider_id() == provider_ids::CODEX {
+                let mut codex_roots = parser.default_roots();
+                if let Some(c) = cfg {
+                    for p in &c.custom_log_paths {
+                        let trimmed = p.trim();
+                        if !trimmed.is_empty() {
+                            codex_roots.push(PathBuf::from(trimmed));
+                        }
+                    }
+                }
+                let index_titles = load_codex_session_index_titles(&codex_roots);
+                if !index_titles.is_empty() {
+                    let _ = self.storage.upsert_session_titles(&index_titles);
                 }
             }
 
@@ -275,6 +291,11 @@ impl CollectorCoordinator {
         let mut roots = BTreeSet::new();
         for parser in &self.parsers {
             for r in parser.default_roots() {
+                if parser.provider_id() == provider_ids::CODEX {
+                    if let Some(parent) = r.parent() {
+                        roots.insert(parent.to_path_buf());
+                    }
+                }
                 roots.insert(r);
             }
             if let Some(cfg) = configs

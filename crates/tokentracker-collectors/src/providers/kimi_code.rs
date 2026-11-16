@@ -357,6 +357,7 @@ impl ProviderLogParser for KimiCodeParser {
                 cache_saved_micro_usd: 0,
             }),
             rate_limits: Vec::new(),
+            balance: None,
         })
     }
 

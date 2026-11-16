@@ -6,7 +6,8 @@ use std::time::UNIX_EPOCH;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use tokentracker_core::domain::{
-    IngestionCursor, NormalizedUsageEvent, ObservedRateLimitWindow, SessionTitleRecord,
+    IngestionCursor, NormalizedUsageEvent, ObservedRateLimitWindow, ProviderBalanceSnapshot,
+    SessionTitleRecord,
 };
 use tokentracker_core::Storage;
 
@@ -16,8 +17,8 @@ use crate::providers::ProviderLogParser;
 const FLUSH_BATCH_EVENTS: usize = 2_000;
 const READ_BUF_CAPACITY: usize = 64 * 1024;
 const WARMUP_TAIL_BYTES: u64 = 64 * 1024;
-const HEADER_SCAN_MAX_BYTES: u64 = 128 * 1024;
-const HEADER_SCAN_MAX_LINES: usize = 64;
+const HEADER_SCAN_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const HEADER_SCAN_MAX_LINES: usize = 256;
 
 #[derive(Debug, Clone, Default)]
 pub struct TailFileOutcome {
@@ -135,8 +136,18 @@ pub fn tail_file_incremental(
                 header_lines += 1;
                 let line_str = String::from_utf8_lossy(&raw_buf);
                 let _ = parser.parse_line(&line_str, &mut ctx);
+                if !ctx.session_id.trim().is_empty()
+                    && ctx.session_title.is_some()
+                    && ctx.current_model.is_some()
+                {
+                    break;
+                }
             }
         }
+
+        // Prevent trailing warmup slice or mid-file tail lines from capturing a late turn as the
+        // session's opening sentence (explicit renames remain allowed).
+        ctx.lock_non_explicit_title = true;
 
         // Clear transient timing/delta state before the trailing warmup slice right ahead of start_offset.
         ctx.last_prompt_ts_ms = None;
@@ -185,6 +196,7 @@ pub fn tail_file_incremental(
     let mut pending_events: Vec<NormalizedUsageEvent> = Vec::with_capacity(FLUSH_BATCH_EVENTS);
     let mut pending_rates: Vec<ObservedRateLimitWindow> = Vec::new();
     let mut pending_titles: Vec<SessionTitleRecord> = Vec::new();
+    let mut latest_balance: Option<ProviderBalanceSnapshot> = None;
 
     loop {
         raw_buf.clear();
@@ -210,6 +222,14 @@ pub fn tail_file_incremental(
             if !parsed.rate_limits.is_empty() {
                 pending_rates.extend(parsed.rate_limits);
             }
+            if let Some(bal) = parsed.balance {
+                let is_newer = latest_balance
+                    .as_ref()
+                    .is_none_or(|prev| bal.fetched_at_ms >= prev.fetched_at_ms);
+                if is_newer {
+                    latest_balance = Some(bal);
+                }
+            }
         }
         if let Some(title_rec) = ctx.take_session_title_record(parser.provider_id()) {
             pending_titles.push(title_rec);
@@ -234,6 +254,9 @@ pub fn tail_file_incremental(
                 &batch_rates,
                 &batch_titles,
             )?;
+            if let Some(bal) = latest_balance.take() {
+                let _ = storage.upsert_provider_balance_if_newer(&bal);
+            }
             events_inserted += outcome.inserted;
             events_deduplicated += outcome.deduplicated;
             rate_limits_updated += batch_rate_count;
@@ -249,6 +272,7 @@ pub fn tail_file_incremental(
         || !pending_events.is_empty()
         || !pending_rates.is_empty()
         || !pending_titles.is_empty()
+        || latest_balance.is_some()
     {
         let final_events = parser.finalize_batch(pending_events);
         let final_rate_count = pending_rates.len();
@@ -266,6 +290,9 @@ pub fn tail_file_incremental(
             &pending_rates,
             &pending_titles,
         )?;
+        if let Some(bal) = latest_balance.take() {
+            let _ = storage.upsert_provider_balance_if_newer(&bal);
+        }
         events_inserted += outcome.inserted;
         events_deduplicated += outcome.deduplicated;
         rate_limits_updated += final_rate_count;

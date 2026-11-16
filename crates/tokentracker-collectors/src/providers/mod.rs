@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::Value;
 use tokentracker_core::domain::{
-    sanitize_session_title, NormalizedUsageEvent, ObservedRateLimitWindow, SessionTitleRecord,
+    sanitize_session_title, NormalizedUsageEvent, ObservedRateLimitWindow, ProviderBalanceSnapshot,
+    SessionTitleRecord,
 };
 
 /// Active turn timestamps & baseline output counter retained per streaming `message.id`
@@ -52,6 +53,8 @@ pub struct FileParseContext {
     pub plan_hint_emitted: bool,
     /// Sanitized session display title `(title, source, updated_at_ms)` discovered during scan.
     pub session_title: Option<(String, String, i64)>,
+    /// Set before mid-file warmup / incremental tailing so late turns cannot overwrite initial prompts.
+    pub lock_non_explicit_title: bool,
     pub session_title_dirty: bool,
     pub last_emitted_title_session_id: Option<String>,
     pub line_number: u64,
@@ -108,13 +111,16 @@ impl FileParseContext {
     /// Record a candidate session title (`explicit` > `user_prompt` > `derived`;
     /// within non-explicit tiers, the earliest user prompt observed in the session wins).
     pub fn record_session_title(&mut self, raw_title: &str, source: &str, ts_ms: i64) -> bool {
-        let Some(clean) = sanitize_session_title(raw_title) else {
-            return false;
-        };
         let norm_source = match source {
             "explicit" => "explicit",
             "user_prompt" => "user_prompt",
             _ => "derived",
+        };
+        if norm_source != "explicit" && self.lock_non_explicit_title {
+            return false;
+        }
+        let Some(clean) = sanitize_session_title(raw_title) else {
+            return false;
         };
         let new_prio = title_source_priority(norm_source);
         let should_replace = match &self.session_title {
@@ -229,6 +235,7 @@ pub trait ProviderLogParser: Send + Sync {
 pub struct ParsedLineResult {
     pub event: Option<NormalizedUsageEvent>,
     pub rate_limits: Vec<ObservedRateLimitWindow>,
+    pub balance: Option<ProviderBalanceSnapshot>,
 }
 
 /// Deduplicate events sharing the same `event_id` within a batch, keeping the latest record.

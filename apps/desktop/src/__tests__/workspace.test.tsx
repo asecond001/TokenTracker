@@ -1934,19 +1934,20 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
     vi.spyOn(ipc, 'getObservedRateLimits').mockResolvedValue([]);
     vi.spyOn(ipc, 'getSubscriptionTemplates').mockResolvedValue(liveTemplates);
     vi.spyOn(ipc, 'getRemoteSubscriptionSnapshots').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getPaygAccounts').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getProviderConfigs').mockResolvedValue([]);
 
     renderWithQuery(<SubscriptionsPage />);
 
     expect(await screen.findByText('自动获取 · 官方 API')).toBeInTheDocument();
     expect(screen.getAllByText('官方 API 实时').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('各档位参考配额实时对照')).toBeInTheDocument();
+    expect(screen.queryByText('各档位参考配额实时对照')).not.toBeInTheDocument();
     expect(screen.getByText('24.0%')).toBeInTheDocument();
-    expect(screen.getByText('25.0%')).toBeInTheDocument();
 
-    // Open drawer from reference tier table & verify reactive USD -> CNY conversion
-    const applyButtons = screen.getAllByRole('button', { name: '套用此档位' });
-    fireEvent.click(applyButtons[0]);
+    // Open drawer from top button, apply template inside drawer & verify reactive USD -> CNY conversion
+    fireEvent.click(screen.getByRole('button', { name: '添加我的订阅' }));
     expect(await screen.findByText('添加我的订阅配置')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Claude Max 5x/ }));
 
     const feeInput = screen.getByLabelText(/订阅月费/) as HTMLInputElement;
     expect(feeInput.value).toBe('100');
@@ -2340,5 +2341,151 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
     );
     renderWithQuery(<TrayPopupPage />);
     expect(await screen.findByText('Refactor Chart Stacking')).toBeInTheDocument();
+  });
+});
+
+describe('v0.2.5 Pay-As-You-Go, Credits & Floating Toggle', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    useWorkspaceStore.setState({
+      activePage: 'subscriptions',
+      providerFilter: 'all',
+      deviceFilter: 'all',
+      timePreset: '7d',
+      currency: 'USD',
+      usdToCnyRate: '7.25',
+      theme: 'dark',
+      resolvedTheme: 'dark',
+      tzOffsetMinutes: 480,
+    });
+  });
+
+  it('renders DeepSeek CNY balance + Codex Credits and creates a PAYG account in SubscriptionsPage', async () => {
+    const now = Date.now();
+    vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getObservedRateLimits').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getSubscriptionTemplates').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getRemoteSubscriptionSnapshots').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getProviderConfigs').mockResolvedValue([
+      {
+        provider_id: 'deepseek_harness',
+        enabled: true,
+        collection_mode: 'official_api',
+        custom_log_paths: [],
+        has_credential: true,
+        last_sync_at_ms: now,
+        last_error: null,
+        updated_at_ms: now,
+      },
+    ]);
+    vi.spyOn(ipc, 'getPaygAccounts').mockResolvedValue([
+      {
+        account: {
+          account_id: 'auto_deepseek_harness',
+          provider_id: 'deepseek_harness',
+          account_name: 'DeepSeek 官方账户余额',
+          enabled: true,
+          manual_balance_micro_usd: null,
+          balance_anchor_ms: null,
+          monthly_budget_micro_usd: 50_000_000,
+          is_auto: true,
+          updated_at_ms: now,
+        },
+        official_balance: {
+          provider_id: 'deepseek_harness',
+          currency: 'CNY',
+          total_balance_micro: 45_200_000,
+          granted_balance_micro: 10_000_000,
+          topped_up_balance_micro: 35_200_000,
+          daily_quota_used_micro: null,
+          daily_quota_limit_micro: null,
+          fetched_at_ms: now - 5_000,
+        },
+        remaining_manual_balance_micro_usd: null,
+        today_cost_micro_usd: 1_200_000,
+        month_cost_micro_usd: 12_500_000,
+        budget_used_percent: 25.0,
+      },
+      {
+        account: {
+          account_id: 'auto_codex',
+          provider_id: 'codex',
+          account_name: 'Codex Credits',
+          enabled: true,
+          manual_balance_micro_usd: null,
+          balance_anchor_ms: null,
+          monthly_budget_micro_usd: null,
+          is_auto: true,
+          updated_at_ms: now,
+        },
+        official_balance: {
+          provider_id: 'codex',
+          currency: 'CREDITS',
+          total_balance_micro: 766_760_000,
+          granted_balance_micro: null,
+          topped_up_balance_micro: null,
+          daily_quota_used_micro: null,
+          daily_quota_limit_micro: null,
+          fetched_at_ms: now - 2_000,
+        },
+        remaining_manual_balance_micro_usd: null,
+        today_cost_micro_usd: 2_000_000,
+        month_cost_micro_usd: 8_000_000,
+        budget_used_percent: null,
+      },
+    ]);
+
+    const setKeySpy = vi.spyOn(ipc, 'setProviderApiKey').mockResolvedValue(undefined);
+    const upsertPaygSpy = vi.spyOn(ipc, 'upsertPaygAccount').mockResolvedValue(undefined);
+
+    renderWithQuery(<SubscriptionsPage />);
+
+    expect(await screen.findByText('DeepSeek 官方账户余额')).toBeInTheDocument();
+    expect(screen.getByText('¥45.20')).toBeInTheDocument();
+    expect(screen.getByText('766.76 Credits')).toBeInTheDocument();
+    expect(screen.queryByText('各档位参考配额实时对照')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '添加按量计费' }));
+    expect(await screen.findByText('添加按量计费账户')).toBeInTheDocument();
+
+    const keyInput = screen.getByLabelText(/官方 API Key/) as HTMLInputElement;
+    fireEvent.change(keyInput, { target: { value: 'sk-deepseek-test-123' } });
+    const budgetInput = screen.getByLabelText(/月度支出上限/) as HTMLInputElement;
+    fireEvent.change(budgetInput, { target: { value: '80' } });
+
+    fireEvent.click(screen.getByRole('button', { name: '保存按量计费账户' }));
+
+    await waitFor(() => {
+      expect(setKeySpy).toHaveBeenCalledWith('deepseek_harness', 'sk-deepseek-test-123');
+      expect(upsertPaygSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider_id: 'deepseek_harness',
+          monthly_budget_micro_usd: 80_000_000,
+        })
+      );
+    });
+  });
+
+  it('reflects active floating window state in TitleBar and toggles via IPC', async () => {
+    vi.spyOn(ipc, 'listCustomProviderRules').mockResolvedValue([]);
+    vi.spyOn(ipc, 'listDevices').mockResolvedValue([]);
+    const toggleSpy = vi.spyOn(ipc, 'toggleFloatingWindow').mockResolvedValue(true);
+
+    renderWithQuery(
+      <TitleBar
+        collectorWatching={true}
+        isScanning={false}
+        floatingEnabled={false}
+        onScanNow={vi.fn()}
+      />
+    );
+
+    const btn = screen.getByRole('button', { name: '切换桌面悬浮窗' });
+    expect(btn).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(btn);
+
+    await waitFor(() => {
+      expect(toggleSpy).toHaveBeenCalledTimes(1);
+    });
   });
 });

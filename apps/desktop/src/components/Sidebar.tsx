@@ -48,20 +48,12 @@ export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
         type="button"
         data-selected={active ? 'true' : undefined}
         onClick={() => setActivePage(item.id)}
-        className="row-interactive nav-item relative w-full flex items-center gap-2.5 px-2.5 py-1.5 text-left rounded text-[12.5px] cursor-pointer"
+        className="row-interactive nav-item relative w-full flex items-center gap-2.5 px-3 py-1.5 text-left text-[12.5px] cursor-pointer"
         style={{
-          color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-          fontWeight: active ? 500 : 400,
+          color: active ? 'var(--accent-tonal-text)' : 'var(--text-secondary)',
+          fontWeight: active ? 600 : 400,
         }}
       >
-        <span
-          className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full transition-all duration-200"
-          style={{
-            backgroundColor: 'var(--accent-primary)',
-            opacity: active ? 1 : 0,
-            transform: active ? 'scaleY(1)' : 'scaleY(0.35)',
-          }}
-        />
         <Icon
           className="w-4 h-4 shrink-0"
           style={{
@@ -75,12 +67,10 @@ export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
 
   return (
     <aside
-      className="relative z-10 flex flex-col justify-between shrink-0 h-full"
+      className="liquid-chrome relative z-10 flex flex-col justify-between shrink-0 h-full"
       style={{
         width: '208px',
-        backgroundColor: hasBackdrop ? 'var(--bg-translucent-chrome)' : 'var(--bg-sidebar)',
-        backdropFilter: hasBackdrop ? 'blur(14px)' : undefined,
-        WebkitBackdropFilter: hasBackdrop ? 'blur(14px)' : undefined,
+        backgroundColor: hasBackdrop ? 'var(--bg-translucent-chrome)' : 'var(--surface-glass-chrome)',
         borderRight: `1px solid ${borderToken}`,
       }}
     >
@@ -117,7 +107,7 @@ export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
                 </button>
               )}
               <span className="font-mono text-[10px] font-normal lowercase tabular-nums">
-                v0.2.4
+                v0.2.5
               </span>
             </div>
           </div>

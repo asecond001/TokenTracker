@@ -236,11 +236,11 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
         template_entry(
             "google_ai_ultra",
             provider_ids::ANTIGRAVITY,
-            "Google AI Ultra 20x",
+            "Google AI Ultra",
             199_990_000,
             250_000_000,
             1_250_000_000,
-            "Google AI Ultra 20x / Antigravity 旗舰订阅（20 倍 Pro 额度）",
+            "Google AI Ultra / Antigravity 旗舰订阅（20 倍 Pro 额度）",
         ),
         template_entry(
             "gemini_enterprise",

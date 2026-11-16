@@ -395,6 +395,12 @@ export function App() {
         color: 'var(--text-primary)',
       }}
     >
+      {/* Subtle Material You ambient tonal mesh for Liquid Glass chrome depth */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 z-0"
+        style={{ background: 'var(--ambient-mesh)' }}
+      />
       <WorkspaceBackdrop preferences={activePreferences} />
 
       <div className="relative z-10 flex flex-col flex-1 min-h-0">
@@ -403,6 +409,7 @@ export function App() {
           isScanning={scanMutation.isPending}
           livePulseSeq={livePulseSeq}
           hasBackdrop={hasBackdrop}
+          floatingEnabled={activePreferences?.floating_window_enabled ?? false}
           onScanNow={() => scanMutation.mutate()}
           onPersistCurrency={applyAndPersistCurrency}
           onPersistTheme={applyAndPersistTheme}

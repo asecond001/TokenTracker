@@ -29,10 +29,11 @@ export function TimeRangeControl({ className = '' }: TimeRangeControlProps) {
     <div
       data-testid="time-range-control"
       aria-label="时间范围选择"
-      className={`relative inline-flex items-center p-0.5 rounded ${className}`.trim()}
+      className={`relative inline-flex items-center p-0.5 rounded-full ${className}`.trim()}
       style={{
-        backgroundColor: 'var(--bg-sidebar)',
+        backgroundColor: 'var(--surface-glass)',
         border: '1px solid var(--border-hairline)',
+        boxShadow: 'var(--border-specular)',
       }}
     >
       {TIME_PRESETS.map((preset) => {
@@ -51,9 +52,9 @@ export function TimeRangeControl({ className = '' }: TimeRangeControlProps) {
                 setTimePreset(preset.id);
               }
             }}
-            className="seg-pill px-2 py-0.5 text-[11.5px] rounded-sm cursor-pointer whitespace-nowrap"
+            className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer whitespace-nowrap"
             style={{
-              color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+              color: active ? 'var(--accent-tonal-text)' : 'var(--text-secondary)',
               fontWeight: active ? 500 : 400,
             }}
           >
@@ -64,11 +65,7 @@ export function TimeRangeControl({ className = '' }: TimeRangeControlProps) {
 
       {showCustomPopover && (
         <div
-          className="absolute right-0 top-8 z-50 flex items-center gap-2 p-2.5 rounded shadow-lg"
-          style={{
-            backgroundColor: 'var(--bg-elevated)',
-            border: '1px solid var(--border-strong)',
-          }}
+          className="liquid-popover absolute right-0 top-9 z-50 flex items-center gap-2 p-2.5"
         >
           <input
             type="date"

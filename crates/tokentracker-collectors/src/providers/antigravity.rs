@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tokentracker_core::domain::{
-    compute_event_id, provider_ids, NormalizedUsageEvent, ObservedRateLimitWindow,
+    compute_event_id, provider_ids, sanitize_session_title, NormalizedUsageEvent,
+    ObservedRateLimitWindow,
 };
 
 use crate::providers::{
@@ -48,24 +49,46 @@ fn extract_model_selection_from_content(content: &str) -> Option<String> {
     Some(before_sentence_end.to_string())
 }
 
-/// Extract an explicit subscription / tier hint from `<USER_SETTINGS_CHANGE>` or JSON metadata.
-fn normalize_antigravity_plan_hint(raw: &str) -> Option<String> {
+/// Extract an explicit subscription / tier hint from settings or JSON tier metadata (NEVER from model names like Gemini Pro).
+fn normalize_explicit_antigravity_tier(raw: &str) -> Option<String> {
     let lower = raw.trim().to_ascii_lowercase();
     if lower.is_empty() || lower == "none" || lower == "unknown" {
         return None;
     }
-    if lower.contains("ultra") && (lower.contains("20x") || lower.contains("199")) {
-        Some("ultra_20x".to_string())
-    } else if lower.contains("ultra") && (lower.contains("5x") || lower.contains("99")) {
+    if lower.contains("ultra") && (lower.contains("5x") || lower.contains("99")) {
         Some("ultra_5x".to_string())
     } else if lower.contains("ultra") {
         Some("ultra".to_string())
     } else if lower.contains("enterprise") || lower.contains("business") {
         Some("enterprise".to_string())
-    } else if lower.contains("free") {
+    } else if lower.contains("plus") {
+        Some("plus".to_string())
+    } else if lower.contains("free") || lower.contains("standard-tier") {
         Some("free".to_string())
-    } else if lower.contains("pro") || lower.contains("g1") || lower.contains("premium") {
+    } else if lower == "pro"
+        || lower.contains("g1-pro")
+        || lower.contains("google ai pro")
+        || lower.contains("google_ai_pro")
+    {
         Some("pro".to_string())
+    } else {
+        None
+    }
+}
+
+/// Infer Ultra/Enterprise tier ONLY from Ultra-exclusive model identifiers (e.g. Carbon backend);
+/// never infer Pro from "Gemini Pro" models because Pro models are shared by Ultra & Pro plans.
+fn infer_antigravity_tier_from_model_name(model_name: &str) -> Option<String> {
+    let lower = model_name.trim().to_ascii_lowercase();
+    if lower.is_empty() || lower == "none" {
+        return None;
+    }
+    if lower.contains("ultra") && (lower.contains("5x") || lower.contains("99")) {
+        Some("ultra_5x".to_string())
+    } else if lower.contains("ultra") || lower.contains("carbon") || lower.contains("g1-ultra") {
+        Some("ultra".to_string())
+    } else if lower.contains("enterprise") {
+        Some("enterprise".to_string())
     } else {
         None
     }
@@ -87,25 +110,32 @@ fn parse_settings_json_for_plan_hint(path: &Path) -> Option<String> {
         "plan_tier",
         "quotaTier",
         "quota_tier",
+        "userTier",
+        "user_tier",
         "tier",
         "plan",
         "membership",
     ] {
         if let Some(s) = val.get(key).and_then(|v| v.as_str()) {
-            if let Some(hint) = normalize_antigravity_plan_hint(s) {
+            if let Some(hint) = normalize_explicit_antigravity_tier(s) {
                 return Some(hint);
             }
         }
     }
 
-    // Official Antigravity CLI `settings.json` documents `useG1Credits` for Google AI Pro / Ultra personal tiers.
-    if val
-        .get("useG1Credits")
-        .or_else(|| val.get("use_g1_credits"))
-        .and_then(|v| v.as_bool())
-        .is_some()
+    for nested_val in [
+        val.pointer("/agent/preferredModelTier"),
+        val.pointer("/agent/preferred_model_tier"),
+        val.pointer("/models/orchestratorBackend"),
+    ]
+    .into_iter()
+    .flatten()
     {
-        return Some("pro".to_string());
+        if let Some(s) = nested_val.as_str() {
+            if let Some(hint) = normalize_explicit_antigravity_tier(s) {
+                return Some(hint);
+            }
+        }
     }
 
     None
@@ -152,7 +182,7 @@ fn extract_antigravity_rate_limits(
         .or_else(|| val.get("tier"))
         .or_else(|| val.get("plan"))
         .and_then(|v| v.as_str())
-        .and_then(normalize_antigravity_plan_hint)
+        .and_then(normalize_explicit_antigravity_tier)
         .or_else(|| fallback_hint.map(ToString::to_string));
 
     let mut out = Vec::new();
@@ -170,7 +200,7 @@ fn extract_antigravity_rate_limits(
         .or_else(|| rl_obj.get("tier"))
         .or_else(|| rl_obj.get("plan"))
         .and_then(|v| v.as_str())
-        .and_then(normalize_antigravity_plan_hint)
+        .and_then(normalize_explicit_antigravity_tier)
         .or(explicit_hint);
 
     for (window_name, win_val) in rl_obj {
@@ -224,28 +254,100 @@ fn extract_antigravity_rate_limits(
     out
 }
 
-/// Scan an existing `transcript.jsonl` read-only for `<USER_SETTINGS_CHANGE>` entries so
-/// incremental tailing from a non-zero byte offset still knows the active session model.
-fn resolve_initial_model_from_file(path: &Path) -> Option<String> {
-    let file = open_shared_readonly(path).ok()?;
+fn extract_antigravity_user_request(content: &str) -> Option<&str> {
+    let extracted = if let Some(s) = content.find("<USER_REQUEST>") {
+        let rest = &content[s + "<USER_REQUEST>".len()..];
+        rest.split_once("</USER_REQUEST>")
+            .map(|(head, _)| head)
+            .unwrap_or(rest)
+    } else if let Some(start_sc) = content.find(SETTINGS_CHANGE_OPEN) {
+        if let Some(end_sc) = content[start_sc..].find(SETTINGS_CHANGE_CLOSE) {
+            &content[start_sc + end_sc + SETTINGS_CHANGE_CLOSE.len()..]
+        } else {
+            content
+        }
+    } else {
+        content
+    };
+    let trimmed = extracted.trim();
+    if trimmed.is_empty() || trimmed.to_ascii_lowercase().starts_with("[plan review") {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+#[derive(Default)]
+struct InitialAntigravityMetadata {
+    active_model: Option<String>,
+    initial_title: Option<(String, String, i64)>,
+    model_tier_hint: Option<String>,
+}
+
+/// Scan an existing `transcript.jsonl` read-only from byte 0 so incremental tailing from any
+/// offset knows the active model, initial first-message title, and Ultra/Carbon tier signal.
+fn scan_initial_antigravity_metadata(path: &Path) -> InitialAntigravityMetadata {
+    let Ok(file) = open_shared_readonly(path) else {
+        return InitialAntigravityMetadata::default();
+    };
     let mut reader = BufReader::new(file);
     let mut line = String::new();
-    let mut active_model: Option<String> = None;
+    let mut meta = InitialAntigravityMetadata::default();
 
-    while reader.read_line(&mut line).ok()? > 0 {
-        if line.contains(SETTINGS_CHANGE_OPEN) && line.contains("Model Selection") {
-            if let Ok(val) = serde_json::from_str::<Value>(&line) {
-                if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
+    while reader.read_line(&mut line).ok().is_some_and(|n| n > 0) {
+        if let Ok(val) = serde_json::from_str::<Value>(line.trim()) {
+            let ts_ms = parse_timestamp_ms(val.get("created_at").or_else(|| val.get("timestamp")))
+                .unwrap_or(0);
+            let source = val.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let step_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+            if let Some(title) = val
+                .get("title")
+                .or_else(|| val.get("conversation_title"))
+                .and_then(|v| v.as_str())
+                .and_then(sanitize_session_title)
+            {
+                meta.initial_title = Some((title, "explicit".to_string(), ts_ms));
+            } else if meta.initial_title.is_none()
+                && !source.eq_ignore_ascii_case("SYSTEM")
+                && (step_type.eq_ignore_ascii_case("USER_INPUT")
+                    || source.eq_ignore_ascii_case("USER_EXPLICIT"))
+            {
+                if let Some(user_req) = val
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .and_then(extract_antigravity_user_request)
+                    .and_then(sanitize_session_title)
+                {
+                    meta.initial_title = Some((user_req, "user_prompt".to_string(), ts_ms));
+                }
+            }
+
+            if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
+                if content.contains(SETTINGS_CHANGE_OPEN) && content.contains("Model Selection") {
                     if let Some(model) = extract_model_selection_from_content(content) {
-                        active_model = Some(model);
+                        if let Some(h) = infer_antigravity_tier_from_model_name(&model) {
+                            meta.model_tier_hint = Some(h);
+                        }
+                        meta.active_model = Some(model);
                     }
+                }
+            }
+
+            if meta.model_tier_hint.is_none() {
+                if let Some(explicit_m) = val
+                    .get("model")
+                    .or_else(|| val.get("model_id"))
+                    .and_then(|v| v.as_str())
+                {
+                    meta.model_tier_hint = infer_antigravity_tier_from_model_name(explicit_m);
                 }
             }
         }
         line.clear();
     }
 
-    active_model
+    meta
 }
 
 #[derive(Debug, Default, Clone)]
@@ -298,10 +400,13 @@ impl ProviderLogParser for AntigravityParser {
             .unwrap_or("antigravity-conv")
             .to_string();
 
-        let initial_model =
-            resolve_initial_model_from_file(path).unwrap_or_else(|| DEFAULT_ANTIGRAVITY_MODEL.to_string());
-        let detected_plan_hint = resolve_antigravity_plan_hint(path)
-            .or_else(|| normalize_antigravity_plan_hint(&initial_model));
+        let initial_meta = scan_initial_antigravity_metadata(path);
+        let initial_model = initial_meta
+            .active_model
+            .unwrap_or_else(|| DEFAULT_ANTIGRAVITY_MODEL.to_string());
+        let detected_plan_hint =
+            resolve_antigravity_plan_hint(path).or(initial_meta.model_tier_hint);
+        let has_initial_title = initial_meta.initial_title.is_some();
 
         FileParseContext {
             file_path: path.to_string_lossy().to_string(),
@@ -310,6 +415,8 @@ impl ProviderLogParser for AntigravityParser {
             project_label: "antigravity".to_string(),
             current_model: Some(initial_model),
             detected_plan_hint,
+            session_title: initial_meta.initial_title,
+            session_title_dirty: has_initial_title,
             ..Default::default()
         }
     }
@@ -345,7 +452,7 @@ impl ProviderLogParser for AntigravityParser {
             .or_else(|| val.get("subscription_tier"))
             .or_else(|| val.get("tier"))
             .and_then(|v| v.as_str())
-            .and_then(normalize_antigravity_plan_hint)
+            .and_then(normalize_explicit_antigravity_tier)
         {
             if ctx.detected_plan_hint.as_deref() != Some(explicit_tier.as_str()) {
                 ctx.detected_plan_hint = Some(explicit_tier);
@@ -356,7 +463,7 @@ impl ProviderLogParser for AntigravityParser {
         let content_opt = val.get("content").and_then(|v| v.as_str());
         if let Some(content) = content_opt {
             if let Some(selected_model) = extract_model_selection_from_content(content) {
-                if let Some(model_hint) = normalize_antigravity_plan_hint(&selected_model) {
+                if let Some(model_hint) = infer_antigravity_tier_from_model_name(&selected_model) {
                     if ctx.detected_plan_hint.is_none() {
                         ctx.detected_plan_hint = Some(model_hint);
                         ctx.plan_hint_emitted = false;
@@ -384,32 +491,20 @@ impl ProviderLogParser for AntigravityParser {
                     return Some(ParsedLineResult {
                         event: Some(pending),
                         rate_limits,
+                        balance: None,
                     });
                 }
             }
         }
 
-        let is_user_step = step_type.eq_ignore_ascii_case("USER_INPUT")
-            || source.eq_ignore_ascii_case("USER_EXPLICIT");
+        let is_user_step = !source.eq_ignore_ascii_case("SYSTEM")
+            && (step_type.eq_ignore_ascii_case("USER_INPUT")
+                || source.eq_ignore_ascii_case("USER_EXPLICIT"));
         if is_user_step {
             ctx.pending_antigravity_event = None;
             ctx.last_prompt_ts_ms = Some(ts_ms);
-            if let Some(content) = content_opt {
-                let user_req = if let Some(s) = content.find("<USER_REQUEST>") {
-                    let rest = &content[s + "<USER_REQUEST>".len()..];
-                    rest.split_once("</USER_REQUEST>")
-                        .map(|(head, _)| head)
-                        .unwrap_or(rest)
-                } else if let Some(start_sc) = content.find(SETTINGS_CHANGE_OPEN) {
-                    if let Some(end_sc) = content[start_sc..].find(SETTINGS_CHANGE_CLOSE) {
-                        &content[start_sc + end_sc + SETTINGS_CHANGE_CLOSE.len()..]
-                    } else {
-                        content
-                    }
-                } else {
-                    content
-                };
-                ctx.record_session_title(user_req, "derived", ts_ms);
+            if let Some(user_req) = content_opt.and_then(extract_antigravity_user_request) {
+                ctx.record_session_title(user_req, "user_prompt", ts_ms);
             }
         }
 
@@ -436,6 +531,7 @@ impl ProviderLogParser for AntigravityParser {
                 Some(ParsedLineResult {
                     event: None,
                     rate_limits,
+                    balance: None,
                 })
             };
         }
@@ -510,7 +606,7 @@ impl ProviderLogParser for AntigravityParser {
             if let Some(hint) = ctx
                 .detected_plan_hint
                 .clone()
-                .or_else(|| normalize_antigravity_plan_hint(&model_id))
+                .or_else(|| infer_antigravity_tier_from_model_name(&model_id))
             {
                 ctx.plan_hint_emitted = true;
                 rate_limits.push(ObservedRateLimitWindow {
@@ -567,6 +663,7 @@ impl ProviderLogParser for AntigravityParser {
         Some(ParsedLineResult {
             event: Some(event),
             rate_limits,
+            balance: None,
         })
     }
 
@@ -706,5 +803,70 @@ mod tests {
         assert_eq!(finalized[0].duration_ms, Some(16_000));
         assert!((finalized[0].output_tps.expect("final tps") - 25.0).abs() < 1e-6);
         assert_eq!(finalized[1].output_tps, None);
+    }
+
+    #[test]
+    fn locks_first_user_prompt_title_and_avoids_false_pro_from_g1_or_gemini_pro() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings_path = dir.path().join("settings.json");
+        std::fs::write(&settings_path, r#"{"useG1Credits":true}"#).expect("write settings");
+        assert_eq!(parse_settings_json_for_plan_hint(&settings_path), None);
+
+        std::fs::write(
+            &settings_path,
+            r#"{"agent":{"preferredModelTier":"g1-ultra-tier"}}"#,
+        )
+        .expect("write ultra settings");
+        assert_eq!(
+            parse_settings_json_for_plan_hint(&settings_path).as_deref(),
+            Some("ultra")
+        );
+
+        assert_eq!(infer_antigravity_tier_from_model_name("Gemini 3.1 Pro (High)"), None);
+        assert_eq!(
+            infer_antigravity_tier_from_model_name("Orchestrator (Carbon)").as_deref(),
+            Some("ultra")
+        );
+
+        let transcript = dir
+            .path()
+            .join("brain")
+            .join("conv-first-msg")
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript.jsonl");
+        std::fs::create_dir_all(transcript.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &transcript,
+            concat!(
+                r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-16T01:00:00Z","content":"<USER_REQUEST>Build initial dark glass layout</USER_REQUEST>\n<USER_SETTINGS_CHANGE>Model Selection from None to Gemini 3.1 Pro (High).</USER_SETTINGS_CHANGE>"}"#,
+                "\n",
+                r#"{"step_index":1,"source":"SYSTEM","type":"USER_INPUT","status":"DONE","created_at":"2026-11-16T01:01:00Z","content":"[plan review] internal handoff"}"#,
+                "\n",
+                r#"{"step_index":2,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-16T01:05:00Z","content":"<USER_REQUEST>Continue step 3</USER_REQUEST>"}"#,
+                "\n",
+            ),
+        )
+        .expect("write transcript");
+
+        let parser = AntigravityParser::new();
+        let mut ctx = parser.init_context(&transcript, "dev-1");
+        assert_eq!(
+            ctx.session_title.as_ref().map(|t| t.0.as_str()),
+            Some("Build initial dark glass layout")
+        );
+
+        // Even feeding later turn or mid-file warmup keeps first sentence locked
+        ctx.lock_non_explicit_title = true;
+        assert!(parser
+            .parse_line(
+                r#"{"step_index":3,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-16T02:00:00Z","content":"<USER_REQUEST>Latest message must not win</USER_REQUEST>"}"#,
+                &mut ctx,
+            )
+            .is_none());
+        assert_eq!(
+            ctx.session_title.as_ref().map(|t| t.0.as_str()),
+            Some("Build initial dark glass layout")
+        );
     }
 }

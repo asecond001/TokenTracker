@@ -600,6 +600,35 @@ pub struct ProviderBalanceSnapshot {
     pub fetched_at_ms: i64,
 }
 
+/// Pay-as-you-go account or prepaid credit tracker persisted in SQLite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaygAccount {
+    pub account_id: String,
+    pub provider_id: String,
+    pub account_name: String,
+    pub enabled: bool,
+    /// Optional user-recorded credit/prepaid balance in micro-USD when no official balance API exists.
+    pub manual_balance_micro_usd: Option<i64>,
+    /// Epoch ms when `manual_balance_micro_usd` was recorded; local usage after this time deducts from it.
+    pub balance_anchor_ms: Option<i64>,
+    /// Optional monthly pay-as-you-go spend budget alert threshold in micro-USD.
+    pub monthly_budget_micro_usd: Option<i64>,
+    #[serde(default)]
+    pub is_auto: bool,
+    pub updated_at_ms: i64,
+}
+
+/// Live evaluated pay-as-you-go balance, credits, and local spend summary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaygAccountStatus {
+    pub account: PaygAccount,
+    pub official_balance: Option<ProviderBalanceSnapshot>,
+    pub remaining_manual_balance_micro_usd: Option<i64>,
+    pub today_cost_micro_usd: i64,
+    pub month_cost_micro_usd: i64,
+    pub budget_used_percent: Option<f64>,
+}
+
 /// Supported log/payload format presets for user-configured custom providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -728,10 +757,40 @@ const BOILERPLATE_BLOCK_TAGS: &[&str] = &[
     "ide_opened_file",
     "ide_selection",
     "collaboration_mode",
+    "additional_metadata",
+    "additional-metadata",
+    "user_settings_change",
+    "context_summary",
+    "compacted_context",
 ];
+
+fn is_compaction_or_handoff_preamble(lower: &str) -> bool {
+    lower.starts_with("the following is the codex agent history")
+        || lower.starts_with("the following is a summary of")
+        || lower.starts_with("another language model started to solve this problem")
+        || lower.starts_with("[plan review")
+        || lower.starts_with("context summary:")
+        || lower.starts_with("conversation summary:")
+        || lower.starts_with("here is a summary of the conversation")
+        || lower.starts_with("summary of the conversation so far")
+        || lower.starts_with("compact summary")
+}
 
 fn strip_boilerplate_blocks(text: &str) -> String {
     let mut owned = text.to_string();
+    let lower_init = owned.to_ascii_lowercase();
+    if let Some(req_start) = lower_init.find("<user_request>") {
+        let after_tag = req_start + "<user_request>".len();
+        let rest_lower = &lower_init[after_tag..];
+        let extracted = if let Some(req_end_rel) = rest_lower.find("</user_request>") {
+            owned[after_tag..after_tag + req_end_rel].to_string()
+        } else {
+            owned[after_tag..].to_string()
+        };
+        if !extracted.trim().is_empty() {
+            owned = extracted;
+        }
+    }
     for tag in BOILERPLATE_BLOCK_TAGS {
         let open_prefix = format!("<{tag}");
         let close_tag = format!("</{tag}>");
@@ -751,9 +810,13 @@ fn strip_boilerplate_blocks(text: &str) -> String {
             }
         }
     }
-    // Unwrap <command-message>...</command-message> or <command-name>...</command-name>
+    // Unwrap <command-message>...</command-message>, <command-name>...</command-name>, <user_request>
     owned
         .trim()
+        .replace("<user_request>", "")
+        .replace("</user_request>", " ")
+        .replace("<USER_REQUEST>", "")
+        .replace("</USER_REQUEST>", " ")
         .replace("<command-message>", "")
         .replace("</command-message>", " ")
         .replace("<command-name>", "")
@@ -825,7 +888,11 @@ pub fn sanitize_session_title(raw: &str) -> Option<String> {
         .trim()
         .to_string();
 
-    if collapsed.chars().count() < 2 || looks_like_uuid(&collapsed) {
+    let collapsed_lower = collapsed.to_ascii_lowercase();
+    if collapsed.chars().count() < 2
+        || looks_like_uuid(&collapsed)
+        || is_compaction_or_handoff_preamble(&collapsed_lower)
+    {
         return None;
     }
 
@@ -895,6 +962,26 @@ mod domain_tps_and_title_tests {
         assert_eq!(
             sanitize_session_title("<command-name>/plan</command-name> Upgrade Tauri to 0.2.2"),
             Some("/plan Upgrade Tauri to 0.2.2".to_string())
+        );
+        assert_eq!(
+            sanitize_session_title(
+                "The following is the Codex agent history. Some context was compacted..."
+            ),
+            None
+        );
+        assert_eq!(
+            sanitize_session_title("Another language model started to solve this problem..."),
+            None
+        );
+        assert_eq!(
+            sanitize_session_title("[plan review] please inspect current status"),
+            None
+        );
+        assert_eq!(
+            sanitize_session_title(
+                "<USER_REQUEST>Refactor pay-as-you-go UI</USER_REQUEST>\n<USER_SETTINGS_CHANGE>Model changed</USER_SETTINGS_CHANGE>"
+            ),
+            Some("Refactor pay-as-you-go UI".to_string())
         );
     }
 }

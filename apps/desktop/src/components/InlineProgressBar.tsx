@@ -30,6 +30,7 @@ export function InlineProgressBar({
       style={{
         height: `${heightPx}px`,
         backgroundColor: showTrack ? 'var(--border-hairline)' : 'transparent',
+        boxShadow: showTrack ? 'inset 0 1px 2px rgba(0, 0, 0, 0.22)' : undefined,
         transition: 'background-color 180ms cubic-bezier(0.16, 1, 0.3, 1)',
       }}
     >
@@ -38,6 +39,8 @@ export function InlineProgressBar({
         style={{
           width: `${clamped}%`,
           backgroundColor: fillColor,
+          backgroundImage:
+            'linear-gradient(180deg, rgba(255, 255, 255, 0.24) 0%, rgba(255, 255, 255, 0) 100%)',
           transition:
             'width 520ms cubic-bezier(0.22, 1, 0.36, 1), background-color 280ms cubic-bezier(0.22, 1, 0.36, 1)',
         }}

@@ -22,9 +22,9 @@ use tokentracker_core::analytics::{
 use tokentracker_core::declarative::test_custom_rule_line;
 use tokentracker_core::domain::{
     AppPreferences, CatalogSyncResult, CustomProviderRule, CustomRuleTestResult, DeviceRecord,
-    IngestionCursor, ModelPricingEntry, ObservedRateLimitWindow, ProviderBalanceSnapshot,
-    ProviderConfig, RemoteSubscriptionSnapshot, SubscriptionPlan, SubscriptionPlanTemplate,
-    SyncEnvelopeV1,
+    IngestionCursor, ModelPricingEntry, ObservedRateLimitWindow, PaygAccount, PaygAccountStatus,
+    ProviderBalanceSnapshot, ProviderConfig, RemoteSubscriptionSnapshot, SubscriptionPlan,
+    SubscriptionPlanTemplate, SyncEnvelopeV1,
 };
 use tokentracker_core::subscription::SubscriptionPlanStatus;
 use tokentracker_core::sync_crypto::generate_kdf_salt_hex;
@@ -33,7 +33,7 @@ use tokentracker_core::CoreError;
 use crate::state::AppState;
 use crate::tray::{
     resize_floating_window_internal, set_floating_window_visible, show_main_window,
-    toggle_floating_window_internal, FLOATING_MONITOR_LABEL, TRAY_POPUP_LABEL,
+    toggle_floating_window_with, FLOATING_MONITOR_LABEL, TRAY_POPUP_LABEL,
 };
 
 const MAX_BG_IMAGE_BYTES: u64 = 15_728_640; // 15 MiB
@@ -775,6 +775,40 @@ pub fn get_provider_balances(
 }
 
 #[tauri::command]
+pub fn get_payg_accounts(
+    state: State<'_, AppState>,
+    tz_offset_minutes: Option<i32>,
+) -> Result<Vec<PaygAccountStatus>, IpcError> {
+    let now_ms = Utc::now().timestamp_millis();
+    state
+        .storage
+        .query_payg_accounts(now_ms, tz_offset_minutes.unwrap_or(480))
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub fn upsert_payg_account(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account: PaygAccount,
+) -> Result<(), IpcError> {
+    state.storage.upsert_payg_account(&account)?;
+    let _ = app.emit("usage-updated", &account.account_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_payg_account(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<(), IpcError> {
+    state.storage.delete_payg_account(&account_id)?;
+    let _ = app.emit("usage-updated", &account_id);
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn refresh_provider_balance(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -921,15 +955,21 @@ pub fn quit_application(app: AppHandle, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-pub fn toggle_floating_window(app: AppHandle) -> bool {
-    toggle_floating_window_internal(&app)
+pub async fn toggle_floating_window(app: AppHandle, visible: Option<bool>) -> bool {
+    toggle_floating_window_with(&app, visible)
 }
 
 #[tauri::command]
-pub fn get_floating_window_visible(app: AppHandle) -> bool {
+pub fn get_floating_window_visible(app: AppHandle, state: State<'_, AppState>) -> bool {
     app.get_webview_window(FLOATING_MONITOR_LABEL)
         .and_then(|w| w.is_visible().ok())
-        .unwrap_or(false)
+        .unwrap_or_else(|| {
+            state
+                .storage
+                .get_preferences()
+                .map(|p| p.floating_window_enabled)
+                .unwrap_or(false)
+        })
 }
 
 #[tauri::command]

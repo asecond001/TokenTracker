@@ -9,7 +9,7 @@ use crate::error::CoreResult;
 use crate::pricing::default_pricing_catalog;
 use crate::storage::repository::{rebuild_rollup_from_events, DAY_MS, HOUR_MS};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 8;
+pub const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -216,6 +216,10 @@ pub fn run_migrations(conn: &mut Connection) -> CoreResult<()> {
 
     if current_version < 8 {
         migrate_v7_to_v8(conn, now_ms)?;
+    }
+
+    if current_version < 9 {
+        migrate_v8_to_v9(conn, now_ms)?;
     }
 
     seed_defaults(conn, now_ms)?;
@@ -760,6 +764,72 @@ fn migrate_v7_to_v8(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     tx.execute(
         "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
         params![8i64, now_ms],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v8_to_v9(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS payg_accounts (
+            account_id TEXT PRIMARY KEY,
+            provider_id TEXT NOT NULL,
+            account_name TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            manual_balance_micro_usd INTEGER,
+            balance_anchor_ms INTEGER,
+            monthly_budget_micro_usd INTEGER,
+            is_auto INTEGER NOT NULL DEFAULT 0,
+            user_dismissed INTEGER NOT NULL DEFAULT 0,
+            updated_at_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_payg_accounts_provider
+            ON payg_accounts (provider_id, user_dismissed);
+
+        DELETE FROM observed_rate_limits
+        WHERE provider_id = 'antigravity'
+          AND window_name = 'tier_hint'
+          AND LOWER(COALESCE(plan_hint, '')) = 'pro';
+
+        DELETE FROM subscription_plans
+        WHERE plan_id = 'auto_antigravity'
+          AND user_customized = 0
+          AND user_dismissed = 0
+          AND plan_name = 'Google AI Pro';
+
+        DELETE FROM session_titles
+        WHERE (provider_id = 'antigravity' AND source != 'explicit')
+           OR (provider_id = 'codex' AND (
+               source != 'explicit'
+               OR LOWER(title) LIKE 'the following is the codex agent history%'
+               OR LOWER(title) LIKE 'the following is a summary of%'
+               OR LOWER(title) LIKE 'another language model started%'
+               OR LOWER(title) LIKE '[plan review%'
+           ));
+
+        DELETE FROM ingestion_cursors
+        WHERE provider_id IN ('codex', 'antigravity');
+        "#,
+    )?;
+
+    tx.execute(
+        r#"
+        UPDATE subscription_plans
+        SET plan_name = 'Google AI Ultra',
+            updated_at_ms = ?1
+        WHERE plan_id = 'auto_antigravity'
+          AND user_customized = 0
+          AND plan_name = 'Google AI Ultra 20x'
+        "#,
+        params![now_ms],
+    )?;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![9i64, now_ms],
     )?;
     tx.commit()?;
     Ok(())

@@ -68,8 +68,10 @@ export function TrayPopupPage() {
       className="h-screen w-screen flex flex-col justify-between p-3.5 select-none"
       style={{
         backgroundColor: 'var(--bg-canvas)',
+        backgroundImage: 'var(--ambient-mesh)',
         color: 'var(--text-primary)',
         border: '1px solid var(--border-strong)',
+        boxShadow: 'var(--border-specular)',
       }}
     >
       <div className="space-y-3 overflow-y-auto pr-0.5">
