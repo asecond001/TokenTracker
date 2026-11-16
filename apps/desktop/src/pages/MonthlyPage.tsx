@@ -307,9 +307,6 @@ export function MonthlyPage() {
       >
         <div>
           <h1 className="text-[16px] font-semibold tracking-tight">月度账单与活跃热力图</h1>
-          <p className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
-            汇总当月按量 API 等效价值、Token 消耗与 365 天活跃分布，支持 CSV / JSON 标准报表导出
-          </p>
         </div>
 
         <div className="flex items-center gap-3">

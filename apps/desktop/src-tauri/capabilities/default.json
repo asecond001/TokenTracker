@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default window, tray popup, autostart, notification, and dialog capabilities for TokenTracker.",
-  "windows": ["main", "tray-popup"],
+  "description": "Default window, tray popup, floating monitor, autostart, notification, and dialog capabilities for TokenTracker.",
+  "windows": ["main", "tray-popup", "floating-monitor"],
   "permissions": [
     "core:default",
     "core:app:allow-set-app-theme",
@@ -14,6 +14,9 @@
     "core:window:allow-hide",
     "core:window:allow-show",
     "core:window:allow-set-focus",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-set-always-on-top",
     "core:window:allow-start-dragging",
     "autostart:default",
     "notification:default",

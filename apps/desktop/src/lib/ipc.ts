@@ -47,6 +47,8 @@ function nowMinusHours(hours: number): number {
   return Date.now() - hours * 3_600_000;
 }
 
+let previewFloatingVisible = false;
+
 function defaultPreviewPreferences(now: number): AppPreferences {
   return {
     currency: 'USD',
@@ -65,6 +67,7 @@ function defaultPreviewPreferences(now: number): AppPreferences {
     auto_sync_pricing: true,
     exchange_rate_auto: true,
     auto_check_updates: true,
+    floating_window_enabled: previewFloatingVisible,
     last_rate_sync_at_ms: null,
     last_pricing_sync_at_ms: null,
     updated_at_ms: now,
@@ -596,6 +599,13 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
       } as T;
     case 'get_remote_subscription_snapshots':
       return [] as T;
+    case 'toggle_floating_window':
+      previewFloatingVisible = !previewFloatingVisible;
+      return previewFloatingVisible as T;
+    case 'get_floating_window_visible':
+      return previewFloatingVisible as T;
+    case 'set_floating_window_compact':
+      return undefined as T;
     default:
       return {} as T;
   }
@@ -766,4 +776,11 @@ export const ipc = {
     }),
 
   quitApplication: (): Promise<void> => callIpc('quit_application'),
+
+  toggleFloatingWindow: (): Promise<boolean> => callIpc('toggle_floating_window'),
+
+  getFloatingWindowVisible: (): Promise<boolean> => callIpc('get_floating_window_visible'),
+
+  setFloatingWindowCompact: (compact: boolean): Promise<void> =>
+    callIpc('set_floating_window_compact', { compact }),
 };

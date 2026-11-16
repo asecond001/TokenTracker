@@ -6,7 +6,7 @@ export interface AnimatedNumberProps {
   className?: string;
 }
 
-const DURATION_MS = 240;
+const DURATION_MS = 320;
 
 function easeOutExpo(t: number): number {
   return t >= 1 ? 1 : 1 - Math.pow(2, -10 * t);

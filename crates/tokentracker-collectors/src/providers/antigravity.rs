@@ -146,14 +146,46 @@ impl ProviderLogParser for AntigravityParser {
         let ts_ms = parse_timestamp_ms(val.get("created_at").or_else(|| val.get("timestamp")))
             .unwrap_or_else(now_ms);
 
-        let prev_step_ts = ctx.last_step_ts_ms.replace(ts_ms);
+        ctx.last_step_ts_ms = Some(ts_ms);
 
         let source = val.get("source").and_then(|v| v.as_str()).unwrap_or("");
         let step_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-        if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
+        if let Some(title) = val
+            .get("title")
+            .or_else(|| val.get("conversation_title"))
+            .and_then(|v| v.as_str())
+        {
+            ctx.record_session_title(title, "explicit", ts_ms);
+        }
+
+        let content_opt = val.get("content").and_then(|v| v.as_str());
+        if let Some(content) = content_opt {
             if let Some(selected_model) = extract_model_selection_from_content(content) {
                 ctx.current_model = Some(selected_model);
+            }
+        }
+
+        let is_user_step = step_type.eq_ignore_ascii_case("USER_INPUT")
+            || source.eq_ignore_ascii_case("USER_EXPLICIT");
+        if is_user_step {
+            ctx.last_prompt_ts_ms = Some(ts_ms);
+            if let Some(content) = content_opt {
+                let user_req = if let Some(s) = content.find("<USER_REQUEST>") {
+                    let rest = &content[s + "<USER_REQUEST>".len()..];
+                    rest.split_once("</USER_REQUEST>")
+                        .map(|(head, _)| head)
+                        .unwrap_or(rest)
+                } else if let Some(start_sc) = content.find(SETTINGS_CHANGE_OPEN) {
+                    if let Some(end_sc) = content[start_sc..].find(SETTINGS_CHANGE_CLOSE) {
+                        &content[start_sc + end_sc + SETTINGS_CHANGE_CLOSE.len()..]
+                    } else {
+                        content
+                    }
+                } else {
+                    content
+                };
+                ctx.record_session_title(user_req, "derived", ts_ms);
             }
         }
 
@@ -173,7 +205,6 @@ impl ProviderLogParser for AntigravityParser {
         let is_model_step = step_type.eq_ignore_ascii_case("PLANNER_RESPONSE")
             || upper_type.ends_with("_RESPONSE")
             || total_tokens > 0;
-        let _ = source;
         if !is_model_step {
             return None;
         }
@@ -182,9 +213,10 @@ impl ProviderLogParser for AntigravityParser {
             .get("duration_ms")
             .and_then(|v| v.as_i64())
             .filter(|&d| d > 0);
+        // Only fall back to explicit USER_INPUT prompt timestamp, never arbitrary preceding system/tool steps.
         let duration_ms = explicit_dur.or_else(|| {
-            prev_step_ts.and_then(|prev| {
-                let delta = ts_ms - prev;
+            ctx.last_prompt_ts_ms.take().and_then(|prompt_ts| {
+                let delta = ts_ms - prompt_ts;
                 if delta > 0 && delta <= 600_000 {
                     Some(delta)
                 } else {
@@ -308,5 +340,13 @@ mod tests {
             .and_then(|r| r.event)
             .expect("explicit model response");
         assert_eq!(ev3.model_id, "gemini-3-pro");
+
+        // Session title extracted cleanly from <USER_REQUEST>, ignoring preceding non-user step timing
+        assert_eq!(
+            ctx.session_title.as_ref().map(|t| t.0.as_str()),
+            Some("hello")
+        );
+        // Step 4 followed step 3 without a new USER_INPUT prompt: must NOT divide 10 tokens by 5s prev_step
+        assert_eq!(ev3.duration_ms, None);
     }
 }

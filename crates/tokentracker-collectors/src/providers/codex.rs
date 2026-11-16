@@ -7,8 +7,8 @@ use tokentracker_core::domain::{
 };
 
 use crate::providers::{
-    compute_tps, get_i64, now_ms, parse_timestamp_ms, user_home_dir, CodexRawTotals,
-    FileParseContext, ParsedLineResult, ProviderLogParser,
+    compute_tps, extract_text_from_content, get_i64, now_ms, parse_timestamp_ms, user_home_dir,
+    CodexRawTotals, FileParseContext, ParsedLineResult, ProviderLogParser,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -90,6 +90,13 @@ impl ProviderLogParser for CodexParser {
                         ctx.current_model = Some(model.trim().to_string());
                     }
                 }
+                if let Some(title) = payload
+                    .get("title")
+                    .or_else(|| payload.get("name"))
+                    .and_then(|v| v.as_str())
+                {
+                    ctx.record_session_title(title, "explicit", ts_ms);
+                }
                 None
             }
             "turn_context" => {
@@ -101,18 +108,32 @@ impl ProviderLogParser for CodexParser {
                 if let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) {
                     ctx.project_label = sanitize_project_label(Some(cwd));
                 }
-                ctx.last_prompt_ts_ms = Some(ts_ms);
+                // Only seed prompt timestamp from turn_context when no explicit user turn exists yet;
+                // otherwise mid-turn turn_context emissions right before token_count cause fake TPS spikes.
+                if ctx.last_prompt_ts_ms.is_none() {
+                    ctx.last_prompt_ts_ms = Some(ts_ms);
+                }
                 None
             }
             "response_item" => {
                 let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
                 if role == "user" {
                     ctx.last_prompt_ts_ms = Some(ts_ms);
+                    if let Some(text) = extract_text_from_content(payload.get("content")) {
+                        ctx.record_session_title(&text, "derived", ts_ms);
+                    }
                 }
                 None
             }
             "event_msg" => {
                 let ev_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if ev_type == "user_message" {
+                    ctx.last_prompt_ts_ms = Some(ts_ms);
+                    if let Some(msg) = payload.get("message").and_then(|v| v.as_str()) {
+                        ctx.record_session_title(msg, "derived", ts_ms);
+                    }
+                    return None;
+                }
                 if ev_type != "token_count" {
                     return None;
                 }
@@ -318,4 +339,38 @@ fn extract_rate_limits(payload: &Value, observed_at_ms: i64) -> Vec<ObservedRate
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn turn_context_does_not_overwrite_user_prompt_ts_and_extracts_title() {
+        let parser = CodexParser::new();
+        let mut ctx = parser.init_context(Path::new("C:/tmp/.codex/sessions/rollout-2026.jsonl"), "dev-1");
+
+        let meta = r#"{"timestamp":"2026-11-16T01:00:00.000Z","type":"session_meta","payload":{"id":"codex-sess-1","cwd":"C:/Projects/TokenTracker"}}"#;
+        let user_item = r#"{"timestamp":"2026-11-16T01:00:01.000Z","type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"<environment_context><cwd>C:/Projects</cwd></environment_context>\nImplement floating monitor"}]}}"#;
+        let turn_ctx = r#"{"timestamp":"2026-11-16T01:00:04.800Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#;
+        let tok_ev = r#"{"timestamp":"2026-11-16T01:00:05.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":500,"cached_input_tokens":0,"output_tokens":240,"reasoning_output_tokens":0},"total_token_usage":{"input_tokens":500,"cached_input_tokens":0,"output_tokens":240,"reasoning_output_tokens":0}}}}"#;
+
+        assert!(parser.parse_line(meta, &mut ctx).is_none());
+        assert!(parser.parse_line(user_item, &mut ctx).is_none());
+        assert!(parser.parse_line(turn_ctx, &mut ctx).is_none());
+        let ev = parser
+            .parse_line(tok_ev, &mut ctx)
+            .and_then(|r| r.event)
+            .expect("token_count event");
+
+        // Must measure duration from user prompt (4000ms), NOT from turn_context (200ms -> 1200 tok/s spike)
+        assert_eq!(ev.duration_ms, Some(4_000));
+        let tps = ev.output_tps.expect("valid tps");
+        assert!((tps - 60.0).abs() < 1e-6);
+        assert_eq!(
+            ctx.session_title.as_ref().map(|t| t.0.as_str()),
+            Some("Implement floating monitor")
+        );
+    }
 }

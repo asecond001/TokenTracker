@@ -39,7 +39,7 @@ export function InlineProgressBar({
           width: `${clamped}%`,
           backgroundColor: fillColor,
           transition:
-            'width 280ms cubic-bezier(0.16, 1, 0.3, 1), background-color 220ms cubic-bezier(0.16, 1, 0.3, 1)',
+            'width 360ms cubic-bezier(0.22, 1, 0.36, 1), background-color 240ms cubic-bezier(0.22, 1, 0.36, 1)',
         }}
       />
     </div>

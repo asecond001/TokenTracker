@@ -313,7 +313,7 @@ export function ModelsPricingPage() {
         ),
       }),
       colHelper.accessor('provider_id', {
-        header: 'Provider',
+        header: '模型提供商',
         cell: (info) => (
           <span style={{ color: 'var(--text-secondary)' }}>
             {providerDisplayName(info.getValue())}
@@ -695,10 +695,10 @@ export function ModelsPricingPage() {
                       className="block text-[11.5px] mb-1"
                       style={{ color: 'var(--text-secondary)' }}
                     >
-                      所属 Provider
+                      所属模型提供商
                     </label>
                     <select
-                      aria-label="所属 Provider"
+                      aria-label="所属模型提供商"
                       value={form.provider_id}
                       onChange={(e) => setForm({ ...form, provider_id: e.target.value })}
                       className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none cursor-pointer"
@@ -711,6 +711,11 @@ export function ModelsPricingPage() {
                       <option value="claude_code">Claude Code</option>
                       <option value="codex">Codex</option>
                       <option value="antigravity">Antigravity</option>
+                      <option value="kimi_code">Kimi Code</option>
+                      <option value="workbuddy">Workbuddy</option>
+                      <option value="deepseek_harness">DeepSeek Harness</option>
+                      <option value="qcode">QCode</option>
+                      <option value="minimax_code">MiniMax Code</option>
                     </select>
                   </div>
                 </div>
@@ -762,7 +767,7 @@ export function ModelsPricingPage() {
                     type="button"
                     disabled={saveOverrideMutation.isPending}
                     onClick={() => saveOverrideMutation.mutate()}
-                    className="px-3.5 py-1.5 text-[12px] font-medium rounded cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
+                    className="btn-primary px-3.5 py-1.5 text-[12px] font-medium rounded cursor-pointer disabled:opacity-50"
                     style={{
                       backgroundColor: 'var(--accent-primary)',
                       color: '#ffffff',

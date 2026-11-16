@@ -9,7 +9,7 @@ use crate::error::CoreResult;
 use crate::pricing::default_pricing_catalog;
 use crate::storage::repository::{rebuild_rollup_from_events, DAY_MS, HOUR_MS};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 5;
+pub const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -204,6 +204,10 @@ pub fn run_migrations(conn: &mut Connection) -> CoreResult<()> {
 
     if current_version < 5 {
         migrate_v4_to_v5(conn, now_ms)?;
+    }
+
+    if current_version < 6 {
+        migrate_v5_to_v6(conn, now_ms)?;
     }
 
     seed_defaults(conn, now_ms)?;
@@ -569,6 +573,62 @@ fn migrate_v4_to_v5(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     Ok(())
 }
 
+fn migrate_v5_to_v6(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+
+    add_column_if_missing(
+        &tx,
+        "app_preferences",
+        "floating_window_enabled",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS session_titles (
+            session_key TEXT PRIMARY KEY,
+            provider_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'derived',
+            updated_at_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_titles_updated
+            ON session_titles (updated_at_ms DESC);
+        "#,
+    )?;
+
+    // Clean historical TPS outliers (<12 tokens, <500ms, missing duration, or >450 tok/s)
+    // and rebuild local-device hourly/daily rollups without disturbing synced remote devices.
+    tx.execute(
+        r#"
+        UPDATE usage_events
+        SET output_tps = NULL
+        WHERE output_tps IS NOT NULL
+          AND (
+            (output_tokens + reasoning_tokens) < ?1
+            OR duration_ms IS NULL
+            OR duration_ms < ?2
+            OR output_tps <= 0.0
+            OR output_tps > ?3
+          )
+        "#,
+        params![
+            crate::domain::MIN_VALID_TPS_OUTPUT_TOKENS,
+            crate::domain::MIN_VALID_TPS_DURATION_MS,
+            crate::domain::MAX_VALID_OUTPUT_TPS,
+        ],
+    )?;
+
+    crate::storage::repository::rebuild_local_rollups_conn(&tx, now_ms)?;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![6i64, now_ms],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn seed_defaults(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     let tx = conn.transaction()?;
 
@@ -627,8 +687,8 @@ fn seed_defaults(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
              otlp_enabled, otlp_port, device_display_name,
              bg_mode, bg_image_path, bg_preset_id, bg_opacity, bg_blur_px,
              auto_sync_pricing, exchange_rate_auto, last_rate_sync_at_ms, last_pricing_sync_at_ms,
-             auto_check_updates, updated_at_ms)
-        VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+             auto_check_updates, floating_window_enabled, updated_at_ms)
+        VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
         "#,
         params![
             prefs.currency.as_str(),
@@ -649,6 +709,7 @@ fn seed_defaults(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
             prefs.last_rate_sync_at_ms,
             prefs.last_pricing_sync_at_ms,
             i64::from(prefs.auto_check_updates),
+            i64::from(prefs.floating_window_enabled),
             now_ms,
         ],
     )?;

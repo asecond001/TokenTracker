@@ -32,7 +32,7 @@ const GRANULARITY_LABELS: Record<TrendGranularity, string> = {
 };
 
 const DIMENSIONS: Array<{ id: StackDimension; label: string }> = [
-  { id: 'provider', label: '按 Provider' },
+  { id: 'provider', label: '按模型提供商' },
   { id: 'model', label: '按模型' },
   { id: 'token_type', label: '按 Token 类型' },
 ];
@@ -177,7 +177,7 @@ export function TrendsPage() {
       >
         <div>
           <div className="flex items-center gap-2">
-            <h1 className="text-[16px] font-semibold tracking-tight">多粒度用量趋势</h1>
+            <h1 className="text-[16px] font-semibold tracking-tight">用量趋势</h1>
             {data?.effective_granularity && (
               <span
                 className="px-1.5 py-0.5 text-[10.5px] rounded tabular-nums"
@@ -188,14 +188,11 @@ export function TrendsPage() {
                 }}
               >
                 {granularity === 'auto'
-                  ? `自动粒度: ${GRANULARITY_LABELS[effectiveGranularity]}`
-                  : `粒度: ${GRANULARITY_LABELS[effectiveGranularity]}`}
+                  ? `自动: ${GRANULARITY_LABELS[effectiveGranularity]}`
+                  : GRANULARITY_LABELS[effectiveGranularity]}
               </span>
             )}
           </div>
-          <p className="text-[12px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
-            支持自动对齐全部历史到 15 分钟实时桶，点击图例或对比行可单独聚焦某一项
-          </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">

@@ -14,6 +14,7 @@ import {
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
 import { DataSourcesPage } from '../pages/DataSourcesPage';
+import { FloatingMonitorPage } from '../pages/FloatingMonitorPage';
 import { ModelsPricingPage } from '../pages/ModelsPricingPage';
 import { MonthlyPage, computeHeatmapIntensityLevels } from '../pages/MonthlyPage';
 import { OverviewPage } from '../pages/OverviewPage';
@@ -45,7 +46,15 @@ import type {
 } from '../types/ipc';
 
 interface EChartMockOption {
-  series?: Array<{ name?: unknown; lineStyle?: { width?: number; opacity?: number }; itemStyle?: { color?: string }; areaStyle?: { opacity?: number }; data?: unknown }>;
+  series?: Array<{
+    type?: string;
+    stack?: string;
+    name?: unknown;
+    lineStyle?: { width?: number; opacity?: number };
+    itemStyle?: { color?: string; borderWidth?: number; borderColor?: string };
+    areaStyle?: { opacity?: number };
+    data?: unknown;
+  }>;
   visualMap?: { type?: string; dimension?: number; pieces?: Array<{ value: number; color: string }> };
 }
 
@@ -113,6 +122,7 @@ function makePreferences(overrides: Partial<AppPreferences> = {}): AppPreference
     auto_sync_pricing: true,
     exchange_rate_auto: true,
     auto_check_updates: true,
+    floating_window_enabled: false,
     last_rate_sync_at_ms: null,
     last_pricing_sync_at_ms: null,
     updated_at_ms: 1_770_000_000_000,
@@ -574,7 +584,7 @@ describe('Workspace store & UI shell navigation', () => {
     expect(screen.getByText('Token 构成趋势')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '数据源与合规' }));
-    expect(await screen.findByText('数据源配置与合规采集边界')).toBeInTheDocument();
+    expect(await screen.findByText('数据源与合规采集')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '偏好设置' }));
     expect(await screen.findByText('偏好设置与同步契约')).toBeInTheDocument();
@@ -604,7 +614,7 @@ describe('Overview & Trends v0.1.1 defaults and all-time preset', () => {
 
     renderWithQuery(<OverviewPage />);
 
-    const providerBtn = await screen.findByRole('button', { name: '按 Provider' });
+    const providerBtn = await screen.findByRole('button', { name: '按模型提供商' });
     const tokenTypeBtn = screen.getByRole('button', { name: '按 Token 类型' });
     expect(providerBtn).toHaveAttribute('data-active', 'true');
     expect(tokenTypeBtn).toHaveAttribute('data-active', 'false');
@@ -641,9 +651,9 @@ describe('Overview & Trends v0.1.1 defaults and all-time preset', () => {
 
     renderWithQuery(<TrendsPage />);
 
-    expect(await screen.findByText('自动粒度: 天')).toBeInTheDocument();
+    expect(await screen.findByText('自动: 天')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '自动' })).toHaveAttribute('data-active', 'true');
-    expect(screen.getByRole('button', { name: '按 Provider' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: '按模型提供商' })).toHaveAttribute(
       'data-active',
       'true'
     );
@@ -682,7 +692,7 @@ describe('Overview & Trends v0.1.1 defaults and all-time preset', () => {
         })
       );
     });
-    expect(await screen.findByText('自动粒度: 周')).toBeInTheDocument();
+    expect(await screen.findByText('自动: 周')).toBeInTheDocument();
     expect(screen.getByText('全周期累计分布汇总')).toBeInTheDocument();
     expect(screen.queryByText('上一周期 Token')).not.toBeInTheDocument();
     expect(screen.queryByText('环比变化')).not.toBeInTheDocument();
@@ -723,9 +733,10 @@ describe('Subscriptions v0.1.1 zero-preset, templates, deletion & observed rate 
     );
 
     expect(
-      await screen.findByText('官方日志可观测限额快照（未绑定月费套餐）')
+      await screen.findByText('官方日志可观测限额快照')
     ).toBeInTheDocument();
-    expect(screen.getByText('官方日志可观测 · 未绑定月费套餐')).toBeInTheDocument();
+    expect(screen.getByText('官方实时限额')).toBeInTheDocument();
+    expect(screen.queryByText(/未设月费|未绑定月费套餐/)).not.toBeInTheDocument();
     expect(screen.getByText('5h 官方限额')).toBeInTheDocument();
     expect(screen.getByText('34.5%')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '绑定订阅' })).toBeInTheDocument();
@@ -789,7 +800,7 @@ describe('Subscriptions v0.1.1 zero-preset, templates, deletion & observed rate 
     expect(screen.getByText('Claude Max 5x')).toBeInTheDocument();
     // Bound provider (claude_code) should not appear as an unbound snapshot group
     expect(
-      screen.queryByText('官方日志可观测限额快照（未绑定月费套餐）')
+      screen.queryByText('官方日志可观测限额快照')
     ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '删除 Claude Max 5x' }));
@@ -871,16 +882,16 @@ describe('SpeedLatencyPage Provider overview and Model × Provider comparison', 
 
     renderWithQuery(<SpeedLatencyPage />);
 
-    expect(await screen.findByText('Provider 维度速度与延迟总览')).toBeInTheDocument();
-    expect(screen.getByText('模型 × Provider 速率对比')).toBeInTheDocument();
-    expect(screen.getByText('模型 × Provider 速度与耗时明细表')).toBeInTheDocument();
+    expect(await screen.findByText('模型提供商维度速度与延迟总览')).toBeInTheDocument();
+    expect(screen.getByText('模型 × 模型提供商速率对比')).toBeInTheDocument();
+    expect(screen.getByText('模型 × 模型提供商速度与耗时明细表')).toBeInTheDocument();
 
     // Context-size scatter/decay UI from v0.1.0 is completely gone
     expect(screen.queryByText(/上下文大小/)).not.toBeInTheDocument();
     expect(screen.queryByText(/衰减/)).not.toBeInTheDocument();
 
     const byModelBtn = screen.getByRole('button', { name: '按模型分组' });
-    const byProviderBtn = screen.getByRole('button', { name: '按 Provider 分组' });
+    const byProviderBtn = screen.getByRole('button', { name: '按模型提供商分组' });
     expect(byModelBtn).toHaveAttribute('data-active', 'true');
     fireEvent.click(byProviderBtn);
     expect(byProviderBtn).toHaveAttribute('data-active', 'true');
@@ -1204,7 +1215,7 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
     expect(screen.queryByTestId('time-range-control')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '数据源与合规' }));
-    expect(await screen.findByText('数据源配置与合规采集边界')).toBeInTheDocument();
+    expect(await screen.findByText('数据源与合规采集')).toBeInTheDocument();
     expect(screen.queryByTestId('time-range-control')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '偏好设置' }));
@@ -1265,7 +1276,7 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
     });
   });
 
-  it('eliminates stacked area border strokes, filters zero-token series, and decouples TokenType colors', async () => {
+  it('uses segmented non-overlapping bars by default, unstacked flow lines on toggle, filters zero-token series, and decouples TokenType colors', async () => {
     vi.spyOn(ipc, 'getOverview').mockResolvedValue(
       makeOverviewReport({
         provider_series: [
@@ -1294,12 +1305,13 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
     expect(chart).toHaveAttribute('data-series-names', 'Claude Code,Codex');
     const darkOption = JSON.parse(chart.getAttribute('data-option-json') || '{}') as EChartMockOption;
     for (const s of darkOption.series ?? []) {
-      expect(s.lineStyle?.width).toBe(0);
-      expect(s.lineStyle?.opacity).toBe(0);
-      expect(s.areaStyle?.opacity).toBe(0.42);
+      expect(s.type).toBe('bar');
+      expect(s.stack).toBe('tokens');
+      expect(s.itemStyle?.borderWidth).toBe(1.5);
+      expect(s.itemStyle?.borderColor).toBe('#0c0d10');
     }
 
-    // Switch to light mode -> opacity 0.55; switch to Token Type -> decoupled #0ea5e9 Input color
+    // Switch to light mode -> canvas separator updates; switch to Token Type -> decoupled #3b82f6 Input color
     act(() => {
       useWorkspaceStore.getState().setTheme('light');
     });
@@ -1308,9 +1320,17 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
       screen.getByTestId('echart-stub').getAttribute('data-option-json') || '{}'
     ) as EChartMockOption;
     expect(tokenTypeOption.series?.[0]?.itemStyle?.color).toBe(TOKEN_TYPE_COLORS.input);
-    expect(tokenTypeOption.series?.[0]?.itemStyle?.color).not.toBe('#6366f1');
-    expect(tokenTypeOption.series?.[0]?.lineStyle?.width).toBe(0);
-    expect(tokenTypeOption.series?.[0]?.areaStyle?.opacity).toBe(0.55);
+    expect(tokenTypeOption.series?.[0]?.itemStyle?.color).toBe('#3b82f6');
+    expect(tokenTypeOption.series?.[0]?.itemStyle?.borderColor).toBe('#ffffff');
+
+    // Switch to unstacked flow line mode so series never cross-blend via stacked splines
+    fireEvent.click(screen.getByRole('button', { name: '流向曲线' }));
+    const lineOption = JSON.parse(
+      screen.getByTestId('echart-stub').getAttribute('data-option-json') || '{}'
+    ) as EChartMockOption;
+    expect(lineOption.series?.[0]?.type).toBe('line');
+    expect(lineOption.series?.[0]?.stack).toBeUndefined();
+    expect(lineOption.series?.[0]?.lineStyle?.width).toBe(1.75);
   });
 
   it('supports manual catalog/rate sync and exchange_rate_auto toggling across ModelsPricingPage and PreferencesPage', async () => {
@@ -1830,9 +1850,9 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
 
     renderWithQuery(<OverviewPage />);
 
-    expect(await screen.findByText('今日 Provider 占比')).toBeInTheDocument();
+    expect(await screen.findByText('今日模型提供商占比')).toBeInTheDocument();
     expect(screen.getByText('今日 Top 3 模型消耗占比')).toBeInTheDocument();
-    expect(screen.getByText('今日零点起实时累计')).toBeInTheDocument();
+    expect(screen.getByText('今日实时用量')).toBeInTheDocument();
   });
 
   it('renders auto-discovered official API plans, live reference tiers, and converts open drawer currency reactively', async () => {
@@ -1982,5 +2002,208 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
     ).toBeInTheDocument();
     expect(screen.getByText('周期配额: 18 / 100')).toBeInTheDocument();
     expect(screen.queryByText(/QUOTA 0\.00/)).not.toBeInTheDocument();
+  });
+});
+
+describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', () => {
+  beforeEach(() => {
+    resetWorkspaceState();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it('renders FloatingMonitorPage with live token counter, session title, compact toggle, and close IPCs', async () => {
+    const now = Date.now();
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(
+      makePreferences({ floating_window_enabled: true })
+    );
+    vi.spyOn(ipc, 'getTraySummary').mockResolvedValue(
+      makeTraySummary({
+        today_tokens: 215_000,
+        today_cost_micro_usd: 3_400_000,
+        latest_output_tps: 78.4,
+        active_sessions: [
+          {
+            session_key: '#a1b2c3',
+            session_title: 'Refactor Floating Monitor HUD',
+            provider_id: 'claude_code',
+            model_id: 'claude-sonnet-4-5',
+            project_label: 'TokenTracker',
+            activity_state: 'active',
+            started_at_ms: now - 120_000,
+            last_active_at_ms: now - 5_000,
+            request_count: 8,
+            total_tokens: 80_000,
+            input_tokens: 60_000,
+            output_tokens: 20_000,
+            cache_read_tokens: 0,
+            estimated_cost_micro_usd: 1_100_000,
+            latest_output_tps: 78.4,
+          },
+        ],
+      })
+    );
+    const compactSpy = vi.spyOn(ipc, 'setFloatingWindowCompact').mockResolvedValue(undefined);
+    const toggleSpy = vi.spyOn(ipc, 'toggleFloatingWindow').mockResolvedValue(false);
+
+    renderWithQuery(<FloatingMonitorPage />);
+
+    expect(screen.getByText('TokenTracker 实时悬浮窗')).toBeInTheDocument();
+    expect(await screen.findByText('Refactor Floating Monitor HUD')).toBeInTheDocument();
+    expect(screen.getByText('78.4 tok/s')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '切换精简胶囊模式' }));
+    expect(compactSpy).toHaveBeenCalledWith(true);
+    expect(await screen.findByRole('button', { name: '展开悬浮窗' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '关闭悬浮窗' }));
+    expect(toggleSpy).toHaveBeenCalled();
+  });
+
+  it('displays detected subscription tier status without ever showing 未设月费', async () => {
+    const now = Date.now();
+    const zeroFeePlans: SubscriptionPlanStatus[] = [
+      {
+        plan: {
+          plan_id: 'auto_kimi_code',
+          provider_id: 'kimi_code',
+          plan_name: 'Kimi Code Vivace',
+          enabled: true,
+          monthly_fee_micro_usd: 0,
+          is_user_configured: true,
+          auto_source: 'official_api',
+          updated_at_ms: now,
+          windows: [
+            {
+              window_id: '5h',
+              label: '5h 官方限额',
+              duration_hours: 5,
+              rolling: true,
+              unit: 'tokens',
+              limit_value: 100,
+              warning_percent: 80,
+              critical_percent: 95,
+            },
+          ],
+        },
+        windows: [
+          {
+            window_id: '5h',
+            label: '5h 官方限额',
+            duration_hours: 5,
+            rolling: true,
+            unit: 'tokens',
+            used_value: 25,
+            limit_value: 100,
+            used_percent: 25,
+            warning_percent: 80,
+            critical_percent: 95,
+            burn_rate_per_hour: 5,
+            projected_exhaustion_hours: null,
+            resets_at_ms: now + 3600_000,
+            resets_in_seconds: 3600,
+            source: 'official_api',
+            alert_level: 'normal',
+          },
+        ],
+      },
+      {
+        plan: {
+          plan_id: 'custom_window_plan',
+          provider_id: 'qcode',
+          plan_name: 'QCode 日额度套餐',
+          enabled: true,
+          monthly_fee_micro_usd: 0,
+          is_user_configured: true,
+          auto_source: null,
+          updated_at_ms: now,
+          windows: [
+            {
+              window_id: '24h',
+              label: '24h 日额度',
+              duration_hours: 24,
+              rolling: true,
+              unit: 'tokens',
+              limit_value: 100,
+              warning_percent: 80,
+              critical_percent: 95,
+            },
+          ],
+        },
+        windows: [
+          {
+            window_id: '24h',
+            label: '24h 日额度',
+            duration_hours: 24,
+            rolling: true,
+            unit: 'tokens',
+            used_value: 10,
+            limit_value: 100,
+            used_percent: 10,
+            warning_percent: 80,
+            critical_percent: 95,
+            burn_rate_per_hour: 1,
+            projected_exhaustion_hours: null,
+            resets_at_ms: null,
+            resets_in_seconds: 0,
+            source: 'local_log',
+            alert_level: 'normal',
+          },
+        ],
+      },
+    ];
+
+    vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue(zeroFeePlans);
+    vi.spyOn(ipc, 'getObservedRateLimits').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getSubscriptionTemplates').mockResolvedValue([]);
+
+    renderWithQuery(<SubscriptionsPage />);
+
+    expect(await screen.findByText('Kimi Code Vivace')).toBeInTheDocument();
+    expect(screen.getByText('官方同步档位')).toBeInTheDocument();
+    expect(screen.getByText('按窗口配额监测')).toBeInTheDocument();
+    expect(screen.queryByText(/未设月费/)).not.toBeInTheDocument();
+  });
+
+  it('displays explicit or prompt-derived session_title in OverviewPage and TrayPopupPage', async () => {
+    const now = Date.now();
+    const titledSession = {
+      session_key: '#ef12ab',
+      session_title: 'Refactor Chart Stacking',
+      provider_id: 'claude_code',
+      model_id: 'claude-sonnet-4-5',
+      project_label: 'TokenTracker',
+      activity_state: 'active',
+      started_at_ms: now - 60_000,
+      last_active_at_ms: now - 3_000,
+      request_count: 5,
+      total_tokens: 45_000,
+      input_tokens: 30_000,
+      output_tokens: 15_000,
+      cache_read_tokens: 0,
+      estimated_cost_micro_usd: 500_000,
+      latest_output_tps: 68.5,
+    };
+
+    vi.spyOn(ipc, 'getOverview').mockResolvedValue(
+      makeOverviewReport({
+        active_sessions: [titledSession],
+      })
+    );
+    renderWithQuery(<OverviewPage />);
+    expect(await screen.findByText('Refactor Chart Stacking')).toBeInTheDocument();
+
+    cleanup();
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(makePreferences());
+    vi.spyOn(ipc, 'getTraySummary').mockResolvedValue(
+      makeTraySummary({
+        active_sessions: [titledSession],
+      })
+    );
+    renderWithQuery(<TrayPopupPage />);
+    expect(await screen.findByText('Refactor Chart Stacking')).toBeInTheDocument();
   });
 });

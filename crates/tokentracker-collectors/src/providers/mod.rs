@@ -15,14 +15,17 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::Value;
-use tokentracker_core::domain::{NormalizedUsageEvent, ObservedRateLimitWindow};
+use tokentracker_core::domain::{
+    sanitize_session_title, NormalizedUsageEvent, ObservedRateLimitWindow, SessionTitleRecord,
+};
 
-/// Active turn timestamps retained per streaming `message.id` so multi-chunk responses
-/// measure true turn duration instead of inter-chunk tail deltas.
+/// Active turn timestamps & baseline output counter retained per streaming `message.id`
+/// so multi-chunk responses measure true turn duration instead of inter-chunk tail deltas.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ActiveMessageTurn {
     pub turn_prompt_ts_ms: Option<i64>,
     pub first_chunk_ts_ms: i64,
+    pub first_chunk_output_tokens: i64,
 }
 
 /// Per-file streaming parser context maintained across lines during a scan/tail pass.
@@ -41,6 +44,9 @@ pub struct FileParseContext {
     pub active_message_turns: Vec<(String, ActiveMessageTurn)>,
     /// Tracks cumulative context token checkpoint (e.g. Kimi CLI `_usage` records) to derive step deltas.
     pub last_context_tokens: Option<i64>,
+    /// Sanitized session display title `(title, source, updated_at_ms)` discovered during scan.
+    pub session_title: Option<(String, String, i64)>,
+    pub session_title_dirty: bool,
     pub line_number: u64,
 }
 
@@ -48,7 +54,12 @@ impl FileParseContext {
     pub const MAX_ACTIVE_MESSAGE_TURNS: usize = 32;
 
     /// Resolve or initialize turn timing metadata for a streaming `message.id`.
-    pub fn resolve_message_turn(&mut self, message_id: &str, ts_ms: i64) -> ActiveMessageTurn {
+    pub fn resolve_message_turn(
+        &mut self,
+        message_id: &str,
+        ts_ms: i64,
+        effective_output_tokens: i64,
+    ) -> ActiveMessageTurn {
         if let Some(pos) = self
             .active_message_turns
             .iter()
@@ -57,6 +68,7 @@ impl FileParseContext {
             let mut turn = self.active_message_turns[pos].1;
             if ts_ms < turn.first_chunk_ts_ms {
                 turn.first_chunk_ts_ms = ts_ms;
+                turn.first_chunk_output_tokens = effective_output_tokens;
                 self.active_message_turns[pos].1 = turn;
             }
             return turn;
@@ -68,6 +80,7 @@ impl FileParseContext {
         let turn = ActiveMessageTurn {
             turn_prompt_ts_ms,
             first_chunk_ts_ms: ts_ms,
+            first_chunk_output_tokens: effective_output_tokens,
         };
         if self.active_message_turns.len() >= Self::MAX_ACTIVE_MESSAGE_TURNS {
             self.active_message_turns.remove(0);
@@ -75,6 +88,84 @@ impl FileParseContext {
         self.active_message_turns
             .push((message_id.to_string(), turn));
         turn
+    }
+
+    /// Record a candidate session title (explicit titles always override prompt-derived titles;
+    /// derived titles prefer the earliest user prompt observed in the session).
+    pub fn record_session_title(&mut self, raw_title: &str, source: &str, ts_ms: i64) -> bool {
+        let Some(clean) = sanitize_session_title(raw_title) else {
+            return false;
+        };
+        let norm_source = if source == "explicit" {
+            "explicit"
+        } else {
+            "derived"
+        };
+        let should_replace = match &self.session_title {
+            None => true,
+            Some((_, prev_source, prev_ts)) => {
+                norm_source == "explicit" || (prev_source != "explicit" && ts_ms < *prev_ts)
+            }
+        };
+        if should_replace {
+            self.session_title = Some((clean, norm_source.to_string(), ts_ms));
+            self.session_title_dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Build a [`SessionTitleRecord`] using the latest resolved `session_id` if dirty.
+    pub fn take_session_title_record(&mut self, provider_id: &str) -> Option<SessionTitleRecord> {
+        if !self.session_title_dirty || self.session_id.trim().is_empty() {
+            return None;
+        }
+        self.session_title_dirty = false;
+        let (title, source, updated_at_ms) = self.session_title.clone()?;
+        Some(SessionTitleRecord {
+            session_key: format!("{}:{}", provider_id, self.session_id),
+            provider_id: provider_id.to_string(),
+            title,
+            source,
+            updated_at_ms,
+        })
+    }
+}
+
+/// Extract readable plain text from OpenAI/Anthropic `content` fields (string, object, or block array).
+pub(crate) fn extract_text_from_content(content: Option<&Value>) -> Option<String> {
+    let val = content?;
+    match val {
+        Value::String(s) => Some(s.clone()),
+        Value::Object(map) => map
+            .get("text")
+            .or_else(|| map.get("content"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+        Value::Array(items) => {
+            for item in items {
+                if let Some(s) = item.as_str() {
+                    if sanitize_session_title(s).is_some() {
+                        return Some(s.to_string());
+                    }
+                }
+                let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if matches!(item_type, "" | "text" | "input_text" | "output_text") {
+                    if let Some(s) = item
+                        .get("text")
+                        .or_else(|| item.get("input_text"))
+                        .and_then(|v| v.as_str())
+                    {
+                        if sanitize_session_title(s).is_some() {
+                            return Some(s.to_string());
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -190,16 +281,7 @@ pub(crate) fn get_i64(obj: &Value, keys: &[&str]) -> i64 {
 }
 
 pub(crate) fn compute_tps(output_tokens: i64, duration_ms: Option<i64>) -> Option<f64> {
-    let dur = duration_ms?;
-    if output_tokens < 8 || dur < 300 {
-        return None;
-    }
-    let tps = output_tokens as f64 / (dur as f64 / 1000.0);
-    if tps.is_finite() && tps > 0.0 && tps <= 800.0 {
-        Some(tps)
-    } else {
-        None
-    }
+    tokentracker_core::domain::compute_tps(output_tokens, duration_ms)
 }
 
 pub(crate) fn now_ms() -> i64 {

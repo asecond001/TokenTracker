@@ -6,8 +6,8 @@ use tokentracker_core::domain::{
 };
 
 use crate::providers::{
-    compute_tps, get_i64, now_ms, parse_timestamp_ms, user_home_dir, FileParseContext,
-    ParsedLineResult,
+    compute_tps, extract_text_from_content, get_i64, now_ms, parse_timestamp_ms, user_home_dir,
+    FileParseContext, ParsedLineResult,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -392,10 +392,35 @@ pub fn parse_compatible_jsonl_line(
         .or_else(|| envelope.and_then(|e| first_str(e, &["role", "type", "event"])))
         .unwrap_or("")
         .to_ascii_lowercase();
+
+    if let Some(explicit_title) = first_str(&val, &["title", "session_title", "summary"])
+        .or_else(|| envelope.and_then(|e| first_str(e, &["title", "session_title", "summary"])))
+    {
+        ctx.record_session_title(explicit_title, "explicit", ts_ms);
+    }
+
     if matches!(
         role_or_type.as_str(),
         "user" | "prompt" | "tool_result" | "turnbegin" | "turn_begin"
     ) {
+        if matches!(role_or_type.as_str(), "user" | "prompt") {
+            let prompt_text = extract_text_from_content(
+                val.get("content")
+                    .or_else(|| val.get("prompt"))
+                    .or_else(|| val.get("text"))
+                    .or_else(|| val.pointer("/message/content"))
+                    .or_else(|| {
+                        envelope.and_then(|e| {
+                            e.get("content")
+                                .or_else(|| e.get("prompt"))
+                                .or_else(|| e.get("text"))
+                        })
+                    }),
+            );
+            if let Some(text) = prompt_text {
+                ctx.record_session_title(&text, "derived", ts_ms);
+            }
+        }
         ctx.last_prompt_ts_ms = Some(ts_ms);
         return None;
     }
@@ -437,10 +462,11 @@ pub fn parse_compatible_jsonl_line(
     let explicit_dur = explicit_duration_ms(&val, envelope);
     let explicit_ttft = explicit_ttft_ms(&val, envelope);
 
-    let (duration_ms, ttft_ms) = if let Some(dur) = explicit_dur {
-        (Some(dur), explicit_ttft)
+    let effective_output = output_tokens + reasoning_tokens;
+    let (duration_ms, ttft_ms, tps_tokens) = if let Some(dur) = explicit_dur {
+        (Some(dur), explicit_ttft, effective_output)
     } else if let Some(msg_id) = message_id {
-        let turn = ctx.resolve_message_turn(msg_id, ts_ms);
+        let turn = ctx.resolve_message_turn(msg_id, ts_ms, effective_output);
         let anchor = turn.turn_prompt_ts_ms.unwrap_or(turn.first_chunk_ts_ms);
         let delta = ts_ms - anchor;
         let dur = (delta > 0 && delta <= 600_000).then_some(delta);
@@ -450,16 +476,21 @@ pub fn parse_compatible_jsonl_line(
                 (d > 0 && d <= 600_000).then_some(d)
             })
         });
-        (dur, ttft)
+        let tok = if turn.turn_prompt_ts_ms.is_some() {
+            effective_output
+        } else {
+            effective_output.saturating_sub(turn.first_chunk_output_tokens)
+        };
+        (dur, ttft, tok)
     } else {
         let dur = ctx.last_prompt_ts_ms.take().and_then(|prev| {
             let delta = ts_ms - prev;
             (delta > 0 && delta <= 600_000).then_some(delta)
         });
-        (dur, explicit_ttft)
+        (dur, explicit_ttft, effective_output)
     };
 
-    let output_tps = compute_tps(output_tokens + reasoning_tokens, duration_ms);
+    let output_tps = compute_tps(tps_tokens, duration_ms);
 
     let (step_key, step_ts) = if let Some(id) = message_id {
         (id.to_string(), 0i64)

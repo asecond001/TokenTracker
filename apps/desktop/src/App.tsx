@@ -14,6 +14,7 @@ import { PreferencesPage } from './pages/PreferencesPage';
 import { SpeedLatencyPage } from './pages/SpeedLatencyPage';
 import { SubscriptionsPage } from './pages/SubscriptionsPage';
 import { TrayPopupPage } from './pages/TrayPopupPage';
+import { FloatingMonitorPage } from './pages/FloatingMonitorPage';
 import { TrendsPage } from './pages/TrendsPage';
 import {
   type NavPage,
@@ -82,9 +83,11 @@ function applyPreferencesToStoreAndCaches(
 }
 
 export function App() {
-  const isTrayView =
-    typeof window !== 'undefined' &&
-    new URLSearchParams(window.location.search).get('view') === 'tray';
+  const viewParam =
+    typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('view') : null;
+  const isTrayView = viewParam === 'tray';
+  const isFloatingView = viewParam === 'floating';
+  const isAuxView = isTrayView || isFloatingView;
 
   const queryClient = useQueryClient();
   const {
@@ -106,20 +109,20 @@ export function App() {
   const { data: bootstrap } = useQuery({
     queryKey: ['bootstrap'],
     queryFn: () => ipc.getBootstrapState(),
-    enabled: !isTrayView,
+    enabled: !isAuxView,
     refetchInterval: 20_000,
   });
 
   const { data: preferences } = useQuery({
     queryKey: ['preferences'],
     queryFn: () => ipc.getPreferences(),
-    enabled: !isTrayView,
+    enabled: !isAuxView,
   });
 
   const { data: traySummary } = useQuery({
     queryKey: ['tray_summary', tzOffsetMinutes],
     queryFn: () => ipc.getTraySummary(tzOffsetMinutes),
-    enabled: !isTrayView,
+    enabled: !isAuxView,
     refetchInterval: 10_000,
   });
 
@@ -344,6 +347,10 @@ export function App() {
 
   if (isTrayView) {
     return <TrayPopupPage />;
+  }
+
+  if (isFloatingView) {
+    return <FloatingMonitorPage livePulseSeq={livePulseSeq} />;
   }
 
   const activePreferences = preferences ?? bootstrap?.preferences ?? null;

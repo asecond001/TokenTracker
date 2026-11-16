@@ -51,6 +51,7 @@ interface SyncedFormSnapshot {
   usd_to_cny_rate: string;
   minimize_to_tray: boolean;
   launch_at_startup: boolean;
+  floating_window_enabled: boolean;
   device_display_name: string;
   auto_sync_pricing: boolean;
   exchange_rate_auto: boolean;
@@ -123,6 +124,7 @@ export function PreferencesPage({
   const [rateDraft, setRateDraft] = useState('7.25');
   const [minimizeToTray, setMinimizeToTray] = useState(true);
   const [launchAtStartup, setLaunchAtStartup] = useState(false);
+  const [floatingWindowEnabled, setFloatingWindowEnabled] = useState(false);
   const [deviceDisplayName, setDeviceDisplayName] = useState('');
   const [autoSyncPricing, setAutoSyncPricing] = useState(true);
   const [exchangeRateAuto, setExchangeRateAuto] = useState(true);
@@ -161,6 +163,7 @@ export function PreferencesPage({
     const nextRate = src.usd_to_cny_rate ?? '7.25';
     const nextMinimize = src.minimize_to_tray ?? true;
     const nextAutostart = src.launch_at_startup ?? false;
+    const nextFloating = src.floating_window_enabled ?? false;
     const nextDeviceName = src.device_display_name ?? '';
     const nextAutoSync = src.auto_sync_pricing ?? true;
     const nextRateAuto = src.exchange_rate_auto ?? true;
@@ -177,6 +180,9 @@ export function PreferencesPage({
     }
     if (!prev || prev.launch_at_startup !== nextAutostart) {
       setLaunchAtStartup(nextAutostart);
+    }
+    if (!prev || prev.floating_window_enabled !== nextFloating) {
+      setFloatingWindowEnabled(nextFloating);
     }
     if (!prev || prev.device_display_name !== nextDeviceName) {
       setDeviceDisplayName(nextDeviceName);
@@ -196,6 +202,7 @@ export function PreferencesPage({
       usd_to_cny_rate: nextRate,
       minimize_to_tray: nextMinimize,
       launch_at_startup: nextAutostart,
+      floating_window_enabled: nextFloating,
       device_display_name: nextDeviceName,
       auto_sync_pricing: nextAutoSync,
       exchange_rate_auto: nextRateAuto,
@@ -457,6 +464,7 @@ export function PreferencesPage({
         theme: currentTheme,
         minimize_to_tray: minimizeToTray,
         launch_at_startup: launchAtStartup,
+        floating_window_enabled: floatingWindowEnabled,
         device_display_name: deviceDisplayName.trim() || base.device_display_name,
         auto_sync_pricing: autoSyncPricing,
         exchange_rate_auto: exchangeRateAuto,
@@ -492,6 +500,7 @@ export function PreferencesPage({
         usd_to_cny_rate: saved.usd_to_cny_rate,
         minimize_to_tray: saved.minimize_to_tray,
         launch_at_startup: saved.launch_at_startup,
+        floating_window_enabled: saved.floating_window_enabled,
         device_display_name: saved.device_display_name,
         auto_sync_pricing: saved.auto_sync_pricing,
         exchange_rate_auto: saved.exchange_rate_auto,
@@ -565,6 +574,16 @@ export function PreferencesPage({
     void persistPreferences({ auto_check_updates: enabled }).catch((err: unknown) => {
       setNotice({
         text: err instanceof Error ? err.message : '切换自动检查更新设置失败',
+        kind: 'error',
+      });
+    });
+  };
+
+  const handleFloatingWindowToggle = (enabled: boolean) => {
+    setFloatingWindowEnabled(enabled);
+    void persistPreferences({ floating_window_enabled: enabled }).catch((err: unknown) => {
+      setNotice({
+        text: err instanceof Error ? err.message : '切换桌面悬浮窗状态失败',
         kind: 'error',
       });
     });
@@ -695,11 +714,11 @@ export function PreferencesPage({
                 color: 'var(--text-secondary)',
               }}
             >
-              v0.3.0
+              v0.2.2
             </span>
           </div>
           <p className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
-            配置全局显示币种、自动汇率与模型价格同步、深浅色主题、外观背景、系统托盘行为与脱敏多端同步契约（SyncEnvelope v1）
+            配置全局币种、主题与外观、桌面悬浮窗与多端同步（SyncEnvelope v1）
           </p>
         </div>
 
@@ -707,7 +726,7 @@ export function PreferencesPage({
           type="button"
           onClick={() => savePrefsMutation.mutate()}
           disabled={savePrefsMutation.isPending}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium hover:opacity-90 active:scale-[0.985] transition-all cursor-pointer disabled:opacity-50"
+          className="btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium cursor-pointer disabled:opacity-50"
           style={{
             backgroundColor: 'var(--accent-primary)',
             color: '#ffffff',
@@ -1220,6 +1239,14 @@ export function PreferencesPage({
                 onChange={(e) => setMinimizeToTray(e.target.checked)}
               />
               <span>关闭窗口时最小化至托盘</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={floatingWindowEnabled}
+                onChange={(e) => handleFloatingWindowToggle(e.target.checked)}
+              />
+              <span>显示桌面实时悬浮窗</span>
             </label>
             <label className="flex items-center gap-2 cursor-pointer">
               <input

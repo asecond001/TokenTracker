@@ -9,6 +9,7 @@ import {
   Sun,
   Moon,
   Monitor,
+  PictureInPicture2,
 } from 'lucide-react';
 import { ipc, isTauriRuntime } from '../lib/ipc';
 import { useWorkspaceStore, type NavPage } from '../stores/workspaceStore';
@@ -262,7 +263,7 @@ export function TitleBar({
 
         {/* Provider Quick Filter */}
         <select
-          aria-label="Provider 筛选"
+          aria-label="模型提供商筛选"
           value={providerFilter}
           onChange={(e) => setProviderFilter(e.target.value)}
           className="px-2 py-1 text-[11.5px] rounded outline-none cursor-pointer"
@@ -323,6 +324,16 @@ export function TitleBar({
             style={{ color: 'var(--text-secondary)' }}
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin' : ''}`} />
+          </button>
+          <button
+            type="button"
+            aria-label="切换桌面悬浮窗"
+            title="开启 / 关闭实时桌面悬浮窗"
+            onClick={() => void ipc.toggleFloatingWindow()}
+            className="btn-interactive p-1 rounded cursor-pointer"
+            style={{ color: 'var(--text-secondary)' }}
+          >
+            <PictureInPicture2 className="w-3.5 h-3.5" />
           </button>
           <button
             type="button"

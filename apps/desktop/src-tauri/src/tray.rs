@@ -2,22 +2,26 @@ use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder,
+    WindowEvent,
 };
 
 use crate::state::AppState;
 
 const TRAY_ID: &str = "tokentracker-tray";
 pub const TRAY_POPUP_LABEL: &str = "tray-popup";
+pub const FLOATING_MONITOR_LABEL: &str = "floating-monitor";
 const MENU_OPEN: &str = "tray_open_main";
 const MENU_SCAN: &str = "tray_scan_now";
+const MENU_FLOAT: &str = "tray_toggle_floating";
 const MENU_QUIT: &str = "tray_quit";
 
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let open_item = MenuItem::with_id(app, MENU_OPEN, "打开工作台", true, None::<&str>)?;
     let scan_item = MenuItem::with_id(app, MENU_SCAN, "立即增量扫描", true, None::<&str>)?;
+    let float_item = MenuItem::with_id(app, MENU_FLOAT, "切换实时悬浮窗", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, MENU_QUIT, "退出 TokenTracker", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_item, &scan_item, &quit_item])?;
+    let menu = Menu::with_items(app, &[&open_item, &scan_item, &float_item, &quit_item])?;
 
     let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
 
@@ -40,6 +44,9 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                         let _ = app_handle.emit("usage-updated", &report);
                     }
                 });
+            }
+            MENU_FLOAT => {
+                let _ = toggle_floating_window_internal(app);
             }
             MENU_QUIT => {
                 let state = app.state::<AppState>();
@@ -149,5 +156,95 @@ fn position_tray_popup(
         let x = (m_size.width as i32 - w - 16).max(12);
         let y = (m_size.height as i32 - h - 56).max(12);
         let _ = popup.set_position(PhysicalPosition::new(x, y));
+    }
+}
+
+fn position_floating_window(win: &tauri::WebviewWindow) {
+    let size = win
+        .outer_size()
+        .unwrap_or(tauri::PhysicalSize::new(304, 248));
+    let w = size.width as i32;
+    if let Ok(Some(monitor)) = win.primary_monitor() {
+        let m_size = monitor.size();
+        let x = (m_size.width as i32 - w - 24).max(12);
+        let _ = win.set_position(PhysicalPosition::new(x, 64));
+    }
+}
+
+fn ensure_floating_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+    if let Some(existing) = app.get_webview_window(FLOATING_MONITOR_LABEL) {
+        return Some(existing);
+    }
+
+    let builder = WebviewWindowBuilder::new(
+        app,
+        FLOATING_MONITOR_LABEL,
+        WebviewUrl::App("index.html?view=floating".into()),
+    )
+    .title("TokenTracker 实时悬浮窗")
+    .inner_size(304.0, 248.0)
+    .decorations(false)
+    .resizable(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .visible(false);
+
+    let win = builder.build().ok()?;
+    position_floating_window(&win);
+    if let Ok(prefs) = app.state::<AppState>().storage.get_preferences() {
+        let _ = win.set_theme(crate::commands::parse_tauri_theme(&prefs.theme));
+    }
+    Some(win)
+}
+
+pub fn set_floating_window_visible(app: &AppHandle, visible: bool) -> bool {
+    if visible {
+        if let Some(win) = ensure_floating_window(app) {
+            if !win.is_visible().unwrap_or(false) {
+                let _ = win.show();
+            }
+            return win.is_visible().unwrap_or(true);
+        }
+        false
+    } else {
+        if let Some(win) = app.get_webview_window(FLOATING_MONITOR_LABEL) {
+            let _ = win.hide();
+        }
+        false
+    }
+}
+
+pub fn set_floating_window_and_persist(app: &AppHandle, visible: bool) -> bool {
+    let next = set_floating_window_visible(app, visible);
+    let storage = &app.state::<AppState>().storage;
+    if let Ok(mut prefs) = storage.get_preferences() {
+        if prefs.floating_window_enabled != next {
+            prefs.floating_window_enabled = next;
+            if storage.update_preferences(&prefs).is_ok() {
+                if let Ok(updated) = storage.get_preferences() {
+                    let _ = app.emit("preferences-updated", &updated);
+                }
+            }
+        }
+    }
+    next
+}
+
+pub fn toggle_floating_window_internal(app: &AppHandle) -> bool {
+    let currently_visible = app
+        .get_webview_window(FLOATING_MONITOR_LABEL)
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    set_floating_window_and_persist(app, !currently_visible)
+}
+
+pub fn resize_floating_window_internal(app: &AppHandle, compact: bool) {
+    if let Some(win) = app.get_webview_window(FLOATING_MONITOR_LABEL) {
+        let (w, h) = if compact {
+            (288.0, 52.0)
+        } else {
+            (304.0, 248.0)
+        };
+        let _ = win.set_size(LogicalSize::new(w, h));
     }
 }

@@ -1,11 +1,12 @@
 import { useEffect } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ExternalLink, RefreshCw } from 'lucide-react';
+import { ExternalLink, PictureInPicture2, RefreshCw } from 'lucide-react';
 import { InlineProgressBar } from '../components/InlineProgressBar';
 import {
   formatCost,
   formatCountdown,
   formatRelativeTime,
+  formatSessionDisplayName,
   formatTokens,
   formatTps,
   providerAccentColor,
@@ -83,12 +84,24 @@ export function TrayPopupPage() {
             />
             <span className="text-[12.5px] font-semibold">TokenTracker 实时摘要</span>
           </div>
-          <span
-            className="text-[11px] font-medium tabular-nums"
-            style={{ color: 'var(--accent-sky)' }}
-          >
-            {formatTps(summary?.latest_output_tps)}
-          </span>
+          <div className="flex items-center gap-2">
+            <span
+              className="text-[11px] font-medium tabular-nums"
+              style={{ color: 'var(--accent-sky)' }}
+            >
+              {formatTps(summary?.latest_output_tps)}
+            </span>
+            <button
+              type="button"
+              aria-label="切换桌面悬浮窗"
+              title="开启 / 关闭实时桌面悬浮窗"
+              onClick={() => void ipc.toggleFloatingWindow()}
+              className="btn-interactive p-1 rounded cursor-pointer"
+              style={{ color: 'var(--text-secondary)' }}
+            >
+              <PictureInPicture2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
 
         {/* Today Metrics Grid + Provider Share Strip (Flat, Hairline Divided, No Shadow Cards) */}
@@ -179,7 +192,7 @@ export function TrayPopupPage() {
                   void ipc.openMainWorkspace('overview', session.provider_id);
                 }}
                 className="row-interactive w-full text-left px-1.5 py-1 rounded flex items-center justify-between gap-2 cursor-pointer"
-                title="点击打开主工作台查看该 Provider 实时用量"
+                title="点击打开主工作台查看该模型提供商实时用量"
               >
                 <div className="min-w-0 flex items-center gap-1.5">
                   <span
@@ -190,10 +203,11 @@ export function TrayPopupPage() {
                   />
                   <div className="min-w-0">
                     <div className="text-[11px] font-medium truncate">
-                      {providerDisplayName(session.provider_id)} · {session.model_id}
+                      {formatSessionDisplayName(session)}
                     </div>
                     <div className="text-[10px] truncate" style={{ color: 'var(--text-muted)' }}>
-                      {session.project_label} · {formatRelativeTime(session.last_active_at_ms)}
+                      {providerDisplayName(session.provider_id)} · {session.model_id} ·{' '}
+                      {formatRelativeTime(session.last_active_at_ms)}
                     </div>
                   </div>
                 </div>
@@ -277,7 +291,7 @@ export function TrayPopupPage() {
           onClick={() => {
             void ipc.openMainWorkspace();
           }}
-          className="flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 rounded text-[11.5px] font-medium hover:opacity-90 active:scale-[0.985] transition-all cursor-pointer"
+          className="btn-primary flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 rounded text-[11.5px] font-medium cursor-pointer"
           style={{
             backgroundColor: 'var(--accent-primary)',
             color: '#ffffff',

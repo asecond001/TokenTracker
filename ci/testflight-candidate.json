@@ -3,7 +3,7 @@
   "bundleBaseId": "com.tokentracker.app",
   "widgetsBundleId": "com.tokentracker.app.widgets",
   "appGroupId": "group.com.tokentracker.app",
-  "marketingVersion": "0.3.0",
+  "marketingVersion": "0.2.2",
   "buildNumber": "1",
   "sourceCommit": "UNSET",
   "teamId": "UNSET",

@@ -405,6 +405,8 @@ pub struct AppPreferences {
     pub last_pricing_sync_at_ms: Option<i64>,
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
+    #[serde(default)]
+    pub floating_window_enabled: bool,
     pub updated_at_ms: i64,
 }
 
@@ -429,19 +431,46 @@ impl Default for AppPreferences {
             last_rate_sync_at_ms: None,
             last_pricing_sync_at_ms: None,
             auto_check_updates: true,
+            floating_window_enabled: false,
             updated_at_ms: 0,
         }
     }
 }
 
-/// Physical TPS calculation guarded against streaming sub-300ms tail deltas and tiny responses.
+/// Minimum generated tokens required before physical throughput (Tokens/s) is reliable.
+pub const MIN_VALID_TPS_OUTPUT_TOKENS: i64 = 12;
+/// Minimum active generation duration (ms) required to rule out buffered flush bursts.
+pub const MIN_VALID_TPS_DURATION_MS: i64 = 500;
+/// Upper bound on credible LLM generation throughput (Tokens/s).
+pub const MAX_VALID_OUTPUT_TPS: f64 = 450.0;
+
+/// Returns whether a stored or computed TPS sample represents credible token generation speed.
+pub fn is_valid_tps_sample(
+    output_tokens: i64,
+    duration_ms: Option<i64>,
+    tps: Option<f64>,
+) -> bool {
+    let Some(dur) = duration_ms else {
+        return false;
+    };
+    let Some(val) = tps else {
+        return false;
+    };
+    output_tokens >= MIN_VALID_TPS_OUTPUT_TOKENS
+        && dur >= MIN_VALID_TPS_DURATION_MS
+        && val.is_finite()
+        && val > 0.0
+        && val <= MAX_VALID_OUTPUT_TPS
+}
+
+/// Physical TPS calculation guarded against streaming tail flushes and tiny bursts.
 pub fn compute_tps(output_tokens: i64, duration_ms: Option<i64>) -> Option<f64> {
     let dur = duration_ms?;
-    if output_tokens < 8 || dur < 300 {
+    if output_tokens < MIN_VALID_TPS_OUTPUT_TOKENS || dur < MIN_VALID_TPS_DURATION_MS {
         return None;
     }
     let tps = output_tokens as f64 / (dur as f64 / 1000.0);
-    if tps.is_finite() && tps > 0.0 && tps <= 800.0 {
+    if is_valid_tps_sample(output_tokens, Some(dur), Some(tps)) {
         Some(tps)
     } else {
         None
@@ -602,4 +631,172 @@ pub struct CatalogSyncResult {
     pub rate_source: Option<String>,
     pub pricing_source: Option<String>,
     pub warning: Option<String>,
+}
+
+/// Persisted display title for an observed session (`(provider_id, session_id)`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTitleRecord {
+    pub session_key: String,
+    pub provider_id: String,
+    pub title: String,
+    pub source: String,
+    pub updated_at_ms: i64,
+}
+
+const BOILERPLATE_BLOCK_TAGS: &[&str] = &[
+    "environment_context",
+    "system-reminder",
+    "user_instructions",
+    "permissions instructions",
+    "local-command-caveat",
+    "turn_aborted",
+    "ide_opened_file",
+    "ide_selection",
+    "collaboration_mode",
+];
+
+fn strip_boilerplate_blocks(text: &str) -> String {
+    let mut owned = text.to_string();
+    for tag in BOILERPLATE_BLOCK_TAGS {
+        let open_prefix = format!("<{tag}");
+        let close_tag = format!("</{tag}>");
+        loop {
+            let lower = owned.to_ascii_lowercase();
+            let Some(start) = lower.find(&open_prefix) else {
+                break;
+            };
+            let rest = &lower[start..];
+            if let Some(end_rel) = rest.find(&close_tag) {
+                let end = start + end_rel + close_tag.len();
+                owned.replace_range(start..end, " ");
+            } else if let Some(gt_rel) = rest.find('>') {
+                let end = start + gt_rel + 1;
+                owned.replace_range(start..end, " ");
+            } else {
+                break;
+            }
+        }
+    }
+    // Unwrap <command-message>...</command-message> or <command-name>...</command-name>
+    owned
+        .trim()
+        .replace("<command-message>", "")
+        .replace("</command-message>", " ")
+        .replace("<command-name>", "")
+        .replace("</command-name>", " ")
+        .replace("<command-args>", "")
+        .replace("</command-args>", " ")
+}
+
+fn looks_like_uuid(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() == 36
+        && bytes[8] == b'-'
+        && bytes[13] == b'-'
+        && bytes[18] == b'-'
+        && bytes[23] == b'-'
+    {
+        return bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 8 || i == 13 || i == 18 || i == 23 || b.is_ascii_hexdigit());
+    }
+    bytes.len() == 32 && bytes.iter().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Sanitize raw explicit session titles or initial user prompts into concise, safe display names.
+pub fn sanitize_session_title(raw: &str) -> Option<String> {
+    let stripped = strip_boilerplate_blocks(raw);
+    let mut candidate_lines: Vec<&str> = Vec::new();
+    let mut skipping_agents_block = false;
+    for line in stripped.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            skipping_agents_block = false;
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("# agents.md")
+            || lower.starts_with("agents.md instructions")
+            || lower.starts_with("<instructions>")
+        {
+            skipping_agents_block = true;
+            continue;
+        }
+        if lower == "</instructions>" {
+            skipping_agents_block = false;
+            continue;
+        }
+        if skipping_agents_block {
+            continue;
+        }
+        if lower.starts_with("<system")
+            || lower.starts_with("</system")
+            || lower.starts_with("[request interrupted")
+            || lower.starts_with("[tool")
+        {
+            continue;
+        }
+        candidate_lines.push(trimmed);
+    }
+
+    let joined = candidate_lines.join(" ");
+    let collapsed = joined
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_start_matches('#')
+        .trim()
+        .to_string();
+
+    if collapsed.chars().count() < 2 || looks_like_uuid(&collapsed) {
+        return None;
+    }
+
+    let max_chars = 64;
+    if collapsed.chars().count() <= max_chars {
+        Some(collapsed)
+    } else {
+        let mut out: String = collapsed.chars().take(max_chars - 1).collect();
+        out = out.trim_end().to_string();
+        out.push('…');
+        Some(out)
+    }
+}
+
+#[cfg(test)]
+mod domain_tps_and_title_tests {
+    use super::{compute_tps, is_valid_tps_sample, sanitize_session_title};
+
+    #[test]
+    fn compute_tps_rejects_short_bursts_and_spikes() {
+        assert_eq!(compute_tps(11, Some(1000)), None);
+        assert_eq!(compute_tps(100, Some(499)), None);
+        assert_eq!(compute_tps(250, Some(500)), None); // 500 tok/s > 450
+        let valid = compute_tps(120, Some(1000)).expect("120 tok/s should be valid");
+        assert!((valid - 120.0).abs() < 1e-6);
+        assert!(!is_valid_tps_sample(10, Some(1000), Some(10.0)));
+        assert!(!is_valid_tps_sample(200, Some(1000), Some(520.0)));
+        assert!(is_valid_tps_sample(24, Some(500), Some(48.0)));
+    }
+
+    #[test]
+    fn sanitize_session_title_cleans_boilerplate_and_uuids() {
+        assert_eq!(
+            sanitize_session_title("<environment_context><cwd>/tmp</cwd></environment_context>\nFix speed monitor spikes"),
+            Some("Fix speed monitor spikes".to_string())
+        );
+        assert_eq!(
+            sanitize_session_title("<system-reminder>Internal note</system-reminder>"),
+            None
+        );
+        assert_eq!(
+            sanitize_session_title("550e8400-e29b-41d4-a716-446655440000"),
+            None
+        );
+        assert_eq!(
+            sanitize_session_title("<command-name>/plan</command-name> Upgrade Tauri to 0.2.2"),
+            Some("/plan Upgrade Tauri to 0.2.2".to_string())
+        );
+    }
 }

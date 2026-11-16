@@ -3,6 +3,7 @@ import { useWorkspaceStore, type ResolvedTheme } from '../stores/workspaceStore'
 
 export interface ChartTheme {
   isLight: boolean;
+  canvasBg: string;
   textPrimary: string;
   textSecondary: string;
   textMuted: string;
@@ -20,6 +21,7 @@ export interface ChartTheme {
 
 const DARK_CHART_THEME: ChartTheme = {
   isLight: false,
+  canvasBg: '#0c0d10',
   textPrimary: '#eceff4',
   textSecondary: '#98a2b3',
   textMuted: '#6b7280',
@@ -37,6 +39,7 @@ const DARK_CHART_THEME: ChartTheme = {
 
 const LIGHT_CHART_THEME: ChartTheme = {
   isLight: true,
+  canvasBg: '#ffffff',
   textPrimary: '#111827',
   textSecondary: '#475467',
   textMuted: '#667085',

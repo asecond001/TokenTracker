@@ -132,24 +132,62 @@ export function providerAccentColor(providerId: string): string {
     case 'antigravity':
       return '#6366f1';
     case 'kimi_code':
-      return '#0ea5e9';
+      return '#38bdf8';
     case 'workbuddy':
       return '#ec4899';
     case 'deepseek_harness':
       return '#3b82f6';
     case 'qcode':
-      return '#14b8a6';
+      return '#2dd4bf';
     case 'minimax_code':
       return '#a855f7';
     default:
-      return providerId.startsWith('custom_') ? '#8b5cf6' : '#38bdf8';
+      return providerId.startsWith('custom_') ? '#8b5cf6' : '#60a5fa';
   }
 }
 
 export const TOKEN_TYPE_COLORS: Record<string, string> = {
-  input: '#0ea5e9',
-  output: '#22c55e',
-  cache_read: '#14b8a6',
-  cache_write: '#f97316',
-  reasoning: '#a855f7',
+  input: '#3b82f6',
+  output: '#10b981',
+  cache_read: '#8b5cf6',
+  cache_write: '#f59e0b',
+  reasoning: '#ec4899',
 };
+
+export function formatSessionDisplayName(session: {
+  session_title?: string | null;
+  project_label?: string | null;
+  session_key: string;
+  provider_id: string;
+}): string {
+  const title = session.session_title?.trim();
+  if (title) {
+    return title;
+  }
+  const project = session.project_label?.trim();
+  if (project && project.toLowerCase() !== 'workspace') {
+    return `${project} · ${session.session_key}`;
+  }
+  return `${providerDisplayName(session.provider_id)} ${session.session_key}`;
+}
+
+export function resolveSubscriptionTierLabel(
+  plan: {
+    plan_name: string;
+    monthly_fee_micro_usd: number;
+    auto_source?: string | null;
+  },
+  currency: CurrencyCode,
+  usdToCnyRateStr: string
+): string {
+  if (plan.monthly_fee_micro_usd > 0) {
+    return `月费 ${formatCost(plan.monthly_fee_micro_usd, currency, usdToCnyRateStr)}`;
+  }
+  if (plan.auto_source === 'official_api') {
+    return '官方同步档位';
+  }
+  if (plan.auto_source === 'local_log') {
+    return '日志探测档位';
+  }
+  return '按窗口配额监测';
+}

@@ -59,6 +59,7 @@ export interface AppPreferences {
   auto_sync_pricing: boolean;
   exchange_rate_auto: boolean;
   auto_check_updates: boolean;
+  floating_window_enabled: boolean;
   last_rate_sync_at_ms: number | null;
   last_pricing_sync_at_ms: number | null;
   updated_at_ms: number;
@@ -132,6 +133,7 @@ export interface UsageShareItem {
 
 export interface ActiveSessionSummary {
   session_key: string;
+  session_title?: string | null;
   provider_id: string;
   model_id: string;
   project_label: string;

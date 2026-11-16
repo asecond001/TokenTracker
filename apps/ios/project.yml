@@ -15,7 +15,7 @@ settings:
   base:
     BUNDLE_BASE_ID: com.tokentracker.app
     APP_GROUP_ID: group.$(BUNDLE_BASE_ID)
-    MARKETING_VERSION: "0.3.0"
+    MARKETING_VERSION: "0.2.2"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.10"
     IPHONEOS_DEPLOYMENT_TARGET: "18.0"

@@ -6,12 +6,13 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::domain::{
-    provider_ids, AppPreferences, CollectionMode, CurrencyCode, CustomProtocolKind,
-    CustomProviderRule, DeclarativeMappingSpec, DeviceRecord, IngestionCursor, ModelPricingEntry,
-    NormalizedUsageEvent, ObservedRateLimitWindow, ProviderBalanceSnapshot, ProviderConfig,
-    QuotaUnit, RemoteSubscriptionSnapshot, RemoteSyncApplyResult, SubscriptionPlan,
-    SubscriptionWindowRule, SyncConfigState, SyncEnvelopeV1, SyncHourlyDelta,
-    SyncSubscriptionSnapshot,
+    is_valid_tps_sample, provider_ids, sanitize_session_title, AppPreferences, CollectionMode,
+    CurrencyCode, CustomProtocolKind, CustomProviderRule, DeclarativeMappingSpec, DeviceRecord,
+    IngestionCursor, ModelPricingEntry, NormalizedUsageEvent, ObservedRateLimitWindow,
+    ProviderBalanceSnapshot, ProviderConfig, QuotaUnit, RemoteSubscriptionSnapshot,
+    RemoteSyncApplyResult, SessionTitleRecord, SubscriptionPlan, SubscriptionWindowRule,
+    SyncConfigState, SyncEnvelopeV1, SyncHourlyDelta, SyncSubscriptionSnapshot,
+    MAX_VALID_OUTPUT_TPS, MIN_VALID_TPS_DURATION_MS, MIN_VALID_TPS_OUTPUT_TOKENS,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::pricing::{
@@ -209,6 +210,18 @@ impl Storage {
         cursor: Option<&IngestionCursor>,
         rate_limits: &[ObservedRateLimitWindow],
     ) -> CoreResult<IngestOutcome> {
+        self.ingest_events_with_cursor_and_titles(events, cursor, rate_limits, &[])
+    }
+
+    /// Atomically ingest events (upgrading streamed partial chunks when final usage increases),
+    /// fold deltas into rollups, persist cursor, rate limits, and sanitized session titles.
+    pub fn ingest_events_with_cursor_and_titles(
+        &self,
+        events: &[NormalizedUsageEvent],
+        cursor: Option<&IngestionCursor>,
+        rate_limits: &[ObservedRateLimitWindow],
+        session_titles: &[SessionTitleRecord],
+    ) -> CoreResult<IngestOutcome> {
         self.with_conn_mut(|conn| {
             let now_ms = Utc::now().timestamp_millis();
             let catalog = load_pricing_catalog(conn)?;
@@ -220,6 +233,10 @@ impl Storage {
                 HashMap::new();
             let mut daily_deltas: HashMap<(String, String, String, i64), RollupDelta> =
                 HashMap::new();
+            let mut recompute_hourly_buckets: BTreeSet<(String, String, String, i64)> =
+                BTreeSet::new();
+            let mut recompute_daily_buckets: BTreeSet<(String, String, String, i64)> =
+                BTreeSet::new();
             let mut touched_providers: HashMap<String, ()> = HashMap::new();
 
             {
@@ -240,11 +257,46 @@ impl Storage {
                     )
                     "#,
                 )?;
+                let mut select_existing_stmt = tx.prepare_cached(
+                    r#"
+                    SELECT device_id, provider_id, model_id, timestamp_ms,
+                           input_tokens, output_tokens, cache_read_tokens,
+                           cache_write_tokens, reasoning_tokens, duration_ms
+                    FROM usage_events
+                    WHERE event_id = ?1
+                    "#,
+                )?;
+                let mut update_existing_stmt = tx.prepare_cached(
+                    r#"
+                    UPDATE usage_events
+                    SET model_id = ?2,
+                        timestamp_ms = ?3,
+                        input_tokens = ?4,
+                        output_tokens = ?5,
+                        cache_read_tokens = ?6,
+                        cache_write_tokens = ?7,
+                        reasoning_tokens = ?8,
+                        observable_only = ?9,
+                        duration_ms = ?10,
+                        ttft_ms = ?11,
+                        output_tps = ?12,
+                        estimated_cost_micro_usd = ?13,
+                        cache_saved_micro_usd = ?14
+                    WHERE event_id = ?1
+                    "#,
+                )?;
 
                 for raw in events {
                     let mut ev = raw.clone();
                     if ev.device_id.is_empty() {
                         ev.device_id = local_dev.device_id.clone();
+                    }
+                    if !is_valid_tps_sample(
+                        ev.output_tokens + ev.reasoning_tokens,
+                        ev.duration_ms,
+                        ev.output_tps,
+                    ) {
+                        ev.output_tps = None;
                     }
                     if ev.estimated_cost_micro_usd == 0 && !ev.observable_only {
                         apply_pricing_to_event(&mut ev, &catalog)?;
@@ -296,6 +348,93 @@ impl Storage {
                             ))
                             .or_default()
                             .add_event(&ev);
+                    } else if let Some((
+                        old_dev,
+                        old_pid,
+                        old_model,
+                        old_ts,
+                        old_in,
+                        old_out,
+                        old_cr,
+                        old_cw,
+                        old_reas,
+                        old_dur,
+                    )) = select_existing_stmt
+                        .query_row(params![ev.event_id], |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                                r.get::<_, i64>(3)?,
+                                r.get::<_, i64>(4)?,
+                                r.get::<_, i64>(5)?,
+                                r.get::<_, i64>(6)?,
+                                r.get::<_, i64>(7)?,
+                                r.get::<_, i64>(8)?,
+                                r.get::<_, Option<i64>>(9)?,
+                            ))
+                        })
+                        .optional()?
+                    {
+                        let old_total = old_in + old_out + old_cr + old_cw + old_reas;
+                        let new_total = ev.input_tokens
+                            + ev.output_tokens
+                            + ev.cache_read_tokens
+                            + ev.cache_write_tokens
+                            + ev.reasoning_tokens;
+                        let should_upgrade = new_total > old_total
+                            || (new_total == old_total && ev.output_tokens > old_out)
+                            || (new_total == old_total
+                                && ev.duration_ms.is_some()
+                                && ev.duration_ms.unwrap_or(0) > old_dur.unwrap_or(0));
+
+                        if should_upgrade {
+                            if !ev.observable_only {
+                                apply_pricing_to_event(&mut ev, &catalog)?;
+                            }
+                            update_existing_stmt.execute(params![
+                                ev.event_id,
+                                ev.model_id,
+                                ev.timestamp_ms,
+                                ev.input_tokens,
+                                ev.output_tokens,
+                                ev.cache_read_tokens,
+                                ev.cache_write_tokens,
+                                ev.reasoning_tokens,
+                                i64::from(ev.observable_only),
+                                ev.duration_ms,
+                                ev.ttft_ms,
+                                ev.output_tps,
+                                ev.estimated_cost_micro_usd,
+                                ev.cache_saved_micro_usd,
+                            ])?;
+                            touched_providers.insert(ev.provider_id.clone(), ());
+
+                            recompute_hourly_buckets.insert((
+                                old_dev.clone(),
+                                old_pid.clone(),
+                                old_model.clone(),
+                                old_ts.div_euclid(HOUR_MS) * HOUR_MS,
+                            ));
+                            recompute_hourly_buckets.insert((
+                                ev.device_id.clone(),
+                                ev.provider_id.clone(),
+                                ev.model_id.clone(),
+                                ev.timestamp_ms.div_euclid(HOUR_MS) * HOUR_MS,
+                            ));
+                            recompute_daily_buckets.insert((
+                                old_dev,
+                                old_pid,
+                                old_model,
+                                old_ts.div_euclid(DAY_MS) * DAY_MS,
+                            ));
+                            recompute_daily_buckets.insert((
+                                ev.device_id.clone(),
+                                ev.provider_id.clone(),
+                                ev.model_id.clone(),
+                                ev.timestamp_ms.div_euclid(DAY_MS) * DAY_MS,
+                            ));
+                        }
                     }
                 }
             }
@@ -305,6 +444,67 @@ impl Storage {
             }
             if !daily_deltas.is_empty() {
                 upsert_rollup_table(&tx, "usage_daily_rollups", &daily_deltas, now_ms)?;
+            }
+            for (dev_id, pid, model_id, bucket_start) in &recompute_hourly_buckets {
+                recompute_single_rollup_bucket(
+                    &tx,
+                    "usage_hourly_rollups",
+                    HOUR_MS,
+                    dev_id,
+                    pid,
+                    model_id,
+                    *bucket_start,
+                    now_ms,
+                )?;
+            }
+            for (dev_id, pid, model_id, bucket_start) in &recompute_daily_buckets {
+                recompute_single_rollup_bucket(
+                    &tx,
+                    "usage_daily_rollups",
+                    DAY_MS,
+                    dev_id,
+                    pid,
+                    model_id,
+                    *bucket_start,
+                    now_ms,
+                )?;
+            }
+
+            if !session_titles.is_empty() {
+                let mut title_stmt = tx.prepare_cached(
+                    r#"
+                    INSERT INTO session_titles (session_key, provider_id, title, source, updated_at_ms)
+                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    ON CONFLICT(session_key) DO UPDATE SET
+                        title = excluded.title,
+                        source = excluded.source,
+                        updated_at_ms = excluded.updated_at_ms
+                    WHERE excluded.source = 'explicit'
+                       OR (
+                           session_titles.source != 'explicit'
+                           AND (
+                               excluded.updated_at_ms < session_titles.updated_at_ms
+                               OR LENGTH(TRIM(session_titles.title)) = 0
+                           )
+                       )
+                    "#,
+                )?;
+                for rec in session_titles {
+                    if let Some(clean_title) = sanitize_session_title(&rec.title) {
+                        let source = if rec.source == "explicit" {
+                            "explicit"
+                        } else {
+                            "derived"
+                        };
+                        title_stmt.execute(params![
+                            rec.session_key,
+                            rec.provider_id,
+                            clean_title,
+                            source,
+                            rec.updated_at_ms,
+                        ])?;
+                    }
+                }
             }
 
             if let Some(cur) = cursor {
@@ -873,7 +1073,8 @@ impl Storage {
                     auto_sync_pricing = ?14,
                     exchange_rate_auto = ?15,
                     auto_check_updates = ?16,
-                    updated_at_ms = ?17
+                    floating_window_enabled = ?17,
+                    updated_at_ms = ?18
                 WHERE id = 1
                 "#,
                 params![
@@ -893,6 +1094,7 @@ impl Storage {
                     i64::from(prefs.auto_sync_pricing),
                     i64::from(prefs.exchange_rate_auto),
                     i64::from(prefs.auto_check_updates),
+                    i64::from(prefs.floating_window_enabled),
                     now_ms,
                 ],
             )?;
@@ -1889,14 +2091,99 @@ fn recompute_all_costs_and_rollups_with_conn(conn: &mut Connection) -> CoreResul
         }
     }
 
-    tx.execute("DELETE FROM usage_hourly_rollups", [])?;
-    tx.execute("DELETE FROM usage_daily_rollups", [])?;
-
-    rebuild_rollup_from_events(&tx, "usage_hourly_rollups", HOUR_MS, now_ms)?;
-    rebuild_rollup_from_events(&tx, "usage_daily_rollups", DAY_MS, now_ms)?;
+    rebuild_local_rollups_conn(&tx, now_ms)?;
 
     tx.commit()?;
     Ok(updates.len())
+}
+
+pub(crate) fn rebuild_local_rollups_conn(conn: &Connection, updated_at_ms: i64) -> CoreResult<()> {
+    conn.execute(
+        "DELETE FROM usage_hourly_rollups WHERE device_id IN (SELECT DISTINCT device_id FROM usage_events)",
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM usage_daily_rollups WHERE device_id IN (SELECT DISTINCT device_id FROM usage_events)",
+        [],
+    )?;
+
+    rebuild_rollup_from_events(conn, "usage_hourly_rollups", HOUR_MS, updated_at_ms)?;
+    rebuild_rollup_from_events(conn, "usage_daily_rollups", DAY_MS, updated_at_ms)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recompute_single_rollup_bucket(
+    conn: &Connection,
+    table_name: &str,
+    bucket_ms: i64,
+    device_id: &str,
+    provider_id: &str,
+    model_id: &str,
+    bucket_start_ms: i64,
+    updated_at_ms: i64,
+) -> CoreResult<()> {
+    let delete_sql = format!(
+        "DELETE FROM {table_name} WHERE device_id = ?1 AND provider_id = ?2 AND model_id = ?3 AND bucket_start_ms = ?4"
+    );
+    conn.execute(
+        &delete_sql,
+        params![device_id, provider_id, model_id, bucket_start_ms],
+    )?;
+
+    let insert_sql = format!(
+        r#"
+        INSERT INTO {table_name} (
+            device_id, provider_id, model_id, bucket_start_ms,
+            request_count, observable_step_count, input_tokens, output_tokens,
+            cache_read_tokens, cache_write_tokens, reasoning_tokens,
+            estimated_cost_micro_usd, cache_saved_micro_usd,
+            total_duration_ms, tps_sample_count, tps_sum, max_output_tps, updated_at_ms
+        )
+        SELECT
+            device_id,
+            provider_id,
+            model_id,
+            ?4 AS bucket_start_ms,
+            COUNT(*) AS request_count,
+            SUM(observable_only) AS observable_step_count,
+            SUM(input_tokens),
+            SUM(output_tokens),
+            SUM(cache_read_tokens),
+            SUM(cache_write_tokens),
+            SUM(reasoning_tokens),
+            SUM(estimated_cost_micro_usd),
+            SUM(cache_saved_micro_usd),
+            SUM(COALESCE(CASE WHEN duration_ms > 0 THEN duration_ms ELSE 0 END, 0)),
+            SUM(CASE WHEN {tps_cond} THEN 1 ELSE 0 END),
+            SUM(CASE WHEN {tps_cond} THEN output_tps ELSE 0.0 END),
+            MAX(CASE WHEN {tps_cond} THEN output_tps ELSE 0.0 END),
+            ?6
+        FROM usage_events
+        WHERE device_id = ?1
+          AND provider_id = ?2
+          AND model_id = ?3
+          AND timestamp_ms >= ?4
+          AND timestamp_ms < ?5
+        GROUP BY device_id, provider_id, model_id
+        "#,
+        tps_cond = "output_tps IS NOT NULL AND output_tps > 0.0 AND output_tps <= ?7 AND duration_ms IS NOT NULL AND duration_ms >= ?8 AND (output_tokens + reasoning_tokens) >= ?9"
+    );
+    conn.execute(
+        &insert_sql,
+        params![
+            device_id,
+            provider_id,
+            model_id,
+            bucket_start_ms,
+            bucket_start_ms.saturating_add(bucket_ms),
+            updated_at_ms,
+            MAX_VALID_OUTPUT_TPS,
+            MIN_VALID_TPS_DURATION_MS,
+            MIN_VALID_TPS_OUTPUT_TOKENS,
+        ],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn rebuild_rollup_from_events(
@@ -1930,15 +2217,25 @@ pub(crate) fn rebuild_rollup_from_events(
             SUM(estimated_cost_micro_usd),
             SUM(cache_saved_micro_usd),
             SUM(COALESCE(CASE WHEN duration_ms > 0 THEN duration_ms ELSE 0 END, 0)),
-            SUM(CASE WHEN output_tps IS NOT NULL AND output_tps > 0 THEN 1 ELSE 0 END),
-            SUM(COALESCE(CASE WHEN output_tps > 0 THEN output_tps ELSE 0.0 END, 0.0)),
-            MAX(COALESCE(CASE WHEN output_tps > 0 THEN output_tps ELSE 0.0 END, 0.0)),
+            SUM(CASE WHEN {tps_cond} THEN 1 ELSE 0 END),
+            SUM(CASE WHEN {tps_cond} THEN output_tps ELSE 0.0 END),
+            MAX(CASE WHEN {tps_cond} THEN output_tps ELSE 0.0 END),
             ?2
         FROM usage_events
         GROUP BY device_id, provider_id, model_id, (timestamp_ms / ?1) * ?1
-        "#
+        "#,
+        tps_cond = "output_tps IS NOT NULL AND output_tps > 0.0 AND output_tps <= ?3 AND duration_ms IS NOT NULL AND duration_ms >= ?4 AND (output_tokens + reasoning_tokens) >= ?5"
     );
-    conn.execute(&sql, params![bucket_ms, updated_at_ms])?;
+    conn.execute(
+        &sql,
+        params![
+            bucket_ms,
+            updated_at_ms,
+            MAX_VALID_OUTPUT_TPS,
+            MIN_VALID_TPS_DURATION_MS,
+            MIN_VALID_TPS_OUTPUT_TOKENS,
+        ],
+    )?;
     Ok(())
 }
 
@@ -2232,13 +2529,32 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
     }
 
     let (plan_name, monthly_fee_micro_usd) = match trimmed {
+        provider_ids::CLAUDE_CODE => {
+            if hint_lower.contains("max") && (hint_lower.contains("20") || hint_lower.contains("200")) {
+                ("Claude Max ($200)".to_string(), 200_000_000)
+            } else if hint_lower.contains("max") {
+                ("Claude Max ($100)".to_string(), 100_000_000)
+            } else if hint_lower.contains("team") {
+                ("Claude Team".to_string(), 30_000_000)
+            } else if hint_lower.contains("pro") {
+                ("Claude Pro".to_string(), 20_000_000)
+            } else {
+                ("Claude Code 官方订阅".to_string(), 0)
+            }
+        }
         provider_ids::CODEX => {
             if hint_lower.contains("pro") {
                 ("ChatGPT Pro / Codex".to_string(), 200_000_000)
             } else if hint_lower.contains("team") {
                 ("ChatGPT Team / Codex".to_string(), 25_000_000)
+            } else if hint_lower.contains("enterprise") {
+                ("ChatGPT Enterprise / Codex".to_string(), 0)
+            } else if hint_lower.contains("edu") {
+                ("ChatGPT Edu / Codex".to_string(), 0)
             } else if hint_lower.contains("plus") {
                 ("ChatGPT Plus / Codex".to_string(), 20_000_000)
+            } else if hint_lower.contains("free") {
+                ("ChatGPT Free / Codex".to_string(), 0)
             } else {
                 ("Codex 官方订阅".to_string(), 0)
             }
@@ -2253,8 +2569,29 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
             };
             (name.to_string(), 0)
         }
-        provider_ids::MINIMAX_CODE => ("MiniMax Coding Plan".to_string(), 0),
-        provider_ids::QCODE => ("QCode 日额度套餐".to_string(), 0),
+        provider_ids::MINIMAX_CODE => {
+            if hint_lower.contains("max") {
+                ("MiniMax Coding Max".to_string(), 0)
+            } else if hint_lower.contains("pro") || hint_lower.contains("high") {
+                ("MiniMax Coding Pro".to_string(), 0)
+            } else if hint_lower.contains("plus") {
+                ("MiniMax Coding Plus".to_string(), 0)
+            } else if !hint_lower.is_empty() {
+                let raw_hint = plan_hint.as_deref().unwrap_or("").trim();
+                (format!("MiniMax Coding ({raw_hint})"), 0)
+            } else {
+                ("MiniMax Coding Plan".to_string(), 0)
+            }
+        }
+        provider_ids::QCODE => {
+            if hint_lower.contains("pro") || hint_lower.contains("max") {
+                ("QCode Pro 订阅".to_string(), 0)
+            } else if hint_lower.contains("plus") {
+                ("QCode Plus 订阅".to_string(), 0)
+            } else {
+                ("QCode 日额度套餐".to_string(), 0)
+            }
+        }
         other => (format!("{other} 官方订阅"), 0),
     };
 
@@ -2295,7 +2632,7 @@ pub(crate) fn load_preferences(conn: &Connection) -> CoreResult<AppPreferences> 
                otlp_enabled, otlp_port, device_display_name,
                bg_mode, bg_image_path, bg_preset_id, bg_opacity, bg_blur_px,
                auto_sync_pricing, exchange_rate_auto, last_rate_sync_at_ms, last_pricing_sync_at_ms,
-               auto_check_updates, updated_at_ms
+               auto_check_updates, floating_window_enabled, updated_at_ms
         FROM app_preferences
         WHERE id = 1
         "#,
@@ -2321,7 +2658,8 @@ pub(crate) fn load_preferences(conn: &Connection) -> CoreResult<AppPreferences> 
                 last_rate_sync_at_ms: row.get(15)?,
                 last_pricing_sync_at_ms: row.get(16)?,
                 auto_check_updates: row.get::<_, i64>(17)? != 0,
-                updated_at_ms: row.get(18)?,
+                floating_window_enabled: row.get::<_, i64>(18)? != 0,
+                updated_at_ms: row.get(19)?,
             })
         },
     )
@@ -3207,5 +3545,145 @@ mod tests {
         assert_eq!(after_edit[0].plan.plan_name, "我的 Kimi 专享套餐");
         assert_eq!(after_edit[0].plan.monthly_fee_micro_usd, 7_000_000);
         assert!((after_edit[0].windows[0].used_percent - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn v6_migration_cleans_tps_preserves_remote_rollups_and_handles_stream_upgrades() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("v6.sqlite");
+        let storage = Storage::open_file(&db_path).expect("open v6");
+        let dev = storage.local_device().expect("device").device_id;
+
+        // Preferences persist floating_window_enabled
+        let mut prefs = storage.get_preferences().expect("prefs");
+        assert!(!prefs.floating_window_enabled);
+        prefs.floating_window_enabled = true;
+        storage.update_preferences(&prefs).expect("save prefs");
+        assert!(storage.get_preferences().expect("reloaded").floating_window_enabled);
+
+        // Insert a remote pure-rollup device that has no rows in usage_events
+        let bucket = 1_794_816_000_000i64;
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO devices (device_id, device_name, platform, created_at_ms) VALUES ('remote-mac', 'Mac', 'macos', 100)",
+                    [],
+                )?;
+                conn.execute(
+                    r#"
+                    INSERT INTO usage_hourly_rollups (
+                        device_id, provider_id, model_id, bucket_start_ms,
+                        request_count, observable_step_count, input_tokens, output_tokens,
+                        cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                        estimated_cost_micro_usd, cache_saved_micro_usd,
+                        total_duration_ms, tps_sample_count, tps_sum, max_output_tps, updated_at_ms
+                    ) VALUES ('remote-mac', 'claude_code', 'claude-sonnet-4-5', ?1, 2, 0, 1000, 200, 0, 0, 0, 5000, 0, 4000, 2, 100.0, 55.0, 100)
+                    "#,
+                    params![bucket],
+                )?;
+                Ok(())
+            })
+            .expect("seed remote");
+
+        // Ingest a partial streaming chunk, then an upgraded final chunk + session title
+        let partial = NormalizedUsageEvent {
+            event_id: "claude_code:s1:msg1".to_string(),
+            device_id: dev.clone(),
+            provider_id: "claude_code".to_string(),
+            session_id: "s1".to_string(),
+            project_label: "TokenTracker".to_string(),
+            model_id: "claude-sonnet-4-5".to_string(),
+            timestamp_ms: bucket + 1_000,
+            input_tokens: 500,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            observable_only: false,
+            duration_ms: Some(400),
+            ttft_ms: None,
+            output_tps: Some(600.0), // invalid outlier (>450 + <500ms), must be dropped
+            estimated_cost_micro_usd: 0,
+            cache_saved_micro_usd: 0,
+        };
+        let title_derived = SessionTitleRecord {
+            session_key: "claude_code:s1".to_string(),
+            provider_id: "claude_code".to_string(),
+            title: "<environment_context><cwd>/tmp</cwd></environment_context>Fix TPS spike"
+                .to_string(),
+            source: "derived".to_string(),
+            updated_at_ms: bucket + 1_000,
+        };
+        storage
+            .ingest_events_with_cursor_and_titles(&[partial], None, &[], &[title_derived])
+            .expect("partial");
+
+        let final_chunk = NormalizedUsageEvent {
+            event_id: "claude_code:s1:msg1".to_string(),
+            device_id: dev.clone(),
+            provider_id: "claude_code".to_string(),
+            session_id: "s1".to_string(),
+            project_label: "TokenTracker".to_string(),
+            model_id: "claude-sonnet-4-5".to_string(),
+            timestamp_ms: bucket + 3_000,
+            input_tokens: 500,
+            output_tokens: 180,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            observable_only: false,
+            duration_ms: Some(3_000),
+            ttft_ms: None,
+            output_tps: Some(60.0),
+            estimated_cost_micro_usd: 0,
+            cache_saved_micro_usd: 0,
+        };
+        let title_explicit = SessionTitleRecord {
+            session_key: "claude_code:s1".to_string(),
+            provider_id: "claude_code".to_string(),
+            title: "Final Explicit Session Title".to_string(),
+            source: "explicit".to_string(),
+            updated_at_ms: bucket + 3_000,
+        };
+        storage
+            .ingest_events_with_cursor_and_titles(&[final_chunk], None, &[], &[title_explicit])
+            .expect("final");
+
+        storage.recompute_all_costs_and_rollups().expect("recompute");
+
+        storage
+            .with_conn(|conn| {
+                let (out_tok, tps): (i64, Option<f64>) = conn.query_row(
+                    "SELECT output_tokens, output_tps FROM usage_events WHERE event_id = 'claude_code:s1:msg1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                assert_eq!(out_tok, 180);
+                assert_eq!(tps, Some(60.0));
+
+                let local_reqs: i64 = conn.query_row(
+                    "SELECT request_count FROM usage_hourly_rollups WHERE device_id = ?1",
+                    params![dev],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(local_reqs, 1);
+
+                // Remote rollup must still exist intact!
+                let remote_reqs: i64 = conn.query_row(
+                    "SELECT request_count FROM usage_hourly_rollups WHERE device_id = 'remote-mac'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(remote_reqs, 2);
+
+                let stored_title: String = conn.query_row(
+                    "SELECT title FROM session_titles WHERE session_key = 'claude_code:s1'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(stored_title, "Final Explicit Session Title");
+                Ok(())
+            })
+            .expect("verify");
     }
 }

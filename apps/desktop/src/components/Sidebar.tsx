@@ -48,12 +48,20 @@ export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
         type="button"
         data-selected={active ? 'true' : undefined}
         onClick={() => setActivePage(item.id)}
-        className="row-interactive w-full flex items-center gap-2.5 px-2.5 py-1.5 text-left rounded text-[12.5px] cursor-pointer"
+        className="row-interactive nav-item relative w-full flex items-center gap-2.5 px-2.5 py-1.5 text-left rounded text-[12.5px] cursor-pointer"
         style={{
           color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
           fontWeight: active ? 500 : 400,
         }}
       >
+        <span
+          className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full transition-all duration-200"
+          style={{
+            backgroundColor: 'var(--accent-primary)',
+            opacity: active ? 1 : 0,
+            transform: active ? 'scaleY(1)' : 'scaleY(0.35)',
+          }}
+        />
         <Icon
           className="w-4 h-4 shrink-0"
           style={{
@@ -109,7 +117,7 @@ export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
                 </button>
               )}
               <span className="font-mono text-[10px] font-normal lowercase tabular-nums">
-                v0.3.0
+                v0.2.2
               </span>
             </div>
           </div>

@@ -11,8 +11,8 @@ use tokentracker_core::domain::{
 
 use crate::error::CollectorResult;
 use crate::providers::{
-    collapse_duplicate_events_keep_last, compute_tps, get_i64, now_ms, parse_timestamp_ms,
-    user_home_dir, FileParseContext, ParsedLineResult, ProviderLogParser,
+    collapse_duplicate_events_keep_last, compute_tps, extract_text_from_content, get_i64, now_ms,
+    parse_timestamp_ms, user_home_dir, FileParseContext, ParsedLineResult, ProviderLogParser,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -85,13 +85,42 @@ impl ProviderLogParser for ClaudeCodeParser {
 
         let ts_ms = parse_timestamp_ms(val.get("timestamp")).unwrap_or_else(now_ms);
         let entry_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let is_meta = val.get("isMeta").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_compact = val
+            .get("isCompactSummary")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let is_api_error = val
+            .get("isApiErrorMessage")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let is_sidechain = val
+            .get("isSidechain")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if let Some(explicit_title) = val
+            .get("customTitle")
+            .or_else(|| (entry_type == "custom-title").then(|| val.get("title")).flatten())
+            .or_else(|| (entry_type == "summary").then(|| val.get("summary")).flatten())
+            .and_then(|v| v.as_str())
+        {
+            ctx.record_session_title(explicit_title, "explicit", ts_ms);
+        }
 
         if entry_type == "user" || entry_type == "tool_result" {
-            ctx.last_prompt_ts_ms = Some(ts_ms);
+            if entry_type == "user" && !is_meta && !is_compact && !is_sidechain {
+                if let Some(text) = extract_text_from_content(val.pointer("/message/content")) {
+                    ctx.record_session_title(&text, "derived", ts_ms);
+                }
+            }
+            if !is_meta && !is_compact {
+                ctx.last_prompt_ts_ms = Some(ts_ms);
+            }
             return None;
         }
 
-        if entry_type != "assistant" {
+        if entry_type != "assistant" || is_api_error {
             return None;
         }
 
@@ -120,14 +149,15 @@ impl ProviderLogParser for ClaudeCodeParser {
             return None;
         }
 
+        let effective_output = output_tokens + reasoning_tokens;
         let message_id = message
             .get("id")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
-        let (duration_ms, ttft_ms) = if let Some(msg_id) = message_id {
-            let turn = ctx.resolve_message_turn(msg_id, ts_ms);
+        let (duration_ms, ttft_ms, tps_output_tokens) = if let Some(msg_id) = message_id {
+            let turn = ctx.resolve_message_turn(msg_id, ts_ms, effective_output);
             let anchor = turn.turn_prompt_ts_ms.unwrap_or(turn.first_chunk_ts_ms);
             let delta = ts_ms - anchor;
             let dur = if delta > 0 && delta <= 600_000 {
@@ -143,7 +173,12 @@ impl ProviderLogParser for ClaudeCodeParser {
                     None
                 }
             });
-            (dur, ttft)
+            let tps_tok = if turn.turn_prompt_ts_ms.is_some() {
+                effective_output
+            } else {
+                effective_output.saturating_sub(turn.first_chunk_output_tokens)
+            };
+            (dur, ttft, tps_tok)
         } else {
             let dur = ctx
                 .last_prompt_ts_ms
@@ -156,10 +191,13 @@ impl ProviderLogParser for ClaudeCodeParser {
                         None
                     }
                 });
-            (dur, None)
+            (dur, None, effective_output)
         };
-        let effective_output = output_tokens + reasoning_tokens;
-        let output_tps = compute_tps(effective_output, duration_ms);
+        let output_tps = if is_compact {
+            None
+        } else {
+            compute_tps(tps_output_tokens, duration_ms)
+        };
 
         // Prefer Anthropic's globally unique `message.id` so multi-block assistant records
         // referencing the same API response collapse idempotently rather than double-counting.
@@ -300,9 +338,9 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn compute_tps_rejects_sub_300ms_small_outputs_and_spikes() {
-        assert_eq!(compute_tps(500, Some(100)), None);
-        assert_eq!(compute_tps(7, Some(1_000)), None);
+    fn compute_tps_rejects_short_bursts_small_outputs_and_spikes() {
+        assert_eq!(compute_tps(500, Some(400)), None);
+        assert_eq!(compute_tps(11, Some(1_000)), None);
         assert_eq!(compute_tps(5_000, Some(1_000)), None);
         let ok = compute_tps(120, Some(2_000)).expect("valid tps");
         assert!((ok - 60.0).abs() < 1e-6);
@@ -346,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_chunk_without_prompt_uses_first_chunk_anchor_and_rejects_fast_tail() {
+    fn multi_chunk_without_prompt_uses_incremental_tokens_and_rejects_buffered_flushes() {
         let parser = ClaudeCodeParser;
         let path = Path::new("C:/tmp/.claude/projects/alpha/sess-noprompt.jsonl");
         let mut ctx = parser.init_context(path, "dev-1");
@@ -366,7 +404,33 @@ mod tests {
         let e3 = parser.parse_line(final_chunk, &mut ctx).and_then(|r| r.event).expect("c3");
         assert_eq!(e3.duration_ms, Some(2_000));
         assert_eq!(e3.ttft_ms, None);
+        // Subtracts baseline chunk1 output (5 tokens) so only incremental tokens in 2.0s count
         let tps = e3.output_tps.expect("final tps");
-        assert!((tps - 60.0).abs() < 1e-6);
+        assert!((tps - 57.5).abs() < 1e-6);
+
+        // Simulated buffered flush without prior prompt: 600 tokens in chunk A, 605 in chunk B 600ms later
+        let flush1 = r#"{"type":"assistant","timestamp":"2026-11-10T10:01:00.000Z","message":{"id":"msg_flush","model":"claude-sonnet-4-5","usage":{"input_tokens":500,"output_tokens":600}}}"#;
+        let flush2 = r#"{"type":"assistant","timestamp":"2026-11-10T10:01:00.600Z","message":{"id":"msg_flush","model":"claude-sonnet-4-5","usage":{"input_tokens":500,"output_tokens":605}}}"#;
+        let f1 = parser.parse_line(flush1, &mut ctx).and_then(|r| r.event).expect("f1");
+        let f2 = parser.parse_line(flush2, &mut ctx).and_then(|r| r.event).expect("f2");
+        assert_eq!(f1.output_tps, None);
+        assert_eq!(f2.output_tps, None);
+
+        // Extracts prompt title and customTitle while ignoring isMeta synthetic prompts
+        let meta_user = r#"{"type":"user","isMeta":true,"timestamp":"2026-11-10T10:02:00.000Z","message":{"role":"user","content":"<local-command-caveat>ignore</local-command-caveat>"}}"#;
+        let real_user = r#"{"type":"user","timestamp":"2026-11-10T10:02:05.000Z","message":{"role":"user","content":"Fix TPS spikes in overview"}}"#;
+        let explicit = r#"{"type":"custom-title","timestamp":"2026-11-10T10:02:10.000Z","title":"Speed Spike Investigation"}"#;
+        assert!(parser.parse_line(meta_user, &mut ctx).is_none());
+        assert_eq!(ctx.last_prompt_ts_ms, None);
+        assert!(parser.parse_line(real_user, &mut ctx).is_none());
+        assert_eq!(
+            ctx.session_title.as_ref().map(|t| (t.0.as_str(), t.1.as_str())),
+            Some(("Fix TPS spikes in overview", "derived"))
+        );
+        assert!(parser.parse_line(explicit, &mut ctx).is_none());
+        assert_eq!(
+            ctx.session_title.as_ref().map(|t| (t.0.as_str(), t.1.as_str())),
+            Some(("Speed Spike Investigation", "explicit"))
+        );
     }
 }

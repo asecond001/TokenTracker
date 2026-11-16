@@ -9,6 +9,7 @@ import {
   formatTokens,
   providerAccentColor,
   providerDisplayName,
+  resolveSubscriptionTierLabel,
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
 import { useWorkspaceStore } from '../stores/workspaceStore';
@@ -619,16 +620,16 @@ export function SubscriptionsPage() {
         style={{ borderBottom: '1px solid var(--border-subtle)' }}
       >
         <div>
-          <h1 className="text-[16px] font-semibold tracking-tight">订阅配额与滚动窗口预警</h1>
+          <h1 className="text-[16px] font-semibold tracking-tight">订阅配额</h1>
           <p className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
-            基于手动录入与官方 API / 本地官方日志实际可获取的订阅配额实时核算，并实时联动对照各参考档位；绝不臆测未公开套餐
+            官方限额与滚动窗口追踪
           </p>
         </div>
 
         <button
           type="button"
           onClick={() => openCreateDrawer()}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985]"
+          className="btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium cursor-pointer"
           style={{
             backgroundColor: 'var(--accent-primary)',
             color: '#ffffff',
@@ -741,9 +742,7 @@ export function SubscriptionsPage() {
                           style={{ color: 'var(--text-secondary)' }}
                         >
                           <span>
-                            {plan.monthly_fee_micro_usd > 0
-                              ? `月费 ${formatCost(plan.monthly_fee_micro_usd, currency, usdToCnyRate)}`
-                              : '未设月费（不算 ROI）'}
+                            {resolveSubscriptionTierLabel(plan, currency, usdToCnyRate)}
                           </span>
                           <button
                             type="button"
@@ -914,11 +913,8 @@ export function SubscriptionsPage() {
                     className="text-[11px] font-semibold uppercase tracking-wider"
                     style={{ color: 'var(--text-muted)' }}
                   >
-                    官方日志可观测限额快照（未绑定月费套餐）
+                    官方日志可观测限额快照
                   </h2>
-                  <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                    直接忠实展示本地会话日志中的官方限额百分比与重置倒计时，不推测您的具体套餐档位或月费
-                  </p>
                 </div>
               </div>
 
@@ -929,7 +925,7 @@ export function SubscriptionsPage() {
                     className="row-interactive py-5 px-2 grid grid-cols-12 gap-5 items-center"
                     style={{ borderBottom: '1px solid var(--border-hairline)' }}
                   >
-                    {/* Left: Provider Identity ONLY (no guessed plan name / fee) */}
+                    {/* Left: Provider Identity */}
                     <div className="col-span-12 lg:col-span-3 space-y-1.5">
                       <div className="flex items-center gap-2">
                         <span
@@ -949,7 +945,9 @@ export function SubscriptionsPage() {
                             color: 'var(--accent-emerald)',
                           }}
                         >
-                          官方日志可观测 · 未绑定月费套餐
+                          {group.windows[0]?.plan_hint
+                            ? `识别档位 · ${group.windows[0].plan_hint}`
+                            : '官方实时限额'}
                         </span>
                       </div>
                     </div>
@@ -1421,10 +1419,10 @@ export function SubscriptionsPage() {
                     className="block text-[11.5px] mb-1"
                     style={{ color: 'var(--text-secondary)' }}
                   >
-                    所属 Provider
+                    所属模型提供商
                   </label>
                   <select
-                    aria-label="所属 Provider"
+                    aria-label="所属模型提供商"
                     value={draft.provider_id}
                     onChange={(e) => setDraft({ ...draft, provider_id: e.target.value })}
                     className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none cursor-pointer"
@@ -1656,7 +1654,7 @@ export function SubscriptionsPage() {
                   type="button"
                   disabled={savePlanMutation.isPending}
                   onClick={handleSaveDraft}
-                  className="px-3.5 py-1.5 text-[12px] font-medium rounded cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
+                  className="btn-primary px-3.5 py-1.5 text-[12px] font-medium rounded cursor-pointer disabled:opacity-50"
                   style={{
                     backgroundColor: 'var(--accent-primary)',
                     color: '#ffffff',

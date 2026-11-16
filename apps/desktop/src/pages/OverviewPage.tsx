@@ -12,6 +12,7 @@ import {
   formatExactInt,
   formatPercent,
   formatRelativeTime,
+  formatSessionDisplayName,
   formatTokens,
   formatTps,
   providerAccentColor,
@@ -68,7 +69,8 @@ export function OverviewPage() {
   } = useWorkspaceStore();
   const chartTheme = useChartTheme();
   const [chartDimension, setChartDimension] = useState<OverviewChartDimension>('provider');
-  const [chartType, setChartType] = useState<'area' | 'bar'>('area');
+  const [chartType, setChartType] = useState<'bar' | 'line'>('bar');
+  const [focusedSeriesId, setFocusedSeriesId] = useState<string | null>(null);
 
   const filter = useMemo<AnalyticsFilter>(() => {
     const range = computeTimeRange(timePreset, {
@@ -122,8 +124,7 @@ export function OverviewPage() {
     const xLabels = bucketTimestamps.map((ts) =>
       formatBucketLabel(ts, data?.series_granularity)
     );
-    const isBar = chartType === 'bar';
-    const areaOpacity = chartTheme.isLight ? 0.55 : 0.42;
+    const isLine = chartType === 'line';
 
     const tokenTypeCandidates = [
       {
@@ -152,39 +153,73 @@ export function OverviewPage() {
       },
     ].filter((entry) => entry.values.some((v) => v > 0));
 
+    const buildSeriesEntry = (
+      id: string,
+      name: string,
+      color: string,
+      values: number[]
+    ) => {
+      const hasFocus = focusedSeriesId !== null;
+      const isFocused = focusedSeriesId === id;
+      const opacity = hasFocus ? (isFocused ? 1 : 0.22) : 1;
+
+      if (isLine) {
+        return {
+          id,
+          name,
+          type: 'line' as const,
+          smooth: 0.25,
+          showSymbol: false,
+          symbolSize: 5,
+          universalTransition: true,
+          emphasis: { focus: 'series' as const },
+          lineStyle: {
+            width: isFocused ? 2.5 : 1.75,
+            color,
+            opacity,
+          },
+          areaStyle: {
+            color,
+            opacity: hasFocus ? (isFocused ? 0.14 : 0.015) : chartTheme.isLight ? 0.07 : 0.05,
+          },
+          itemStyle: { color, opacity },
+          data: values,
+        };
+      }
+
+      return {
+        id,
+        name,
+        type: 'bar' as const,
+        stack: 'tokens',
+        barMaxWidth: 28,
+        barCategoryGap: '28%',
+        universalTransition: true,
+        emphasis: { focus: 'series' as const },
+        itemStyle: {
+          color,
+          opacity,
+          borderColor: chartTheme.canvasBg,
+          borderWidth: 1.5,
+          borderRadius: [2, 2, 0, 0],
+        },
+        data: values,
+      };
+    };
+
     const seriesConfig: EChartsOption['series'] =
       chartDimension === 'provider'
-        ? activeProviderSeries.map((ps) => {
-            const color = providerAccentColor(ps.key);
-            return {
-              id: `provider-${ps.key}`,
-              name: ps.label || providerDisplayName(ps.key),
-              type: isBar ? 'bar' : 'line',
-              stack: 'tokens',
-              smooth: !isBar,
-              showSymbol: false,
-              universalTransition: true,
-              emphasis: { focus: 'series' },
-              areaStyle: isBar ? undefined : { color, opacity: areaOpacity },
-              itemStyle: { color },
-              lineStyle: isBar ? undefined : { width: 0, opacity: 0 },
-              data: ps.points.map((pt) => pt.tokens),
-            };
-          })
-        : tokenTypeCandidates.map((entry) => ({
-            id: entry.id,
-            name: entry.name,
-            type: isBar ? 'bar' : 'line',
-            stack: 'tokens',
-            smooth: !isBar,
-            showSymbol: false,
-            universalTransition: true,
-            emphasis: { focus: 'series' },
-            areaStyle: isBar ? undefined : { color: entry.color, opacity: areaOpacity },
-            itemStyle: { color: entry.color },
-            lineStyle: isBar ? undefined : { width: 0, opacity: 0 },
-            data: entry.values,
-          }));
+        ? activeProviderSeries.map((ps) =>
+            buildSeriesEntry(
+              `provider-${ps.key}`,
+              ps.label || providerDisplayName(ps.key),
+              providerAccentColor(ps.key),
+              ps.points.map((pt) => pt.tokens)
+            )
+          )
+        : tokenTypeCandidates.map((entry) =>
+            buildSeriesEntry(entry.id, entry.name, entry.color, entry.values)
+          );
 
     return {
       backgroundColor: 'transparent',
@@ -192,6 +227,7 @@ export function OverviewPage() {
       animationDurationUpdate: 260,
       tooltip: {
         trigger: 'axis',
+        axisPointer: { type: isLine ? 'line' : 'shadow' },
         backgroundColor: chartTheme.tooltipBg,
         borderColor: chartTheme.tooltipBorder,
         textStyle: { color: chartTheme.tooltipText, fontSize: 12 },
@@ -222,7 +258,26 @@ export function OverviewPage() {
       },
       series: seriesConfig,
     };
-  }, [data, activeProviderSeries, chartDimension, chartType, chartTheme]);
+  }, [data, activeProviderSeries, chartDimension, chartType, chartTheme, focusedSeriesId]);
+
+  const seriesPills = useMemo(() => {
+    if (chartDimension === 'provider') {
+      return activeProviderSeries.map((ps) => ({
+        id: `provider-${ps.key}`,
+        label: ps.label || providerDisplayName(ps.key),
+        color: providerAccentColor(ps.key),
+      }));
+    }
+    const bucketSeries = data?.series ?? [];
+    return [
+      { id: 'token-input', label: 'Input', color: TOKEN_TYPE_COLORS.input, has: bucketSeries.some((p) => p.input_tokens > 0) },
+      { id: 'token-output', label: 'Output', color: TOKEN_TYPE_COLORS.output, has: bucketSeries.some((p) => p.output_tokens + p.reasoning_tokens > 0) },
+      { id: 'token-cache-read', label: 'Cache Read', color: TOKEN_TYPE_COLORS.cache_read, has: bucketSeries.some((p) => p.cache_read_tokens > 0) },
+      { id: 'token-cache-write', label: 'Cache Write', color: TOKEN_TYPE_COLORS.cache_write, has: bucketSeries.some((p) => p.cache_write_tokens > 0) },
+    ]
+      .filter((e) => e.has)
+      .map(({ id, label, color }) => ({ id, label, color }));
+  }, [chartDimension, activeProviderSeries, data]);
 
   const liveSessions = data?.active_sessions ?? [];
   const activeCount = liveSessions.filter((s) => s.activity_state === 'active').length;
@@ -243,7 +298,7 @@ export function OverviewPage() {
           <div className="flex items-baseline justify-between gap-3">
             <div>
               <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
-                今日实时用量态势
+                今日实时用量
               </div>
               <div className="mt-1 flex items-baseline gap-2.5 tabular-nums">
                 <span className="text-[22px] font-semibold tracking-tight">
@@ -262,9 +317,6 @@ export function OverviewPage() {
                 </span>
               </div>
             </div>
-            <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-              今日零点起实时累计
-            </span>
           </div>
 
           {/* Stacked Provider Share Bar */}
@@ -273,9 +325,9 @@ export function OverviewPage() {
               className="flex items-center justify-between text-[11px]"
               style={{ color: 'var(--text-secondary)' }}
             >
-              <span>今日 Provider 占比</span>
+              <span>今日模型提供商占比</span>
               <span className="tabular-nums" style={{ color: 'var(--text-muted)' }}>
-                {(data?.provider_shares ?? []).length} 个活跃数据源
+                {(data?.provider_shares ?? []).length} 个活跃源
               </span>
             </div>
             {(data?.provider_shares ?? []).length > 0 ? (
@@ -381,9 +433,6 @@ export function OverviewPage() {
                 </span>
               )}
             </div>
-            <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-              2 分钟内请求标记为实时活跃 · 仅显示脱敏工程目录名
-            </span>
           </div>
 
           {liveSessions.length > 0 ? (
@@ -409,7 +458,7 @@ export function OverviewPage() {
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 min-w-0">
                           <span className="font-medium truncate">
-                            {providerDisplayName(session.provider_id)} · {session.model_id}
+                            {formatSessionDisplayName(session)}
                           </span>
                           <span
                             className="text-[10px] px-1.5 py-0.2 rounded shrink-0"
@@ -429,9 +478,15 @@ export function OverviewPage() {
                           className="text-[11px] flex items-center gap-2 truncate tabular-nums"
                           style={{ color: 'var(--text-muted)' }}
                         >
-                          <span className="truncate">{session.project_label}</span>
-                          <span>·</span>
-                          <span className="font-mono">{session.session_key}</span>
+                          <span className="truncate">
+                            {providerDisplayName(session.provider_id)} · {session.model_id}
+                          </span>
+                          {session.project_label && (
+                            <>
+                              <span>·</span>
+                              <span className="truncate">{session.project_label}</span>
+                            </>
+                          )}
                           <span>·</span>
                           <span>{session.request_count} 次请求</span>
                         </div>
@@ -510,7 +565,7 @@ export function OverviewPage() {
             {showDeltas && <DeltaBadge pct={data?.cost_delta_pct ?? null} />}
           </div>
           <div className="mt-1 text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-            按官方公开百万 Token 定价折算
+            按公开定价折算
           </div>
         </div>
 
@@ -565,15 +620,18 @@ export function OverviewPage() {
         style={{ borderBottom: '1px solid var(--border-hairline)' }}
       >
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-          <div>
+          <div className="flex items-center gap-2.5">
             <h2 className="text-[13.5px] font-semibold">Token 构成趋势</h2>
-            <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-              顶部指标同步跟随该时间窗 ·{' '}
-              {data?.series_granularity === 'hourly' ? '按小时聚合桶' : '按天聚合桶'} ·{' '}
-              {chartDimension === 'provider'
-                ? '按 Provider 堆叠展示 Token 消耗分布'
-                : '展示 Input、Output、Cache Read 与 Cache Write 分布'}
-            </p>
+            <span
+              className="px-1.5 py-0.5 text-[10.5px] rounded tabular-nums"
+              style={{
+                backgroundColor: 'var(--bg-sidebar)',
+                border: '1px solid var(--border-hairline)',
+                color: 'var(--text-muted)',
+              }}
+            >
+              {data?.series_granularity === 'hourly' ? '小时桶' : '日桶'}
+            </span>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -589,7 +647,7 @@ export function OverviewPage() {
             >
               {(
                 [
-                  { id: 'provider', label: '按 Provider' },
+                  { id: 'provider', label: '按模型提供商' },
                   { id: 'token_type', label: '按 Token 类型' },
                 ] as const
               ).map((dim) => {
@@ -599,7 +657,10 @@ export function OverviewPage() {
                     key={dim.id}
                     type="button"
                     data-active={active}
-                    onClick={() => setChartDimension(dim.id)}
+                    onClick={() => {
+                      setChartDimension(dim.id);
+                      setFocusedSeriesId(null);
+                    }}
                     className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
                     style={{
                       color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
@@ -620,7 +681,7 @@ export function OverviewPage() {
                 border: '1px solid var(--border-hairline)',
               }}
             >
-              {(['area', 'bar'] as const).map((kind) => {
+              {(['bar', 'line'] as const).map((kind) => {
                 const active = chartType === kind;
                 return (
                   <button
@@ -634,13 +695,44 @@ export function OverviewPage() {
                       fontWeight: active ? 500 : 400,
                     }}
                   >
-                    {kind === 'area' ? '面积图' : '柱状图'}
+                    {kind === 'bar' ? '柱状图' : '流向曲线'}
                   </button>
                 );
               })}
             </div>
           </div>
         </div>
+
+        {seriesPills.length > 1 && hasChartData && (
+          <div className="flex flex-wrap items-center gap-1.5 mb-2">
+            {seriesPills.map((pill) => {
+              const focused = focusedSeriesId === pill.id;
+              const dimmed = focusedSeriesId !== null && !focused;
+              return (
+                <button
+                  key={pill.id}
+                  type="button"
+                  data-active={focused ? 'true' : undefined}
+                  onClick={() =>
+                    setFocusedSeriesId((prev) => (prev === pill.id ? null : pill.id))
+                  }
+                  className="seg-pill inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] cursor-pointer"
+                  style={{
+                    color: dimmed ? 'var(--text-muted)' : 'var(--text-secondary)',
+                    opacity: dimmed ? 0.55 : 1,
+                    border: '1px solid var(--border-hairline)',
+                  }}
+                >
+                  <span
+                    className="inline-block w-2 h-2 rounded-full"
+                    style={{ backgroundColor: pill.color }}
+                  />
+                  <span>{pill.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {!hasChartData ? (
           <div
@@ -665,10 +757,7 @@ export function OverviewPage() {
       {/* Bottom Flat Provider Summary Table */}
       <section>
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-[13.5px] font-semibold">Provider 运行与消耗汇总</h2>
-          <span className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-            含今日、本月折算费用、缓存占比及主订阅 / 官方限额快照
-          </span>
+          <h2 className="text-[13.5px] font-semibold">模型提供商运行与消耗</h2>
         </div>
 
         <div className="overflow-x-auto">
@@ -681,7 +770,7 @@ export function OverviewPage() {
                   borderBottom: '1px solid var(--border-hairline)',
                 }}
               >
-                <th className="py-2 pr-4">Provider</th>
+                <th className="py-2 pr-4">模型提供商</th>
                 <th className="py-2 px-3 text-right">今日用量 / 费用</th>
                 <th className="py-2 px-3 text-right">本月用量 / 费用</th>
                 <th className="py-2 px-3 text-right">缓存命中率</th>

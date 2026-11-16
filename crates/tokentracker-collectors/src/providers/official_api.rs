@@ -799,6 +799,16 @@ fn parse_qcode_usage(
         ));
     }
 
+    let qcode_plan_hint = data
+        .get("plan_name")
+        .or_else(|| data.get("tier"))
+        .or_else(|| data.get("package_name"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "qcode_daily".to_string());
+
     let mut windows = Vec::new();
     if let (Some(used), Some(limit)) = (daily_used, daily_limit) {
         if limit > 0 {
@@ -810,7 +820,7 @@ fn parse_qcode_usage(
                 resets_at_ms: None,
                 observed_at_ms: now_ms,
                 source: Some("official_api".to_string()),
-                plan_hint: Some("qcode_daily".to_string()),
+                plan_hint: Some(qcode_plan_hint),
             });
         }
     }
@@ -909,6 +919,18 @@ fn parse_minimax_remains(
             sum_used_count += used_count;
             sum_total_count += total_count;
 
+            let minimax_plan_hint = item
+                .get("plan_name")
+                .or_else(|| item.get("combo_name"))
+                .or_else(|| data.get("plan_name"))
+                .or_else(|| data.get("combo_name"))
+                .or_else(|| data.get("package_name"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "minimax_coding_plan".to_string());
+
             windows.push(ObservedRateLimitWindow {
                 provider_id: provider_id.to_string(),
                 window_name: format!("5h · {model_name}"),
@@ -917,7 +939,7 @@ fn parse_minimax_remains(
                 resets_at_ms,
                 observed_at_ms: now_ms,
                 source: Some("official_api".to_string()),
-                plan_hint: Some("minimax_coding_plan".to_string()),
+                plan_hint: Some(minimax_plan_hint),
             });
         }
     }

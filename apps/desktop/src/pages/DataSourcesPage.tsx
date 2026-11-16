@@ -439,14 +439,13 @@ export function DataSourcesPage() {
           <div className="flex items-center gap-2">
             <ShieldCheck className="w-4 h-4" style={{ color: 'var(--accent-emerald)' }} />
             <h1 className="text-[16px] font-semibold tracking-tight">
-              数据源配置与合规采集边界
+              数据源与合规采集
             </h1>
           </div>
           <p className="text-[12px] max-w-3xl" style={{ color: 'var(--text-secondary)' }}>
-            严格遵循三类合法采集边界：共享只读锁解析本地公开日志、仅绑定{' '}
-            <code className="text-[11.5px]">127.0.0.1</code> 的官方 OTLP
-            导出接收、操作系统凭据库托管的官方公开 Usage API。不读取浏览器
-            Cookie、不逆向私有接口、不做流量 MITM 解密。
+            仅支持本地只读日志、
+            <code className="text-[11.5px]">127.0.0.1</code>{' '}
+            OTLP 接收与系统凭据库托管的官方公开 API。
           </p>
         </div>
 
@@ -454,7 +453,7 @@ export function DataSourcesPage() {
           type="button"
           onClick={() => scanMutation.mutate()}
           disabled={scanMutation.isPending}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
+          className="btn-primary flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium cursor-pointer disabled:opacity-50"
           style={{
             backgroundColor: 'var(--accent-primary)',
             color: '#ffffff',
@@ -515,7 +514,7 @@ export function DataSourcesPage() {
           className="text-[11px] font-semibold uppercase tracking-wider"
           style={{ color: 'var(--text-muted)' }}
         >
-          Provider 采集适配器
+          模型提供商采集适配器
         </h2>
 
         <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
@@ -772,7 +771,7 @@ export function DataSourcesPage() {
                               type="button"
                               onClick={() => reconcileMutation.mutate(cfg.provider_id)}
                               disabled={reconcileMutation.isPending}
-                              className="px-2.5 py-1 rounded cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
+                              className="btn-primary px-2.5 py-1 rounded cursor-pointer disabled:opacity-50"
                               style={{
                                 backgroundColor: 'var(--accent-primary)',
                                 color: '#ffffff',
@@ -785,7 +784,7 @@ export function DataSourcesPage() {
                               type="button"
                               onClick={() => refreshBalanceMutation.mutate(cfg.provider_id)}
                               disabled={refreshBalanceMutation.isPending}
-                              className="px-2.5 py-1 rounded cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
+                              className="btn-primary px-2.5 py-1 rounded cursor-pointer disabled:opacity-50"
                               style={{
                                 backgroundColor: 'var(--accent-primary)',
                                 color: '#ffffff',
@@ -985,7 +984,7 @@ export function DataSourcesPage() {
                 type="button"
                 onClick={() => handleToggleOtlp(true)}
                 disabled={updateOtlpPrefsMutation.isPending}
-                className="px-3 py-1 rounded text-[12px] font-medium cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
+                className="btn-primary px-3 py-1 rounded text-[12px] font-medium cursor-pointer disabled:opacity-50"
                 style={{
                   backgroundColor: 'var(--accent-primary)',
                   color: '#ffffff',
@@ -1280,7 +1279,7 @@ export function DataSourcesPage() {
 
             <label className="space-y-1">
               <span className="block text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                自定义归属 Provider ID (可选，留空自动加 custom_ 前缀)
+                自定义归属模型提供商 ID (可选，留空自动加 custom_ 前缀)
               </span>
               <input
                 type="text"
@@ -1377,7 +1376,7 @@ export function DataSourcesPage() {
                   onClick={() =>
                     upsertCustomRuleMutation.mutate(buildNormalizedDraftRule(ruleDraft))
                   }
-                  className="px-3 py-1 text-[11.5px] font-medium rounded cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
+                  className="btn-primary px-3 py-1 text-[11.5px] font-medium rounded cursor-pointer disabled:opacity-50"
                   style={{
                     backgroundColor: 'var(--accent-primary)',
                     color: '#ffffff',
@@ -1415,7 +1414,7 @@ export function DataSourcesPage() {
                 <span className="font-semibold">
                   {sampleTestResult.matched ? '匹配成功' : '未匹配'}
                 </span>
-                <span>Provider: {sampleTestResult.provider_id}</span>
+                <span>模型提供商: {sampleTestResult.provider_id}</span>
                 <span>模型: {sampleTestResult.model_id ?? '—'}</span>
                 <span>输入: {formatExactInt(sampleTestResult.input_tokens)}</span>
                 <span>输出: {formatExactInt(sampleTestResult.output_tokens)}</span>
@@ -1460,7 +1459,7 @@ export function DataSourcesPage() {
                   color: 'var(--text-muted)',
                 }}
               >
-                <th className="py-2 pr-3 text-left font-medium">Provider</th>
+                <th className="py-2 pr-3 text-left font-medium">模型提供商</th>
                 <th className="py-2 px-3 text-left font-medium">文件路径</th>
                 <th className="py-2 px-3 text-left font-medium">文件标识</th>
                 <th className="py-2 px-3 text-right font-medium">已读偏移 (Bytes)</th>

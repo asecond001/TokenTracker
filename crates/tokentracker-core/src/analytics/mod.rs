@@ -1,11 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{Datelike, FixedOffset, NaiveDate, TimeZone, Utc};
-use rusqlite::{params_from_iter, types::Value, Connection};
+use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::domain::{provider_ids, CurrencyCode, ModelPricingEntry, ObservedRateLimitWindow};
+use crate::domain::{
+    provider_ids, sanitize_session_title, CurrencyCode, ModelPricingEntry, ObservedRateLimitWindow,
+    MAX_VALID_OUTPUT_TPS, MIN_VALID_TPS_DURATION_MS, MIN_VALID_TPS_OUTPUT_TOKENS,
+};
 use crate::error::{CoreError, CoreResult};
 use crate::pricing::resolve_pricing;
 use crate::storage::repository::{
@@ -95,6 +98,8 @@ pub struct ProviderSummaryRow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActiveSessionSummary {
     pub session_key: String,
+    #[serde(default)]
+    pub session_title: Option<String>,
     pub provider_id: String,
     pub model_id: String,
     pub project_label: String,
@@ -649,9 +654,10 @@ pub(crate) fn query_latest_tps(
         WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2{where_and}
           AND output_tps IS NOT NULL
           AND output_tps > 0.0
-          AND output_tps <= 800.0
-          AND (duration_ms IS NULL OR duration_ms >= 300)
-          AND (output_tokens + reasoning_tokens) >= 8
+          AND output_tps <= {MAX_VALID_OUTPUT_TPS}
+          AND duration_ms IS NOT NULL
+          AND duration_ms >= {MIN_VALID_TPS_DURATION_MS}
+          AND (output_tokens + reasoning_tokens) >= {MIN_VALID_TPS_OUTPUT_TOKENS}
         ORDER BY timestamp_ms DESC, rowid DESC LIMIT 1
         "#,
         where_and = scope.sql_and
@@ -681,7 +687,7 @@ pub(crate) fn query_latest_tps(
     match conn.query_row(&rollup_sql, params_from_iter(rollup_bound), |r| {
         r.get::<_, f64>(0)
     }) {
-        Ok(v) if v.is_finite() && v > 0.0 => Ok(Some(v)),
+        Ok(v) if v.is_finite() && v > 0.0 && v <= MAX_VALID_OUTPUT_TPS => Ok(Some(v)),
         Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(CoreError::from(e)),
     }
@@ -893,9 +899,10 @@ fn query_active_sessions(
           AND provider_id = ?3 AND session_id = ?4{dev_clause}
           AND output_tps IS NOT NULL
           AND output_tps > 0.0
-          AND output_tps <= 800.0
-          AND (duration_ms IS NULL OR duration_ms >= 300)
-          AND (output_tokens + reasoning_tokens) >= 8
+          AND output_tps <= {MAX_VALID_OUTPUT_TPS}
+          AND duration_ms IS NOT NULL
+          AND duration_ms >= {MIN_VALID_TPS_DURATION_MS}
+          AND (output_tokens + reasoning_tokens) >= {MIN_VALID_TPS_OUTPUT_TOKENS}
         ORDER BY timestamp_ms DESC, rowid DESC
         LIMIT 1
         "#
@@ -903,6 +910,8 @@ fn query_active_sessions(
 
     let mut meta_stmt = conn.prepare(&latest_meta_sql)?;
     let mut tps_stmt = conn.prepare(&latest_tps_sql)?;
+    let mut title_stmt =
+        conn.prepare("SELECT title FROM session_titles WHERE session_key = ?1 LIMIT 1")?;
 
     let mut out = Vec::with_capacity(groups.len());
     for g in groups {
@@ -946,8 +955,31 @@ fn query_active_sessions(
             + g.cache_write_tokens
             + g.reasoning_tokens;
 
+        let canonical_key = format!("{}:{}", g.provider_id, g.session_id);
+        let stored_title: Option<String> = title_stmt
+            .query_row(params![canonical_key], |r| r.get::<_, String>(0))
+            .optional()?;
+        let session_title = stored_title.or_else(|| {
+            let trimmed = g.session_id.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            let looks_synthetic_id = lower.is_empty()
+                || lower == "unknown"
+                || lower == "default"
+                || lower.starts_with("sess-")
+                || lower.starts_with("session-")
+                || lower.starts_with("conv-")
+                || lower.starts_with("rollout-")
+                || trimmed.chars().all(|c| c.is_ascii_hexdigit() || c == '-' || c == '_');
+            if looks_synthetic_id {
+                None
+            } else {
+                sanitize_session_title(trimmed)
+            }
+        });
+
         out.push(ActiveSessionSummary {
             session_key: short_session_key(&g.provider_id, &g.session_id),
+            session_title,
             provider_id: g.provider_id,
             model_id,
             project_label: sanitize_project_label(&raw_project),
@@ -1038,6 +1070,45 @@ impl Storage {
             })?;
             for row in rows {
                 series.push(row?);
+            }
+
+            if !series.is_empty() {
+                let aligned_end = eff_end_ms.div_euclid(bucket_size) * bucket_size;
+                let first_bucket = series[0].bucket_start_ms;
+                let last_bucket = series
+                    .last()
+                    .map(|p| p.bucket_start_ms)
+                    .unwrap_or(first_bucket);
+                let (fill_start, fill_end) = if !filter.all_time {
+                    (aligned_start.min(first_bucket), aligned_end.max(last_bucket))
+                } else {
+                    (first_bucket, last_bucket)
+                };
+                let bucket_span = (fill_end - fill_start).div_euclid(bucket_size);
+                if (0..=366).contains(&bucket_span) {
+                    let existing: HashMap<i64, TimeBucketPoint> =
+                        series.into_iter().map(|p| (p.bucket_start_ms, p)).collect();
+                    let mut filled = Vec::with_capacity((bucket_span + 1) as usize);
+                    let mut cursor_b = fill_start;
+                    while cursor_b <= fill_end {
+                        if let Some(pt) = existing.get(&cursor_b) {
+                            filled.push(pt.clone());
+                        } else {
+                            filled.push(TimeBucketPoint {
+                                bucket_start_ms: cursor_b,
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                cache_read_tokens: 0,
+                                cache_write_tokens: 0,
+                                reasoning_tokens: 0,
+                                cost_micro_usd: 0,
+                                requests: 0,
+                            });
+                        }
+                        cursor_b = cursor_b.saturating_add(bucket_size);
+                    }
+                    series = filled;
+                }
             }
 
             let prov_series_sql = format!(
@@ -1779,9 +1850,10 @@ impl Storage {
                 WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2{where_and}
                   AND output_tps IS NOT NULL
                   AND output_tps > 0.0
-                  AND output_tps <= 800.0
-                  AND (duration_ms IS NULL OR duration_ms >= 300)
-                  AND (output_tokens + reasoning_tokens) >= 8
+                  AND output_tps <= {MAX_VALID_OUTPUT_TPS}
+                  AND duration_ms IS NOT NULL
+                  AND duration_ms >= {MIN_VALID_TPS_DURATION_MS}
+                  AND (output_tokens + reasoning_tokens) >= {MIN_VALID_TPS_OUTPUT_TOKENS}
                 ORDER BY timestamp_ms ASC
                 "#,
                 where_and = scope.sql_and
@@ -2644,8 +2716,8 @@ mod tests {
         let speed = storage
             .query_speed_latency(&all_time_filter)
             .expect("speed filtered");
-        assert!(speed.providers.iter().all(|p| p.max_tps <= 800.0));
-        assert!(speed.models.iter().all(|m| m.max_tps <= 800.0));
+        assert!(speed.providers.iter().all(|p| p.max_tps <= 450.0));
+        assert!(speed.models.iter().all(|m| m.max_tps <= 450.0));
     }
 
     #[test]
@@ -3210,5 +3282,87 @@ mod tests {
         assert_eq!(ov_30d.top_model_shares, ov_today.top_model_shares);
         assert_eq!(ov_30d.top_model_shares.len(), 1);
         assert_eq!(ov_30d.top_model_shares[0].key, "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn overview_series_zero_fills_gaps_and_active_sessions_resolve_titles() {
+        let storage = Storage::open_in_memory().expect("in-memory");
+        let dev_id = storage.local_device().expect("device").device_id;
+        let now_ms = 1_794_830_400_000i64; // aligned hour boundary in Nov 2026
+        let h0 = now_ms - 3 * HOUR_MS;
+        let h3 = now_ms - 10_000;
+
+        let events = vec![
+            NormalizedUsageEvent {
+                event_id: compute_event_id("claude_code", "sess-uuid-1", "m1", h0),
+                device_id: dev_id.clone(),
+                provider_id: "claude_code".to_string(),
+                session_id: "sess-uuid-1".to_string(),
+                project_label: "TokenTracker".to_string(),
+                model_id: "claude-sonnet-4-5".to_string(),
+                timestamp_ms: h0,
+                input_tokens: 1_000,
+                output_tokens: 120,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(2_000),
+                ttft_ms: None,
+                output_tps: Some(60.0),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+            NormalizedUsageEvent {
+                event_id: compute_event_id("claude_code", "sess-uuid-1", "m2", h3),
+                device_id: dev_id,
+                provider_id: "claude_code".to_string(),
+                session_id: "sess-uuid-1".to_string(),
+                project_label: "TokenTracker".to_string(),
+                model_id: "claude-sonnet-4-5".to_string(),
+                timestamp_ms: h3,
+                input_tokens: 2_000,
+                output_tokens: 200,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(2_500),
+                ttft_ms: None,
+                output_tps: Some(80.0),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+        ];
+        let titles = vec![crate::domain::SessionTitleRecord {
+            session_key: "claude_code:sess-uuid-1".to_string(),
+            provider_id: "claude_code".to_string(),
+            title: "Refactor Chart Stacking".to_string(),
+            source: "explicit".to_string(),
+            updated_at_ms: h3,
+        }];
+        storage
+            .ingest_events_with_cursor_and_titles(&events, None, &[], &titles)
+            .expect("ingest");
+
+        let filter = AnalyticsFilter {
+            start_ms: h0,
+            end_ms: now_ms,
+            provider_id: None,
+            device_id: None,
+            tz_offset_minutes: 480,
+            all_time: false,
+        };
+        let ov = storage.query_overview(&filter, now_ms).expect("overview");
+        // Continuous hourly buckets from h0 through now_ms: 4 buckets with zeros in middle gaps
+        assert_eq!(ov.series.len(), 4);
+        assert_eq!(ov.series[1].input_tokens, 0);
+        assert_eq!(ov.series[1].output_tokens, 0);
+        assert_eq!(ov.provider_series[0].points.len(), ov.series.len());
+        assert_eq!(ov.active_sessions.len(), 1);
+        assert_eq!(
+            ov.active_sessions[0].session_title.as_deref(),
+            Some("Refactor Chart Stacking")
+        );
     }
 }

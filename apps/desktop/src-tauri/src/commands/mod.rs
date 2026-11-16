@@ -31,7 +31,10 @@ use tokentracker_core::sync_crypto::generate_kdf_salt_hex;
 use tokentracker_core::CoreError;
 
 use crate::state::AppState;
-use crate::tray::{show_main_window, TRAY_POPUP_LABEL};
+use crate::tray::{
+    resize_floating_window_internal, set_floating_window_visible, show_main_window,
+    toggle_floating_window_internal, FLOATING_MONITOR_LABEL, TRAY_POPUP_LABEL,
+};
 
 const MAX_BG_IMAGE_BYTES: u64 = 15_728_640; // 15 MiB
 
@@ -46,7 +49,7 @@ pub fn parse_tauri_theme(theme: &str) -> Option<tauri::Theme> {
 pub fn apply_theme_to_app(app: &AppHandle, theme: &str) {
     let target = parse_tauri_theme(theme);
     app.set_theme(target);
-    for label in ["main", TRAY_POPUP_LABEL] {
+    for label in ["main", TRAY_POPUP_LABEL, FLOATING_MONITOR_LABEL] {
         if let Some(win) = app.get_webview_window(label) {
             let _ = win.set_theme(target);
         }
@@ -527,6 +530,7 @@ pub async fn update_preferences(
     let updated = state.storage.get_preferences()?;
     state.sync_client.notify_local_change();
     apply_theme_to_app(&app, &updated.theme);
+    set_floating_window_visible(&app, updated.floating_window_enabled);
     let _ = app.emit("preferences-updated", &updated);
     Ok(updated)
 }
@@ -914,6 +918,23 @@ pub fn open_main_workspace(
 pub fn quit_application(app: AppHandle, state: State<'_, AppState>) {
     state.shutdown_background_services();
     app.exit(0);
+}
+
+#[tauri::command]
+pub fn toggle_floating_window(app: AppHandle) -> bool {
+    toggle_floating_window_internal(&app)
+}
+
+#[tauri::command]
+pub fn get_floating_window_visible(app: AppHandle) -> bool {
+    app.get_webview_window(FLOATING_MONITOR_LABEL)
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+pub fn set_floating_window_compact(app: AppHandle, compact: bool) {
+    resize_floating_window_internal(&app, compact);
 }
 
 #[cfg(test)]

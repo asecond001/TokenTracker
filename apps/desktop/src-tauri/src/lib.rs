@@ -98,6 +98,9 @@ pub fn run() {
             commands::get_remote_subscription_snapshots,
             commands::open_main_workspace,
             commands::quit_application,
+            commands::toggle_floating_window,
+            commands::get_floating_window_visible,
+            commands::set_floating_window_compact,
         ])
         .setup(|app| {
             if let Err(err) = setup_tray(app.handle()) {
@@ -107,6 +110,9 @@ pub fn run() {
             let state = app.state::<AppState>();
             if let Ok(prefs) = state.storage.get_preferences() {
                 commands::apply_theme_to_app(app.handle(), &prefs.theme);
+                if prefs.floating_window_enabled {
+                    tray::set_floating_window_visible(app.handle(), true);
+                }
             }
             state.start_background_services(app.handle().clone());
             Ok(())
@@ -124,6 +130,11 @@ pub fn run() {
                         api.prevent_close();
                         let _ = window.hide();
                     }
+                }
+            } else if window.label() == tray::FLOATING_MONITOR_LABEL {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = tray::set_floating_window_and_persist(window.app_handle(), false);
                 }
             }
         });
