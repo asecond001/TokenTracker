@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "bundleBaseId": "com.tokentracker.app",
+  "widgetsBundleId": "com.tokentracker.app.widgets",
+  "appGroupId": "group.com.tokentracker.app",
+  "marketingVersion": "0.3.0",
+  "buildNumber": "1",
+  "sourceCommit": "UNSET",
+  "teamId": "UNSET",
+  "certificateSha256": "UNSET",
+  "internalTestingGroup": "Owner Testing"
+}

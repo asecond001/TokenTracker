@@ -1,29 +1,30 @@
-# TokenTracker Self-Hosted Sync Worker (Cloudflare Workers + SQLite Durable Objects)
+# TokenTracker Sync Worker
 
-Zero-external-database synchronization hub for TokenTracker desktop clients.
-Only desensitized `SyncEnvelopeV1` hourly rollups & subscription window percentages—or client-side `AES-256-GCM` `EncryptedSyncEnvelopeV1` ciphertexts—are persisted inside a single SQLite-backed Durable Object (`SyncHubDO`). Prompts, code, file paths, session IDs, and API keys are strictly rejected.
+基于 Cloudflare Workers 和 SQLite Durable Objects (`SyncHubDO`) 的轻量多端同步服务，无需额外购买或配置外部数据库。
 
-## 3-Minute Self-Hosting Guide
+它只做一件事：在你的多台电脑和手机之间同步**脱敏后的小时级用量汇总**和**订阅窗口百分比**（或者开启 E2EE 后的 `AES-256-GCM` 密文）。如果请求里夹带了 `prompt`、`messages`、`session_id`、文件路径或 API Key，网关会直接拒收。
 
-1. Install dependencies from the repository root:
+## 3 分钟部署指南
+
+1. 在仓库根目录安装依赖：
    ```bash
    pnpm install
    ```
-2. Authenticate Wrangler (one time):
+2. 登录 Cloudflare 账号：
    ```bash
    npx wrangler login
    ```
-3. Generate and store a strong Bearer token secret (`SYNC_TOKEN`):
+3. 设置你自己的同步鉴权密钥 `SYNC_TOKEN`：
    ```bash
    cd services/sync-worker
    npx wrangler secret put SYNC_TOKEN
    ```
-4. Deploy the Worker + Durable Object migration:
+4. 部署到 Cloudflare：
    ```bash
    npx wrangler deploy
    ```
-5. Verify health endpoint:
+5. 验证服务状态：
    ```bash
-   curl https://<your-worker-subdomain>.workers.dev/healthz
+   curl https://<你的-worker-子域名>.workers.dev/healthz
    ```
-6. Open TokenTracker Desktop -> **偏好设置 -> 云端多端同步**, paste your Worker URL and `SYNC_TOKEN`, optionally enable **E2EE 端到端加密** with a shared passphrase across your devices, and click **保存同步凭据 -> 立即同步**.
+6. 打开 TokenTracker 桌面端 **偏好设置 -> 云端多端同步**，填入 Worker 地址和 `SYNC_TOKEN`。如需端到端加密，勾选 **E2EE** 并在各设备间使用相同的加密口令。

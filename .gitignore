@@ -17,6 +17,16 @@ dist-ssr/
 !**/.dev.vars.example
 
 # Native mobile build artifacts (Phase 3)
+apps/ios/*.xcodeproj/
+apps/ios/*.xcworkspace/
+apps/ios/DerivedData/
+apps/ios/.build/
+apps/ios/CoreFFI/Artifacts/
+apps/ios/CoreFFI/.build/
+artifacts/
+*.ipa
+*.xcarchive/
+*.xcresult/
 DerivedData/
 *.xcuserstate
 .build/
@@ -24,6 +34,18 @@ DerivedData/
 local.properties
 apps/ios/build/
 apps/android/build/
+.tools/
+
+# Signing assets & secrets (never commit)
+*.p12
+*.p8
+*.cer
+*.mobileprovision
+*.certSigningRequest
+*p12_password*.txt
+apple-api-identifiers.json
+__pycache__/
+*.pyc
 
 # Local databases, logs & runtime data
 *.db
@@ -48,3 +70,9 @@ Desktop.ini
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
+
+# Internal agent rules & design docs (local only)
+/AGENTS.md
+/GEMINI.md
+/docs/
+

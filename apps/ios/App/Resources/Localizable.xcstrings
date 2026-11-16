@@ -1,0 +1,138 @@
+{
+  "sourceLanguage": "zh-Hans",
+  "version": "1.0",
+  "strings": {
+    "app.name": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "TokenTracker" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "TokenTracker" } }
+      }
+    },
+    "tab.overview": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Overview" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "概览" } }
+      }
+    },
+    "tab.analytics": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Analytics" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "趋势与月报" } }
+      }
+    },
+    "tab.quotas": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Quotas & Models" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "订阅与模型" } }
+      }
+    },
+    "tab.settings": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Sync & Settings" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "同步与设置" } }
+      }
+    },
+    "filter.all_devices": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "All Devices" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "全部设备" } }
+      }
+    },
+    "range.today": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Today" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "今日" } }
+      }
+    },
+    "range.7d": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "7D" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "7D" } }
+      }
+    },
+    "range.30d": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "30D" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "30D" } }
+      }
+    },
+    "range.month": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Month" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "本月" } }
+      }
+    },
+    "range.all": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "All" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "全部" } }
+      }
+    },
+    "sync.status.live": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Live" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "实时在线" } }
+      }
+    },
+    "sync.status.syncing": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Syncing" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "同步中" } }
+      }
+    },
+    "sync.status.offline": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Cached" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "离线缓存" } }
+      }
+    },
+    "overview.empty.title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Connect Your Sync Worker" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "连接自托管同步中枢" } }
+      }
+    },
+    "overview.empty.action": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Pair Desktop Host" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "扫码或配置配对" } }
+      }
+    },
+    "quota.pin_live_activity": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Pin to Island" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "灵动岛盯盘" } }
+      }
+    },
+    "quota.unpin_live_activity": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Stop" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "结束盯盘" } }
+      }
+    },
+    "settings.pair.scan_qr": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Scan Desktop QR" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "扫码一键配对" } }
+      }
+    },
+    "settings.sync.now": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Sync Now" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "立即增量同步" } }
+      }
+    },
+    "widget.overview.title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "TokenTracker Overview" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "TokenTracker 今日总览" } }
+      }
+    },
+    "widget.lockscreen.title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Quota Watch" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "订阅配额盯盘" } }
+      }
+    }
+  }
+}

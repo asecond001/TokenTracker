@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "vmImage": "macOS-26",
+  "hostArch": "x86_64",
+  "xcode": {
+    "version": "26.3",
+    "build": "17C529",
+    "developerDir": "/Applications/Xcode_26.3.app/Contents/Developer"
+  },
+  "iosSdk": "26.2",
+  "deploymentTarget": "18.0",
+  "swiftVersion": "5.10",
+  "nodeVersion": "24.14.0",
+  "xcodegen": {
+    "version": "2.44.1",
+    "downloadUrl": "https://github.com/yonaskolb/XcodeGen/releases/download/2.44.1/xcodegen.zip"
+  },
+  "rust": {
+    "minChannel": "1.86.0",
+    "targets": {
+      "device": "aarch64-apple-ios",
+      "simIntel": "x86_64-apple-ios",
+      "simArm64": "aarch64-apple-ios-sim"
+    }
+  },
+  "simulator": {
+    "preferredNames": [
+      "iPhone 17 Pro",
+      "iPhone 16 Pro",
+      "iPhone 16"
+    ],
+    "runtimePrefix": "com.apple.CoreSimulator.SimRuntime.iOS-26"
+  }
+}

@@ -385,9 +385,24 @@ export function SpeedLatencyPage() {
             style={{ borderBottom: '1px solid var(--border-hairline)' }}
           >
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-[13.5px] font-semibold">Provider 维度速度与延迟总览</h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-[13.5px] font-semibold">Provider 维度速度与延迟总览</h2>
+                {data?.from_hourly_rollups && (
+                  <span
+                    className="px-1.5 py-0.5 text-[10.5px] rounded-[2px]"
+                    style={{
+                      color: 'var(--text-muted)',
+                      border: '1px solid var(--border-hairline)',
+                    }}
+                  >
+                    同步聚合口径
+                  </span>
+                )}
+              </div>
               <span className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                各活跃 Provider 有效流式回合加权汇总
+                {data?.from_hourly_rollups
+                  ? '来自远端小时级聚合指标（TTFT 仅本地事件可见）'
+                  : '各活跃 Provider 有效流式回合加权汇总'}
               </span>
             </div>
 

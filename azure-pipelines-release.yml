@@ -1,0 +1,338 @@
+trigger: none
+pr: none
+
+parameters:
+  - name: action
+    displayName: Release pipeline action
+    type: string
+    default: build
+    values:
+      - build
+      - upload
+      - inspect
+      - deliver
+  - name: runNativeTests
+    displayName: Run native Simulator XCTests before packaging (forced true for upload)
+    type: boolean
+    default: true
+
+variables:
+  - name: CARGO_TERM_COLOR
+    value: always
+  - name: RUST_BACKTRACE
+    value: "1"
+  - name: WHEELHOUSE_DIR
+    value: $(Pipeline.Workspace)/apple-wheelhouse
+  - name: XCFRAMEWORK_CACHE_DIR
+    value: $(Build.SourcesDirectory)/apps/ios/CoreFFI/Artifacts
+
+stages:
+  - stage: SigningPreflight
+    displayName: Signing & Candidate Preflight
+    condition: in('${{ parameters.action }}', 'build', 'upload')
+    jobs:
+      - job: Preflight
+        timeoutInMinutes: 20
+        pool:
+          vmImage: macOS-26
+        steps:
+          - checkout: self
+            clean: true
+          - task: NodeTool@0
+            displayName: Use Node 24.14.0
+            inputs:
+              versionSpec: "24.14.0"
+          - bash: |
+              set -euo pipefail
+              node scripts/ios/check-ios-project.mjs
+              node --input-type=module -e '
+                import fs from "node:fs";
+                import { execFileSync } from "node:child_process";
+                import { checkCandidateForAction } from "./scripts/ios/testflight-handoff.mjs";
+                const candidate = JSON.parse(fs.readFileSync("ci/testflight-candidate.json", "utf8"));
+                const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+                const result = checkCandidateForAction({ candidate, action: "${{ parameters.action }}", headCommit: head });
+                console.log(JSON.stringify(result, null, 2));
+              '
+            displayName: Validate iOS project & testflight-candidate.json contract
+          - task: Cache@2
+            displayName: Restore Apple tools wheelhouse
+            inputs:
+              key: 'apple-wheelhouse-v1 | "$(Agent.OS)" | ci/apple-tools-requirements.txt'
+              path: $(WHEELHOUSE_DIR)
+          - bash: bash scripts/ios/azure-setup.sh --with-apple-tools --wheelhouse-dir "$(WHEELHOUSE_DIR)"
+            displayName: Setup Xcode 26.3, XcodeGen 2.44.1 & verified Apple wheelhouse
+          - task: PublishPipelineArtifact@1
+            displayName: Publish verified Apple tools wheelhouse artifact
+            inputs:
+              targetPath: $(WHEELHOUSE_DIR)
+              artifact: apple-wheelhouse
+          - task: DownloadSecureFile@1
+            name: AppleP12
+            displayName: Download Apple Distribution .p12
+            inputs:
+              secureFile: tokentracker_distribution.p12
+          - task: DownloadSecureFile@1
+            name: AppleP12Password
+            displayName: Download .p12 password file
+            inputs:
+              secureFile: tokentracker_p12_password.txt
+          - task: DownloadSecureFile@1
+            name: AppProfile
+            displayName: Download App Distribution .mobileprovision
+            inputs:
+              secureFile: tokentracker_app.mobileprovision
+          - task: DownloadSecureFile@1
+            name: WidgetsProfile
+            displayName: Download Widgets Distribution .mobileprovision
+            inputs:
+              secureFile: tokentracker_widgets.mobileprovision
+          - bash: |
+              set -euo pipefail
+              PYTHON_BIN="$(pwd)/.tools/apple-venv/bin/python3"
+              TEAM_ID="$(node -pe 'JSON.parse(require("fs").readFileSync("ci/testflight-candidate.json","utf8")).teamId')"
+              CERT_SHA="$(node -pe 'JSON.parse(require("fs").readFileSync("ci/testflight-candidate.json","utf8")).certificateSha256')"
+              BUNDLE_BASE="$(node -pe 'JSON.parse(require("fs").readFileSync("ci/testflight-candidate.json","utf8")).bundleBaseId')"
+              APP_GROUP="$(node -pe 'JSON.parse(require("fs").readFileSync("ci/testflight-candidate.json","utf8")).appGroupId')"
+              "$PYTHON_BIN" scripts/ios/azure-archive.py validate-profiles \
+                --app-profile "$(AppProfile.secureFilePath)" \
+                --widgets-profile "$(WidgetsProfile.secureFilePath)" \
+                --bundle-base-id "$BUNDLE_BASE" \
+                --app-group "$APP_GROUP" \
+                --team-id "$TEAM_ID" \
+                --cert-sha256 "$CERT_SHA"
+              "$PYTHON_BIN" scripts/ios/azure-archive.py with-keychain \
+                --p12 "$(AppleP12.secureFilePath)" \
+                --p12-password-file "$(AppleP12Password.secureFilePath)" \
+                --cert-sha256 "$CERT_SHA" \
+                -- security find-identity -v -p codesigning
+            displayName: Preflight validate dual .mobileprovision profiles & ephemeral .p12 import
+
+  - stage: Validate
+    displayName: Rust FFI & Simulator Test Gate
+    dependsOn: SigningPreflight
+    condition: and(succeeded(), in('${{ parameters.action }}', 'build', 'upload'), or(eq('${{ parameters.action }}', 'upload'), eq('${{ parameters.runNativeTests }}', true)))
+    jobs:
+      - job: SimulatorValidation
+        timeoutInMinutes: 45
+        pool:
+          vmImage: macOS-26
+        steps:
+          - checkout: self
+            clean: true
+          - task: NodeTool@0
+            displayName: Use Node 24.14.0
+            inputs:
+              versionSpec: "24.14.0"
+          - task: DownloadPipelineArtifact@2
+            displayName: Download verified Apple wheelhouse
+            inputs:
+              artifact: apple-wheelhouse
+              path: $(WHEELHOUSE_DIR)
+          - task: Cache@2
+            displayName: Restore Cargo registry & build cache
+            inputs:
+              key: 'cargo-ios-v1 | "$(Agent.OS)" | Cargo.lock'
+              restoreKeys: |
+                cargo-ios-v1 | "$(Agent.OS)"
+              path: |
+                $(HOME)/.cargo/registry
+                $(HOME)/.cargo/git
+                $(Build.SourcesDirectory)/target
+          - bash: bash scripts/ios/azure-setup.sh --with-apple-tools --wheelhouse-dir "$(WHEELHOUSE_DIR)"
+            displayName: Setup toolchain & install offline wheelhouse
+          - bash: |
+              set -euo pipefail
+              export PATH="$(pwd)/.tools/apple-venv/bin:$PATH"
+              node scripts/ios/local-check.mjs --online --require-python
+            displayName: Run Rust core/FFI, UniFFI & signing script unit tests
+          - task: Cache@2
+            displayName: Cache native simulator XCFramework
+            inputs:
+              key: 'rust-ios-xcf-v1 | "native" | "$(Agent.OS)" | Cargo.lock | crates/tokentracker-core/** | crates/tokentracker-ffi/** | scripts/ios/build-xcframework.sh'
+              path: $(XCFRAMEWORK_CACHE_DIR)
+            continueOnError: true
+          - bash: |
+              set -euo pipefail
+              if [[ ! -d "apps/ios/CoreFFI/Artifacts/TokenTrackerCoreFFI.xcframework" ]]; then
+                bash scripts/ios/build-xcframework.sh --mode native
+              else
+                echo "Reusing cached native TokenTrackerCoreFFI.xcframework"
+              fi
+            displayName: Build native Simulator XCFramework on cache miss
+          - bash: bash scripts/ios/native-check.sh
+            displayName: Run native Simulator XCTest/XCUITest suite
+          - task: PublishPipelineArtifact@1
+            displayName: Publish Simulator validation results
+            condition: always()
+            inputs:
+              targetPath: $(Build.SourcesDirectory)/artifacts/ios
+              artifact: ios-native-validation
+
+  - stage: Package
+    displayName: Archive, Dual-Bundle Verify & Conditional Upload
+    dependsOn:
+      - SigningPreflight
+      - Validate
+    condition: |
+      and(
+        in('${{ parameters.action }}', 'build', 'upload'),
+        eq(dependencies.SigningPreflight.result, 'Succeeded'),
+        or(
+          eq(dependencies.Validate.result, 'Succeeded'),
+          and(
+            eq('${{ parameters.action }}', 'build'),
+            eq('${{ parameters.runNativeTests }}', false),
+            eq(dependencies.Validate.result, 'Skipped')
+          )
+        )
+      )
+    jobs:
+      - job: ArchiveAndVerify
+        timeoutInMinutes: 30
+        pool:
+          vmImage: macOS-26
+        steps:
+          - checkout: self
+            clean: true
+          - task: NodeTool@0
+            displayName: Use Node 24.14.0
+            inputs:
+              versionSpec: "24.14.0"
+          - task: DownloadPipelineArtifact@2
+            displayName: Download verified Apple wheelhouse
+            inputs:
+              artifact: apple-wheelhouse
+              path: $(WHEELHOUSE_DIR)
+          - task: DownloadSecureFile@1
+            name: AppleP12
+            displayName: Download Apple Distribution .p12
+            inputs:
+              secureFile: tokentracker_distribution.p12
+          - task: DownloadSecureFile@1
+            name: AppleP12Password
+            displayName: Download .p12 password file
+            inputs:
+              secureFile: tokentracker_p12_password.txt
+          - task: DownloadSecureFile@1
+            name: AppProfile
+            displayName: Download App Distribution .mobileprovision
+            inputs:
+              secureFile: tokentracker_app.mobileprovision
+          - task: DownloadSecureFile@1
+            name: WidgetsProfile
+            displayName: Download Widgets Distribution .mobileprovision
+            inputs:
+              secureFile: tokentracker_widgets.mobileprovision
+          - task: Cache@2
+            displayName: Restore Cargo registry & build cache
+            inputs:
+              key: 'cargo-ios-v1 | "$(Agent.OS)" | Cargo.lock'
+              restoreKeys: |
+                cargo-ios-v1 | "$(Agent.OS)"
+              path: |
+                $(HOME)/.cargo/registry
+                $(HOME)/.cargo/git
+                $(Build.SourcesDirectory)/target
+          - task: Cache@2
+            displayName: Cache release device+sim XCFramework
+            inputs:
+              key: 'rust-ios-xcf-v1 | "release" | "$(Agent.OS)" | Cargo.lock | crates/tokentracker-core/** | crates/tokentracker-ffi/** | scripts/ios/build-xcframework.sh'
+              path: $(XCFRAMEWORK_CACHE_DIR)
+            continueOnError: true
+          - bash: |
+              set -euo pipefail
+              bash scripts/ios/azure-setup.sh --with-apple-tools --wheelhouse-dir "$(WHEELHOUSE_DIR)"
+              if [[ ! -d "apps/ios/CoreFFI/Artifacts/TokenTrackerCoreFFI.xcframework" ]]; then
+                bash scripts/ios/build-xcframework.sh --mode release
+              else
+                echo "Reusing cached release TokenTrackerCoreFFI.xcframework"
+              fi
+              TEAM_ID="$(node -pe 'JSON.parse(require("fs").readFileSync("ci/testflight-candidate.json","utf8")).teamId')"
+              CERT_SHA="$(node -pe 'JSON.parse(require("fs").readFileSync("ci/testflight-candidate.json","utf8")).certificateSha256')"
+              bash scripts/ios/archive-ios.sh \
+                --p12 "$(AppleP12.secureFilePath)" \
+                --p12-password-file "$(AppleP12Password.secureFilePath)" \
+                --app-profile "$(AppProfile.secureFilePath)" \
+                --widgets-profile "$(WidgetsProfile.secureFilePath)" \
+                --team-id "$TEAM_ID" \
+                --cert-sha256 "$CERT_SHA"
+            displayName: Archive IPA in ephemeral keychain & verify dual bundles
+          - task: DownloadSecureFile@1
+            name: AscApiKey
+            condition: and(succeeded(), eq('${{ parameters.action }}', 'upload'))
+            displayName: Download App Store Connect AuthKey .p8
+            inputs:
+              secureFile: tokentracker_appstore.p8
+          - task: DownloadSecureFile@1
+            name: AscApiIdentifiers
+            condition: and(succeeded(), eq('${{ parameters.action }}', 'upload'))
+            displayName: Download Apple API identifiers JSON
+            inputs:
+              secureFile: apple-api-identifiers.json
+          - bash: |
+              set -euo pipefail
+              ASC_KEY_ID="$(node -pe 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).keyId' "$(AscApiIdentifiers.secureFilePath)")"
+              KEYS_DIR="$(Agent.TempDirectory)/asc-private-keys"
+              mkdir -p "$KEYS_DIR"
+              chmod 700 "$KEYS_DIR"
+              cp "$(AscApiKey.secureFilePath)" "$KEYS_DIR/AuthKey_${ASC_KEY_ID}.p8"
+              chmod 600 "$KEYS_DIR/AuthKey_${ASC_KEY_ID}.p8"
+              trap 'rm -rf "$KEYS_DIR"' EXIT
+              node scripts/ios/testflight-handoff.mjs \
+                --action upload \
+                --candidate ci/testflight-candidate.json \
+                --signing-report artifacts/ios/device-signing.json \
+                --ipa artifacts/ios/release-package/TokenTracker.ipa \
+                --api-identifiers "$(AscApiIdentifiers.secureFilePath)" \
+                --private-keys-dir "$KEYS_DIR" \
+                --output artifacts/ios/release-package/upload-handoff.json
+            condition: and(succeeded(), eq('${{ parameters.action }}', 'upload'))
+            displayName: Verify candidate immutability & upload IPA to TestFlight
+          - task: PublishPipelineArtifact@1
+            displayName: Publish sanitized signed IPA, dSYMs & device-signing.json
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: $(Build.SourcesDirectory)/artifacts/ios/release-package
+              artifact: ios-release-package
+
+  - stage: TestFlightOwner
+    displayName: TestFlight Inspect & Owner Group Delivery
+    dependsOn: []
+    condition: in('${{ parameters.action }}', 'inspect', 'deliver')
+    jobs:
+      - job: OwnerDelivery
+        timeoutInMinutes: 20
+        pool:
+          vmImage: macOS-26
+        steps:
+          - checkout: self
+            clean: true
+          - task: NodeTool@0
+            displayName: Use Node 24.14.0
+            inputs:
+              versionSpec: "24.14.0"
+          - task: DownloadSecureFile@1
+            name: AscApiKey
+            displayName: Download App Store Connect AuthKey .p8
+            inputs:
+              secureFile: tokentracker_appstore.p8
+          - task: DownloadSecureFile@1
+            name: AscApiIdentifiers
+            displayName: Download Apple API identifiers JSON
+            inputs:
+              secureFile: apple-api-identifiers.json
+          - bash: |
+              set -euo pipefail
+              node scripts/ios/testflight-owner.mjs \
+                --mode "${{ parameters.action }}" \
+                --candidate ci/testflight-candidate.json \
+                --api-identifiers "$(AscApiIdentifiers.secureFilePath)" \
+                --private-key-path "$(AscApiKey.secureFilePath)" \
+                --output artifacts/ios/testflight-${{ parameters.action }}.json
+            displayName: Run TestFlight owner API flow (${{ parameters.action }})
+          - task: PublishPipelineArtifact@1
+            displayName: Publish TestFlight owner report
+            inputs:
+              targetPath: $(Build.SourcesDirectory)/artifacts/ios
+              artifact: ios-testflight-owner

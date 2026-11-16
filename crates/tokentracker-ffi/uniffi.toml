@@ -1,0 +1,4 @@
+[bindings.swift]
+module_name = "TokenTrackerCore"
+ffi_module_name = "TokenTrackerCoreFFI"
+ffi_module_filename = "TokenTrackerCoreFFI"

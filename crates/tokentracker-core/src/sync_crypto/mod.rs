@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+use std::sync::atomic::{compiler_fence, Ordering};
+
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use pbkdf2::pbkdf2_hmac;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 use crate::domain::{EncryptedSyncEnvelopeV1, SyncEnvelopeV1};
 use crate::error::{CoreError, CoreResult};
@@ -92,10 +95,25 @@ pub fn encrypt_sync_envelope_v1(
     })
 }
 
-/// Decrypt and authenticate an `EncryptedSyncEnvelopeV1` using the shared user passphrase.
-pub fn decrypt_sync_envelope_v1(
+fn e2ee_cache_key(passphrase: &str, kdf_salt_hex: &str) -> String {
+    let passphrase_digest = Sha256::digest(passphrase.as_bytes());
+    let salt_norm = kdf_salt_hex.trim().to_ascii_lowercase();
+    format!("{}:{}", hex::encode(passphrase_digest), salt_norm)
+}
+
+/// Zero all derived keys in an E2EE batch decryption cache and clear the map.
+pub fn clear_key_cache(key_cache: &mut HashMap<String, [u8; 32]>) {
+    for key in key_cache.values_mut() {
+        key.fill(0);
+    }
+    compiler_fence(Ordering::SeqCst);
+    key_cache.clear();
+}
+
+/// Decrypt and authenticate an `EncryptedSyncEnvelopeV1` using an already-derived 256-bit key.
+pub fn decrypt_sync_envelope_v1_with_key(
     encrypted: &EncryptedSyncEnvelopeV1,
-    passphrase: &str,
+    key: &[u8; 32],
 ) -> CoreResult<SyncEnvelopeV1> {
     if encrypted.schema_version != 1 {
         return Err(CoreError::Validation(format!(
@@ -103,7 +121,6 @@ pub fn decrypt_sync_envelope_v1(
             encrypted.schema_version
         )));
     }
-    let key = derive_e2ee_key(passphrase, &encrypted.kdf_salt_hex)?;
     let nonce_bytes = hex::decode(encrypted.nonce_hex.trim())
         .map_err(|e| CoreError::Validation(format!("Invalid E2EE nonce hex: {e}")))?;
     if nonce_bytes.len() != E2EE_NONCE_LEN {
@@ -117,7 +134,7 @@ pub fn decrypt_sync_envelope_v1(
         .map_err(|e| CoreError::Validation(format!("Invalid E2EE ciphertext base64: {e}")))?;
 
     let aad = envelope_aad(&encrypted.device_id, encrypted.seq_ms);
-    let cipher = Aes256Gcm::new_from_slice(&key)
+    let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| CoreError::Validation(format!("Failed to initialize AES-256-GCM: {e}")))?;
 
     let plaintext = cipher
@@ -148,6 +165,57 @@ pub fn decrypt_sync_envelope_v1(
         ));
     }
     Ok(envelope)
+}
+
+/// Decrypt an `EncryptedSyncEnvelopeV1`, reusing previously derived keys within a batch.
+pub fn decrypt_sync_envelope_v1_cached(
+    encrypted: &EncryptedSyncEnvelopeV1,
+    passphrase: &str,
+    key_cache: &mut HashMap<String, [u8; 32]>,
+) -> CoreResult<SyncEnvelopeV1> {
+    if encrypted.schema_version != 1 {
+        return Err(CoreError::Validation(format!(
+            "Unsupported encrypted envelope schema_version {}",
+            encrypted.schema_version
+        )));
+    }
+    if passphrase.trim().is_empty() {
+        return Err(CoreError::Validation(
+            "E2EE passphrase cannot be empty".to_string(),
+        ));
+    }
+
+    let cache_key = e2ee_cache_key(passphrase, &encrypted.kdf_salt_hex);
+    if let Some(cached_key) = key_cache.get(&cache_key) {
+        return decrypt_sync_envelope_v1_with_key(encrypted, cached_key);
+    }
+
+    let mut derived_key = derive_e2ee_key(passphrase, &encrypted.kdf_salt_hex)?;
+    let result = decrypt_sync_envelope_v1_with_key(encrypted, &derived_key);
+    if result.is_ok() {
+        key_cache.insert(cache_key, derived_key);
+    }
+    derived_key.fill(0);
+    compiler_fence(Ordering::SeqCst);
+    result
+}
+
+/// Decrypt and authenticate an `EncryptedSyncEnvelopeV1` using the shared user passphrase.
+pub fn decrypt_sync_envelope_v1(
+    encrypted: &EncryptedSyncEnvelopeV1,
+    passphrase: &str,
+) -> CoreResult<SyncEnvelopeV1> {
+    if encrypted.schema_version != 1 {
+        return Err(CoreError::Validation(format!(
+            "Unsupported encrypted envelope schema_version {}",
+            encrypted.schema_version
+        )));
+    }
+    let mut key = derive_e2ee_key(passphrase, &encrypted.kdf_salt_hex)?;
+    let result = decrypt_sync_envelope_v1_with_key(encrypted, &key);
+    key.fill(0);
+    compiler_fence(Ordering::SeqCst);
+    result
 }
 
 #[cfg(test)]
@@ -228,5 +296,49 @@ mod tests {
             ..encrypted
         };
         assert!(decrypt_sync_envelope_v1(&tampered_seq, passphrase).is_err());
+    }
+
+    #[test]
+    fn cached_decryption_reuses_derived_key_and_rejects_wrong_passphrase() {
+        let env = sample_envelope();
+        let passphrase = "cached-batch-passphrase";
+        let salt = "0123456789abcdef0123456789abcdef";
+
+        let enc_1 =
+            encrypt_sync_envelope_v1(&env, passphrase, Some(salt), 1_760_000_010_000)
+                .expect("encrypt 1");
+        let enc_2 =
+            encrypt_sync_envelope_v1(&env, passphrase, Some(salt), 1_760_000_020_000)
+                .expect("encrypt 2");
+
+        let mut cache = HashMap::new();
+        assert!(decrypt_sync_envelope_v1_cached(&enc_1, "wrong-pass", &mut cache).is_err());
+        assert!(cache.is_empty());
+
+        let dec_1 =
+            decrypt_sync_envelope_v1_cached(&enc_1, passphrase, &mut cache).expect("dec 1");
+        assert_eq!(dec_1, env);
+        assert_eq!(cache.len(), 1);
+
+        let dec_2 =
+            decrypt_sync_envelope_v1_cached(&enc_2, passphrase, &mut cache).expect("dec 2");
+        assert_eq!(dec_2, env);
+        assert_eq!(cache.len(), 1);
+
+        // Warm cache for the valid passphrase must never authorize a wrong passphrase.
+        assert!(decrypt_sync_envelope_v1_cached(&enc_2, "wrong-pass", &mut cache).is_err());
+
+        // Direct key helper also rejects tampered ciphertext.
+        let key = derive_e2ee_key(passphrase, salt).expect("derive");
+        let mut raw_ct = STANDARD.decode(&enc_1.ciphertext_b64).expect("decode b64");
+        raw_ct[0] ^= 0x11;
+        let tampered = EncryptedSyncEnvelopeV1 {
+            ciphertext_b64: STANDARD.encode(raw_ct),
+            ..enc_1
+        };
+        assert!(decrypt_sync_envelope_v1_with_key(&tampered, &key).is_err());
+
+        clear_key_cache(&mut cache);
+        assert!(cache.is_empty());
     }
 }

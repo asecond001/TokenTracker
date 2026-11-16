@@ -3,11 +3,12 @@ resolver = "2"
 members = [
     "crates/tokentracker-core",
     "crates/tokentracker-collectors",
+    "crates/tokentracker-ffi",
     "apps/desktop/src-tauri",
 ]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 
@@ -42,3 +43,4 @@ tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+uniffi = { version = "0.28", features = ["cli"] }

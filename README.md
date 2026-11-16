@@ -1,80 +1,99 @@
 # TokenTracker
 
-面向开发者的**去卡片化独立桌面客户端与多端协同 AI Token 用量监测工具**（当前已完成 **Phase 2 / v0.2.0 — 实时摘要升级、第二批 Provider 扩展、Cloudflare 多端同步与自动更新**，基于 **SQLite Schema v4** 与 **45 个强类型 Tauri IPC 接口**）。
+一个用来算清 AI 编程工具到底花了多少 Token、合多少钱、离订阅限流还有多远的桌面端与 iOS 监测工具。
 
-## 核心特性
+平时同时开着 Claude Code、Codex、Antigravity、Kimi 或 DeepSeek 写代码时，账单和额度往往散落在各个终端和网页后台里。TokenTracker 把它们汇总到一个干净、像 Linear 一样克制的界面里，不搞满屏花哨的圆角卡片，也不碰任何中间人抓包或窃取 Cookie 的灰产手段。
 
-- **类 Linear 扁平桌面客户端与实时态势感知**：
-  - `38px` 一体化标题栏 + `208px` 左侧导航栏 + 高密度扁平主画布，支持深/浅/跟随系统零延迟双窗口同步、纯色/微光渐变/托管壁纸背景、`USD`/`CNY` 实时换算与「全部设备 / 单设备」即时切换。
-  - `OverviewPage` 顶部与 `360×480` 系统托盘浮层（`?view=tray`）提供今日动态花费/Token 主读数、分段占比条、Top 3 模型拆解与本地 15 分钟窗口活跃（`<= 120s`）/ 近期 Session 列表，支持从托盘点击活跃会话一键跳转主工作台对应 Provider 过滤视图。
-- **8 大主流 AI Provider 内置支持 + 声明式自定义接入层**：
-  - 全量覆盖 **Claude Code**、**Codex**、**Antigravity**、**Kimi Code**、**Workbuddy**、**DeepSeek Harness (`dsh`)**（Prefix Cache 命中/未命中分离核算）、**QCode** 与 **MiniMax Code**，通过三类合规通道（共享只读文件锁尾随、`127.0.0.1` 回环 OTLP、Windows Credential Manager 托管官方公开 API）获取数据。
-  - 提供 **自定义兼容规则引擎**（`openai_jsonl`、`anthropic_jsonl` 与 RFC 6901 JSON 指针 `declarative_jsonl`）及本地单行样本干跑校验；内置 Moonshot、DeepSeek、QCode、MiniMax 官方公开余额/额度查询（带 `60s` 冷却防限流）。
-- **Cloudflare Worker 自托管实时同步（含可选 E2EE）**：
-  - `services/sync-worker` 基于 Cloudflare Workers + SQLite-backed Durable Objects（`SyncHubDO`）实现零外部数据库云同步，提供 `POST /v1/sync/push`、`GET /v1/sync/pull` 与 `/v1/sync/events`（SSE + `25s` 心跳）。
-  - 仅同步脱敏小时汇总与订阅百分比快照（网关层主动拦截含 `session_id` / `prompt` / `messages` / `file_path` / 密钥等字段的请求）；可选开启客户端 `PBKDF2-HMAC-SHA256`（`210,000` 次）+ `AES-256-GCM` 端到端加密，服务端仅存不可解密密文。
-- **汇率/模型定价自动同步与零成本自更新**：
-  - 定时免鉴权拉取 `Frankfurter` / `Open Exchange Rates` 汇率（12h TTL）与 `models.dev` / `LiteLLM` 模型单价目录（24h TTL）；集成 `tauri-plugin-updater` + GitHub Actions 发布签名清单（`latest.json`）实现静默检查与内联进度安装。
+---
 
-## Cloudflare Sync Worker 3 分钟自托管指南
+## 它能做什么
 
-1. 在仓库根目录安装依赖：
-   ```powershell
-   pnpm install
-   ```
-2. 登录 Cloudflare CLI 并设置强随机同步鉴权密钥 `SYNC_TOKEN`：
-   ```powershell
-   cd services/sync-worker
-   npx wrangler login
-   npx wrangler secret put SYNC_TOKEN
-   ```
-3. 部署 Worker 与 `SyncHubDO` Durable Object：
-   ```powershell
-   npx wrangler deploy
-   curl https://<your-worker-subdomain>.workers.dev/healthz
-   ```
-4. 在 TokenTracker 客户端打开 **偏好设置 -> 云端多端同步（Cloudflare Worker）**：填入 Worker URL 与 `SYNC_TOKEN`，可选开启 **端到端加密（E2EE）** 并在多台电脑输入相同的同步口令，点击 **保存同步凭据 -> 立即同步**。
+- **安静、高密度的桌面工作台（Windows）**
+  - 提供概览、趋势、月度账单（含 365 天热力图）、模型单价、订阅配额与生成速度拆解。
+  - 常驻系统托盘，点一下就能看到今天的实时花费、各工具占比、最近 15 分钟活跃的编码会话，以及哪个订阅窗口快到限额了。
+  - 支持深浅色跟随系统、`USD` / `CNY` 实时换算、多台电脑汇总或单机筛选。
 
-## GitHub Releases 自动更新与签名配置说明
+- **开箱支持 8 款主流工具 + 自定义日志接入**
+  - 内置 **Claude Code**、**Codex**、**Antigravity**、**Kimi Code**、**Workbuddy**、**DeepSeek Harness (`dsh`)**、**QCode** 与 **MiniMax Code**。
+  - 如果你在用其他自建网关或 CLI，可以直接在界面里配置兼容 OpenAI / Anthropic 格式或 JSON 指针的本地日志规则，并用单行样本实时测试。
 
-- 桌面客户端通过 `.github/workflows/release-desktop.yml` 在推送 `v*` Tag 时自动执行前端/Rust 全量测试与 Clippy 门禁，并构建签名的 `.msi` / NSIS 安装包与 `latest.json`。
-- 仓库维保者在发布前需通过 `pnpm tauri signer generate` 生成 Minisign 密钥对，将私钥写入 GitHub Repository Secrets 中的 `TAURI_SIGNING_PRIVATE_KEY`（及可选 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`），并将对应公钥填入 `apps/desktop/src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`。
+- **克制、合规的数据获取方式**
+  - **本地只读日志**：用共享读锁增量尾随各工具正常落盘的 JSONL 日志，不抢锁、不改文件。
+  - **本地 OTLP 接收**：可选监听 `127.0.0.1` 回环端口，接收工具按官方文档导出的 OpenTelemetry 遥测。
+  - **官方公开接口**：如果你主动配置了官方 API Key（保存在系统凭据库中），可以定期查询余额与官方配额窗口，并自动将识别到的套餐加入订阅监控。
 
-## 本地开发、测试与打包（Windows）
+- **3 分钟自托管多端同步 + 纯原生 iOS 客户端**
+  - 通过自托管的 Cloudflare Worker + Durable Objects 同步多台电脑的用量汇总，不需要额外部署数据库。
+  - **绝对不上传**原始 Prompt、代码内容、会话 ID、本地路径或 API Key；支持开启 `AES-256-GCM` 端到端加密（E2EE），让服务端只存密文。
+  - **iOS / iPadOS 原生客户端（`apps/ios`）**：纯 `SwiftUI` + `Swift Charts` 编写，通过 `UniFFI` 直接复用 Rust 核心计费与解密逻辑。支持主屏/锁屏小组件（`WidgetKit`）和**灵动岛实时盯盘（`Live Activities`）**，高强度写代码时在手机锁屏上就能看到 5h / 7d 窗口倒计时。
 
-### 前置环境
+---
 
-- Rust 工具链 (`stable-x86_64-pc-windows-msvc`) 与 MSVC Build Tools
+## 快速开始（本地开发与构建）
+
+### 环境准备
+
+- Rust (`stable-x86_64-pc-windows-msvc`) 与 MSVC Build Tools
 - Node.js 20+ 与 `pnpm`
 - Windows WebView2 Runtime
 
 ### 常用命令
 
 ```powershell
-# 1. 运行 Rust Clippy 静态检查（零警告门禁）
-cargo clippy --workspace --all-targets --offline -- -D warnings
+# 安装前端与工作区依赖
+pnpm install
 
-# 2. 运行 Rust 单元测试与集成测试（core + collectors + desktop）
+# Rust 静态检查与测试
+cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo test --workspace --offline
 
-# 3. 运行工作区 TypeScript 类型检查（apps/desktop + services/sync-worker）
+# 前端与 Worker 类型检查及单元测试
 pnpm typecheck
-
-# 4. 运行前端与 Sync Worker 单元测试（Vitest）
 pnpm test
 
-# 5. 构建前端生产包
+# 构建前端与桌面端安装包 (.msi / NSIS .exe)
 pnpm build
-
-# 6. 运行 100 万行 JSONL 冷启动与增量写入基准测试（Release）
-cargo run --release --offline -p tokentracker-collectors --example bench_million_lines
-
-# 7. 构建桌面安装包（.msi 与 NSIS .exe）
 pnpm desktop:build
+
+# 运行 iOS 工程与跨语言绑定本地校验（无需 Mac）
+pnpm run ios:check:local
+
+# 运行 100 万行 JSONL 冷启动与增量续读压测
+cargo run --release --offline -p tokentracker-collectors --example bench_million_lines
 ```
 
-打包产物默认输出在：
-- 主程序：`target/release/tokentracker-desktop.exe`
-- MSI 安装包：`target/release/bundle/msi/TokenTracker_0.2.0_x64_en-US.msi`
-- NSIS 安装包：`target/release/bundle/nsis/TokenTracker_0.2.0_x64-setup.exe`
+打包完成后，桌面端产物位于：
+- 可执行文件：`target/release/tokentracker-desktop.exe`
+- MSI 安装包：`target/release/bundle/msi/TokenTracker_0.3.0_x64_en-US.msi`
+- NSIS 安装包：`target/release/bundle/nsis/TokenTracker_0.3.0_x64-setup.exe`
+
+---
+
+## 3 分钟自托管云端同步（Cloudflare Worker）
+
+如果你想把多台电脑的用量汇总到一起，或者在手机上查看实时配额，可以部署仓库自带的 `services/sync-worker`：
+
+1. 登录 Cloudflare 并设置一个你自己定好的同步口令 `SYNC_TOKEN`：
+   ```powershell
+   cd services/sync-worker
+   npx wrangler login
+   npx wrangler secret put SYNC_TOKEN
+   ```
+2. 一键部署 Worker：
+   ```powershell
+   npx wrangler deploy
+   curl https://<你的-worker-子域名>.workers.dev/healthz
+   ```
+3. 打开桌面端 **偏好设置 -> 云端多端同步**，填入 Worker 地址和 `SYNC_TOKEN`。建议顺手打开 **端到端加密（E2EE）** 并设一个加密口令。iOS 端可以直接扫码或粘贴配对信息接入。
+
+---
+
+## 自动更新与发布签名
+
+推送 `v*` 标签时，GitHub Actions（`.github/workflows/release-desktop.yml`）会自动跑完测试门禁，打包签名安装包并生成 `latest.json` 更新清单。
+
+如果要维护自己的发布源：
+1. 运行 `pnpm tauri signer generate` 生成 Minisign 密钥对。
+2. 把私钥存进 GitHub 仓库 Secrets 的 `TAURI_SIGNING_PRIVATE_KEY`（以及可选的 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）。
+3. 把公钥填到 `apps/desktop/src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`。
 

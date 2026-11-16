@@ -8,6 +8,7 @@ pub mod pricing;
 pub mod storage;
 pub mod subscription;
 pub mod sync_crypto;
+pub mod sync_mobile;
 
 pub use error::{CoreError, CoreResult};
 pub use storage::{IngestOutcome, Storage};

@@ -1,0 +1,2 @@
+codemagic-cli-tools==0.69.0
+cryptography==50.0.1

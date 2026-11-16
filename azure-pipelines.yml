@@ -1,0 +1,113 @@
+trigger: none
+pr: none
+
+parameters:
+  - name: validation
+    displayName: Validation depth
+    type: string
+    default: preflight
+    values:
+      - preflight
+      - native
+
+variables:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  XDG_CACHE_HOME: $(Pipeline.Workspace)/.cache
+  XCFRAMEWORK_CACHE_DIR: $(Build.SourcesDirectory)/apps/ios/CoreFFI/Artifacts
+
+jobs:
+  - job: Preflight
+    displayName: Toolchain & Project Preflight (No Rust/Swift Build)
+    timeoutInMinutes: 8
+    pool:
+      vmImage: macOS-26
+    steps:
+      - checkout: self
+        clean: true
+      - task: NodeTool@0
+        displayName: Use Node 24.14.0
+        inputs:
+          versionSpec: "24.14.0"
+      - bash: |
+          set -euo pipefail
+          node scripts/ios/local-check.mjs --skip-rust
+          bash scripts/ios/azure-setup.sh
+          mkdir -p artifacts/ios
+          python3 - <<'PY' > artifacts/ios/preflight-diagnostics.json
+          import json, subprocess
+          xcode_ver = subprocess.check_output(["xcodebuild", "-version"], text=True).strip()
+          sdk_ver = subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--show-sdk-version"], text=True).strip()
+          xg_ver = subprocess.check_output(["bash", "-lc", "PATH=.tools/bin:$PATH xcodegen --version"], text=True).strip()
+          rustc_ver = subprocess.check_output(["rustc", "--version"], text=True).strip()
+          sims = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"], text=True))
+          print(json.dumps({
+              "xcodeVersion": xcode_ver,
+              "iosSdkVersion": sdk_ver,
+              "xcodegenVersion": xg_ver,
+              "rustcVersion": rustc_ver,
+              "availableRuntimes": sorted(sims.get("devices", {}).keys()),
+          }, indent=2))
+          PY
+        displayName: Validate iOS manifest, pin Xcode/XcodeGen & probe simulators
+      - task: PublishPipelineArtifact@1
+        displayName: Publish preflight diagnostics
+        condition: always()
+        inputs:
+          targetPath: $(Build.SourcesDirectory)/artifacts/ios
+          artifact: ios-preflight
+
+  - job: NativeSimulatorCheck
+    displayName: Native XcodeBuild & Simulator XCTests
+    timeoutInMinutes: 45
+    dependsOn: Preflight
+    condition: and(succeeded(), eq('${{ parameters.validation }}', 'native'))
+    pool:
+      vmImage: macOS-26
+    steps:
+      - checkout: self
+        clean: true
+      - task: NodeTool@0
+        displayName: Use Node 24.14.0
+        inputs:
+          versionSpec: "24.14.0"
+      - task: Cache@2
+        displayName: Restore Cargo registry & build cache
+        inputs:
+          key: 'cargo-ios-v1 | "$(Agent.OS)" | Cargo.lock'
+          restoreKeys: |
+            cargo-ios-v1 | "$(Agent.OS)"
+          path: |
+            $(HOME)/.cargo/registry
+            $(HOME)/.cargo/git
+            $(Build.SourcesDirectory)/target
+      - bash: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install cryptography==50.0.1
+          node scripts/ios/local-check.mjs --online --require-python
+        displayName: Run Rust core/FFI, UniFFI & signing script unit tests
+      - bash: bash scripts/ios/azure-setup.sh
+        displayName: Pin Xcode 26.3, XcodeGen 2.44.1 & iOS Rust targets
+      - task: Cache@2
+        displayName: Cache native simulator XCFramework
+        inputs:
+          key: 'rust-ios-xcf-v1 | "native" | "$(Agent.OS)" | Cargo.lock | crates/tokentracker-core/** | crates/tokentracker-ffi/** | scripts/ios/build-xcframework.sh'
+          path: $(XCFRAMEWORK_CACHE_DIR)
+        continueOnError: true
+      - bash: |
+          set -euo pipefail
+          if [[ ! -d "apps/ios/CoreFFI/Artifacts/TokenTrackerCoreFFI.xcframework" ]]; then
+            bash scripts/ios/build-xcframework.sh --mode native
+          else
+            echo "Reusing cached native TokenTrackerCoreFFI.xcframework"
+          fi
+        displayName: Build Simulator XCFramework on cache miss
+      - bash: bash scripts/ios/native-check.sh
+        displayName: Generate XcodeGen project & run Simulator XCTest/XCUITest
+      - task: PublishPipelineArtifact@1
+        displayName: Publish native test summary & xcresult
+        condition: always()
+        inputs:
+          targetPath: $(Build.SourcesDirectory)/artifacts/ios
+          artifact: ios-native-check
