@@ -781,6 +781,13 @@ export const ipc = {
 
   getFloatingWindowVisible: (): Promise<boolean> => callIpc('get_floating_window_visible'),
 
-  setFloatingWindowCompact: (compact: boolean): Promise<void> =>
-    callIpc('set_floating_window_compact', { compact }),
+  setFloatingWindowCompact: (
+    compact: boolean,
+    width?: number,
+    height?: number
+  ): Promise<void> =>
+    callIpc(
+      'set_floating_window_compact',
+      width !== undefined && height !== undefined ? { compact, width, height } : { compact }
+    ),
 };

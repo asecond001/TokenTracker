@@ -481,7 +481,12 @@ impl Storage {
                         updated_at_ms = excluded.updated_at_ms
                     WHERE excluded.source = 'explicit'
                        OR (
-                           session_titles.source != 'explicit'
+                           session_titles.source = 'derived'
+                           AND excluded.source = 'user_prompt'
+                       )
+                       OR (
+                           session_titles.source = excluded.source
+                           AND session_titles.source != 'explicit'
                            AND (
                                excluded.updated_at_ms < session_titles.updated_at_ms
                                OR LENGTH(TRIM(session_titles.title)) = 0
@@ -542,6 +547,10 @@ impl Storage {
                 )?;
             }
 
+            if touched_providers.contains_key(provider_ids::ANTIGRAVITY) {
+                rate_limit_providers.insert(provider_ids::ANTIGRAVITY.to_string());
+            }
+
             for pid in rate_limit_providers {
                 sync_auto_subscription_for_provider_conn(&tx, &pid, now_ms)?;
             }
@@ -567,7 +576,14 @@ impl Storage {
     }
 
     pub fn list_observed_rate_limits(&self) -> CoreResult<Vec<ObservedRateLimitWindow>> {
-        self.with_conn(load_observed_rate_limits)
+        self.with_conn(|conn| {
+            Ok(load_observed_rate_limits(conn)?
+                .into_iter()
+                .filter(|o| {
+                    o.source.as_deref() != Some("local_log_hint") && o.window_name != "tier_hint"
+                })
+                .collect())
+        })
     }
 
     pub fn list_provider_configs(&self) -> CoreResult<Vec<ProviderConfig>> {
@@ -2456,7 +2472,20 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         .filter(|o| o.provider_id.eq_ignore_ascii_case(trimmed))
         .collect();
     if obs_rows.is_empty() {
-        return Ok(());
+        if trimmed == provider_ids::ANTIGRAVITY {
+            let has_ag_events: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM usage_events WHERE provider_id = ?1 LIMIT 1",
+                    params![provider_ids::ANTIGRAVITY],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if has_ag_events.is_none() {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
     }
 
     let bal_info: Option<(String, Option<i64>)> = conn
@@ -2477,8 +2506,14 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
             provider_ids::KIMI_CODE | provider_ids::MINIMAX_CODE | provider_ids::QCODE
         ) {
         "official_api".to_string()
-    } else {
+    } else if !obs_rows.is_empty()
+        && obs_rows
+            .iter()
+            .any(|o| o.source.as_deref() != Some("local_log_hint"))
+    {
         "official_log_snapshot".to_string()
+    } else {
+        "local_log".to_string()
     };
 
     let plan_hint = obs_rows
@@ -2491,7 +2526,34 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
                 .map(|s| (o.observed_at_ms, s.to_string()))
         })
         .max_by_key(|(ts, _)| *ts)
-        .map(|(_, s)| s);
+        .map(|(_, s)| s)
+        .or_else(|| {
+            if trimmed == provider_ids::ANTIGRAVITY {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT DISTINCT LOWER(model_id) FROM usage_events WHERE provider_id = ?1",
+                    )
+                    .ok()?;
+                let models: Vec<String> = stmt
+                    .query_map(params![provider_ids::ANTIGRAVITY], |r| r.get::<_, String>(0))
+                    .ok()?
+                    .flatten()
+                    .collect();
+                if models.iter().any(|m| m.contains("ultra") && m.contains("20x")) {
+                    Some("ultra_20x".to_string())
+                } else if models.iter().any(|m| m.contains("ultra") && m.contains("5x")) {
+                    Some("ultra_5x".to_string())
+                } else if models.iter().any(|m| m.contains("ultra")) {
+                    Some("ultra".to_string())
+                } else if models.iter().any(|m| m.contains("enterprise")) {
+                    Some("enterprise".to_string())
+                } else {
+                    Some("pro".to_string())
+                }
+            } else {
+                None
+            }
+        });
 
     let hint_lower = plan_hint
         .as_deref()
@@ -2504,6 +2566,10 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
             && match trimmed {
                 provider_ids::CODEX if hint_lower.contains("pro") => tpl.template_id == "codex_pro",
                 provider_ids::CODEX => tpl.template_id == "codex_plus",
+                provider_ids::ANTIGRAVITY if hint_lower.contains("ultra") => {
+                    tpl.template_id == "google_ai_ultra"
+                }
+                provider_ids::ANTIGRAVITY => tpl.template_id == "google_ai_pro",
                 _ => true,
             }
     });
@@ -2511,8 +2577,12 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         .map(|t| t.windows.clone())
         .unwrap_or_default();
 
+    let real_obs_rows: Vec<&ObservedRateLimitWindow> = obs_rows
+        .iter()
+        .filter(|o| o.source.as_deref() != Some("local_log_hint"))
+        .collect();
     let mut rules_by_id: BTreeMap<String, SubscriptionWindowRule> = BTreeMap::new();
-    for obs in &obs_rows {
+    for obs in &real_obs_rows {
         let rule = infer_window_rule_from_observed(
             trimmed,
             obs,
@@ -2522,7 +2592,46 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         );
         rules_by_id.entry(rule.window_id.clone()).or_insert(rule);
     }
-    let mut windows: Vec<SubscriptionWindowRule> = rules_by_id.into_values().collect();
+    let mut windows: Vec<SubscriptionWindowRule> = if rules_by_id.is_empty() {
+        if trimmed == provider_ids::ANTIGRAVITY {
+            if hint_lower.contains("free") {
+                tpl_windows
+                    .iter()
+                    .filter(|w| w.window_id == "7d")
+                    .cloned()
+                    .collect()
+            } else if hint_lower.contains("ultra") && (hint_lower.contains("5x") || hint_lower.contains("99")) {
+                vec![
+                    SubscriptionWindowRule {
+                        window_id: "5h".to_string(),
+                        label: "5h 滚动窗口".to_string(),
+                        duration_hours: 5,
+                        rolling: true,
+                        unit: QuotaUnit::MicroUsd,
+                        limit_value: 100_000_000,
+                        warning_percent: 80,
+                        critical_percent: 95,
+                    },
+                    SubscriptionWindowRule {
+                        window_id: "7d".to_string(),
+                        label: "7d 周额度".to_string(),
+                        duration_hours: 168,
+                        rolling: true,
+                        unit: QuotaUnit::MicroUsd,
+                        limit_value: 500_000_000,
+                        warning_percent: 80,
+                        critical_percent: 95,
+                    },
+                ]
+            } else {
+                tpl_windows
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        rules_by_id.into_values().collect()
+    };
     windows.sort_by_key(|w| w.duration_hours);
     if windows.is_empty() {
         return Ok(());
@@ -2557,6 +2666,25 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
                 ("ChatGPT Free / Codex".to_string(), 0)
             } else {
                 ("Codex 官方订阅".to_string(), 0)
+            }
+        }
+        provider_ids::ANTIGRAVITY => {
+            if hint_lower.contains("ultra")
+                && (hint_lower.contains("20x") || hint_lower.contains("199"))
+            {
+                ("Google AI Ultra 20x".to_string(), 199_990_000)
+            } else if hint_lower.contains("ultra")
+                && (hint_lower.contains("5x") || hint_lower.contains("99"))
+            {
+                ("Google AI Ultra 5x".to_string(), 99_990_000)
+            } else if hint_lower.contains("ultra") {
+                ("Google AI Ultra".to_string(), 249_990_000)
+            } else if hint_lower.contains("enterprise") || hint_lower.contains("business") {
+                ("Gemini Enterprise / Antigravity".to_string(), 30_000_000)
+            } else if hint_lower.contains("free") {
+                ("Google AI Free / Antigravity".to_string(), 0)
+            } else {
+                ("Google AI Pro".to_string(), 19_990_000)
             }
         }
         provider_ids::KIMI_CODE => {
@@ -3685,5 +3813,64 @@ mod tests {
                 Ok(())
             })
             .expect("verify");
+    }
+
+    #[test]
+    fn antigravity_auto_subscription_monitors_5h_and_7d_rolling_windows() {
+        let storage = Storage::open_in_memory().expect("db");
+        let dev = storage.local_device().expect("device").device_id;
+        let now_ms = 1_794_820_000_000i64;
+
+        let ev = NormalizedUsageEvent {
+            event_id: "antigravity:conv-1:step-1".to_string(),
+            device_id: dev,
+            provider_id: provider_ids::ANTIGRAVITY.to_string(),
+            session_id: "conv-1".to_string(),
+            project_label: "antigravity".to_string(),
+            model_id: "Orchestrator (Carbon)".to_string(),
+            timestamp_ms: now_ms - 60_000,
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            observable_only: false,
+            duration_ms: Some(4_000),
+            ttft_ms: Some(600),
+            output_tps: Some(25.0),
+            estimated_cost_micro_usd: 0,
+            cache_saved_micro_usd: 0,
+        };
+        let hint_obs = ObservedRateLimitWindow {
+            provider_id: provider_ids::ANTIGRAVITY.to_string(),
+            window_name: "tier_hint".to_string(),
+            used_percent: 0.0,
+            window_minutes: None,
+            resets_at_ms: None,
+            observed_at_ms: now_ms - 60_000,
+            source: Some("local_log_hint".to_string()),
+            plan_hint: Some("ultra_5x".to_string()),
+        };
+
+        storage
+            .ingest_events_with_cursor(&[ev], None, &[hint_obs])
+            .expect("ingest antigravity");
+
+        // Internal tier_hint rows must NOT leak into list_observed_rate_limits()
+        assert!(storage
+            .list_observed_rate_limits()
+            .expect("observed")
+            .is_empty());
+
+        let subs = storage.query_subscriptions(now_ms).expect("subs");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].plan.plan_id, "auto_antigravity");
+        assert_eq!(subs[0].plan.plan_name, "Google AI Ultra 5x");
+        assert_eq!(subs[0].plan.monthly_fee_micro_usd, 99_990_000);
+        assert_eq!(subs[0].plan.auto_source.as_deref(), Some("local_log"));
+        assert_eq!(subs[0].windows.len(), 2);
+        // 1M input ($2.00) + 100k output ($1.20) = $3.20 used out of $100 5h window = 3.2%
+        assert_eq!(subs[0].windows[0].used_value, 3_200_000);
+        assert!((subs[0].windows[0].used_percent - 3.2).abs() < 0.01);
     }
 }

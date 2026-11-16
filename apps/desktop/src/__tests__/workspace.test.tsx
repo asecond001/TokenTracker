@@ -587,7 +587,7 @@ describe('Workspace store & UI shell navigation', () => {
     expect(await screen.findByText('数据源与合规采集')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '偏好设置' }));
-    expect(await screen.findByText('偏好设置与同步契约')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '偏好设置' })).toBeInTheDocument();
   });
 
   it('renders TrayPopupPage compact summary without errors', async () => {
@@ -853,7 +853,7 @@ describe('MonthlyPage ROI reference visibility', () => {
     renderWithQuery(<MonthlyPage />);
 
     const toggleBtn = await screen.findByRole('button', {
-      name: /订阅回本参考（基于您录入的订阅月费计算）/,
+      name: /订阅回本参考/,
     });
     expect(toggleBtn).toBeInTheDocument();
     expect(screen.getByText('已录入月费 $20.00')).toBeInTheDocument();
@@ -1087,7 +1087,7 @@ describe('Custom Background controls & <WorkspaceBackdrop />', () => {
 
     renderWithQuery(<PreferencesPage />);
 
-    expect(await screen.findByText('外观与自定义背景')).toBeInTheDocument();
+    expect(await screen.findByText('自定义背景')).toBeInTheDocument();
 
     // Switch to Gradient mode
     fireEvent.click(screen.getByRole('button', { name: '微光渐变' }));
@@ -1219,7 +1219,7 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
     expect(screen.queryByTestId('time-range-control')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '偏好设置' }));
-    expect(await screen.findByText('偏好设置与同步契约')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '偏好设置' })).toBeInTheDocument();
     expect(screen.queryByTestId('time-range-control')).not.toBeInTheDocument();
   });
 
@@ -1741,7 +1741,7 @@ describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sy
 
     renderWithQuery(<PreferencesPage />);
 
-    expect(await screen.findByText('云端多端同步（Cloudflare Worker）')).toBeInTheDocument();
+    expect(await screen.findByText('云端同步')).toBeInTheDocument();
     await waitFor(() => {
       expect(getSyncStatusSpy).toHaveBeenCalled();
     });
@@ -2051,7 +2051,7 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
 
     renderWithQuery(<FloatingMonitorPage />);
 
-    expect(screen.getByText('TokenTracker 实时悬浮窗')).toBeInTheDocument();
+    expect(screen.getByText('TokenTracker')).toBeInTheDocument();
     expect(await screen.findByText('Refactor Floating Monitor HUD')).toBeInTheDocument();
     expect(screen.getByText('78.4 tok/s')).toBeInTheDocument();
 
@@ -2061,6 +2061,67 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
 
     fireEvent.click(screen.getByRole('button', { name: '关闭悬浮窗' }));
     expect(toggleSpy).toHaveBeenCalled();
+  });
+
+  it('supports categorized PreferencesPage, in-place update buttons, and customizable FloatingMonitorPage elements', async () => {
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(
+      makePreferences({ floating_window_enabled: true })
+    );
+    vi.spyOn(ipc, 'getBootstrapState').mockResolvedValue(makeBootstrap());
+    vi.spyOn(ipc, 'listCustomProviderRules').mockResolvedValue([]);
+    vi.spyOn(ipc, 'listDevices').mockResolvedValue([]);
+
+    const { useUpdaterStore } = await import('../lib/updater');
+    act(() => {
+      useUpdaterStore.setState({
+        status: 'available',
+        availableUpdate: {
+          version: '0.2.3',
+          currentVersion: '0.2.2',
+          date: '2026-11-16',
+          body: 'Update test',
+        },
+        downloadedBytes: 0,
+        totalBytes: null,
+        errorMessage: null,
+      });
+    });
+
+    renderWithQuery(
+      <div>
+        <TitleBar
+          collectorWatching={true}
+          isScanning={false}
+          onScanNow={() => {}}
+        />
+        <PreferencesPage />
+      </div>
+    );
+
+    // Top-bar update button in TitleBar
+    expect(await screen.findByRole('button', { name: '立即更新客户端' })).toBeInTheDocument();
+    expect(screen.getByText('更新 v0.2.3')).toBeInTheDocument();
+
+    // Categorized sections in PreferencesPage
+    expect(screen.getByText('外观')).toBeInTheDocument();
+    expect(screen.getByText('深色/浅色模式')).toBeInTheDocument();
+    expect(screen.getByText('自定义背景')).toBeInTheDocument();
+    expect(screen.getByText('桌面与悬浮窗')).toBeInTheDocument();
+    expect(screen.getByText('货币与定价')).toBeInTheDocument();
+    expect(screen.getByText('系统与更新')).toBeInTheDocument();
+
+    // Check-for-update button is replaced by 立即更新 v0.2.3 when update is available
+    expect(screen.getByRole('button', { name: '立即更新 v0.2.3' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '检查更新' })).not.toBeInTheDocument();
+
+    act(() => {
+      useUpdaterStore.setState({
+        status: 'idle',
+        availableUpdate: null,
+      });
+    });
+
+    expect(await screen.findByRole('button', { name: '检查更新' })).toBeInTheDocument();
   });
 
   it('displays detected subscription tier status without ever showing 未设月费', async () => {

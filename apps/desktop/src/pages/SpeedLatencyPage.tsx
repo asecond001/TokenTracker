@@ -362,9 +362,6 @@ export function SpeedLatencyPage() {
       >
         <div>
           <h1 className="text-[16px] font-semibold tracking-tight">生成速度与延迟监测</h1>
-          <p className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
-            按模型提供商与模型横向对比 Output Tokens/s（均值 / P50 / P95 / 峰值）及响应耗时分布
-          </p>
         </div>
         <TimeRangeControl />
       </section>
@@ -399,11 +396,6 @@ export function SpeedLatencyPage() {
                   </span>
                 )}
               </div>
-              <span className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                {data?.from_hourly_rollups
-                  ? '来自远端小时级聚合指标'
-                  : '有效流式回合加权汇总'}
-              </span>
             </div>
 
             <div className="grid grid-cols-1 md:grid-flow-col md:auto-cols-fr gap-y-4">
@@ -468,10 +460,6 @@ export function SpeedLatencyPage() {
             <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
               <div>
                 <h2 className="text-[13.5px] font-semibold">模型 × 模型提供商速率对比</h2>
-                <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                  横向对比 P50 / 均值 / P95 生成速率（tok/s），色相区分模型提供商
-                  {groupMode === 'model' && models.length > 12 ? '（展示样本量前 12 项）' : ''}
-                </p>
               </div>
 
               <div className="flex items-center gap-3">
@@ -535,7 +523,7 @@ export function SpeedLatencyPage() {
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-[13.5px] font-semibold">模型 × 模型提供商速度与耗时明细表</h2>
               <span className="text-[11.5px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-                共 {models.length} 组 · 点击表头排序
+                共 {models.length} 组
               </span>
             </div>
 

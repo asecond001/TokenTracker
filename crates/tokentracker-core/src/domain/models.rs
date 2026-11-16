@@ -477,6 +477,73 @@ pub fn compute_tps(output_tokens: i64, duration_ms: Option<i64>) -> Option<f64> 
     }
 }
 
+fn sorted_quantile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let pos = p.clamp(0.0, 1.0) * (sorted.len() - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    let frac = pos - lo as f64;
+    sorted[lo] + (sorted[hi] - sorted[lo]) * frac
+}
+
+/// Compute a non-parametric Tukey IQR upper fence (`max(Q3 + 1.5 * IQR, median * 2.2)`)
+/// for a sorted slice of valid TPS samples when at least 4 samples are available.
+pub fn compute_iqr_upper_fence(sorted_tps: &[f64]) -> Option<f64> {
+    if sorted_tps.len() < 4 {
+        return None;
+    }
+    let q1 = sorted_quantile(sorted_tps, 0.25);
+    let median = sorted_quantile(sorted_tps, 0.50);
+    let q3 = sorted_quantile(sorted_tps, 0.75);
+    let iqr = (q3 - q1).max(0.0);
+    let tukey = q3 + 1.5 * iqr;
+    let ratio_guard = median * 2.2;
+    Some(tukey.max(ratio_guard).min(MAX_VALID_OUTPUT_TPS))
+}
+
+/// Smooth a chronological sequence of TPS samples using Tukey IQR outlier rejection
+/// followed by an Exponentially Weighted Moving Average (`EWMA`, `alpha` in `0.0..=1.0`).
+/// When fewer than 4 samples exist, returns the latest sample directly unless 3 samples
+/// show an extreme (>2.4x median) spike, in which case EWMA damps the spike.
+pub fn compute_ewma_tps(chronological_samples: &[f64], alpha: f64) -> Option<f64> {
+    let valid: Vec<f64> = chronological_samples
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite() && *v > 0.0 && *v <= MAX_VALID_OUTPUT_TPS)
+        .collect();
+    if valid.is_empty() {
+        return None;
+    }
+    if valid.len() < 3 {
+        return valid.last().copied();
+    }
+
+    let mut sorted = valid.clone();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let median = sorted_quantile(&sorted, 0.50);
+    let fence = compute_iqr_upper_fence(&sorted).unwrap_or(median * 2.4);
+
+    let last = *valid.last().unwrap_or(&median);
+    // If all samples are within the normal fence, preserve the crisp latest reading unless smoothing an outlier tail.
+    if last <= fence && valid.iter().all(|&v| v <= fence) {
+        return Some(last);
+    }
+
+    let inliers: Vec<f64> = valid.into_iter().filter(|&v| v <= fence).collect();
+    let series = if inliers.is_empty() { &sorted } else { &inliers };
+    let clamped_alpha = alpha.clamp(0.1, 0.9);
+    let mut ewma = series[0];
+    for &sample in &series[1..] {
+        ewma = clamped_alpha * sample + (1.0 - clamped_alpha) * ewma;
+    }
+    Some(ewma)
+}
+
 /// Parse an ISO-8601 / RFC-3339 timestamp string or epoch seconds/ms number into Unix epoch ms.
 pub fn parse_timestamp_ms_json(val: Option<&serde_json::Value>) -> Option<i64> {
     let v = val?;
@@ -647,7 +714,15 @@ const BOILERPLATE_BLOCK_TAGS: &[&str] = &[
     "environment_context",
     "system-reminder",
     "user_instructions",
+    "user-instructions",
     "permissions instructions",
+    "developer_instructions",
+    "developer-instructions",
+    "system_instruction",
+    "system-instruction",
+    "instructions",
+    "agents_md",
+    "agents-md",
     "local-command-caveat",
     "turn_aborted",
     "ide_opened_file",
@@ -669,10 +744,9 @@ fn strip_boilerplate_blocks(text: &str) -> String {
             if let Some(end_rel) = rest.find(&close_tag) {
                 let end = start + end_rel + close_tag.len();
                 owned.replace_range(start..end, " ");
-            } else if let Some(gt_rel) = rest.find('>') {
-                let end = start + gt_rel + 1;
-                owned.replace_range(start..end, " ");
             } else {
+                // Multi-line boilerplate block without a closing tag in the same chunk: drop remainder
+                owned.replace_range(start..owned.len(), " ");
                 break;
             }
         }
@@ -712,13 +786,15 @@ pub fn sanitize_session_title(raw: &str) -> Option<String> {
     for line in stripped.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            skipping_agents_block = false;
             continue;
         }
         let lower = trimmed.to_ascii_lowercase();
         if lower.starts_with("# agents.md")
             || lower.starts_with("agents.md instructions")
-            || lower.starts_with("<instructions>")
+            || lower.starts_with("<instructions")
+            || trimmed.starts_with("# 工作偏好")
+            || trimmed.starts_with("这些是跨项目的工作偏好")
+            || trimmed.contains("这些是跨项目的工作偏好")
         {
             skipping_agents_block = true;
             continue;
@@ -766,10 +842,13 @@ pub fn sanitize_session_title(raw: &str) -> Option<String> {
 
 #[cfg(test)]
 mod domain_tps_and_title_tests {
-    use super::{compute_tps, is_valid_tps_sample, sanitize_session_title};
+    use super::{
+        compute_ewma_tps, compute_iqr_upper_fence, compute_tps, is_valid_tps_sample,
+        sanitize_session_title,
+    };
 
     #[test]
-    fn compute_tps_rejects_short_bursts_and_spikes() {
+    fn compute_tps_and_statistical_iqr_ewma_denoise_spikes() {
         assert_eq!(compute_tps(11, Some(1000)), None);
         assert_eq!(compute_tps(100, Some(499)), None);
         assert_eq!(compute_tps(250, Some(500)), None); // 500 tok/s > 450
@@ -778,6 +857,15 @@ mod domain_tps_and_title_tests {
         assert!(!is_valid_tps_sample(10, Some(1000), Some(10.0)));
         assert!(!is_valid_tps_sample(200, Some(1000), Some(520.0)));
         assert!(is_valid_tps_sample(24, Some(500), Some(48.0)));
+
+        // Tukey IQR fence rejects a 380 tok/s buffered flush spike when steady-state is ~50-65 tok/s
+        let mut sorted: Vec<f64> = vec![48.0, 52.0, 55.0, 60.0, 64.0, 380.0];
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let fence = compute_iqr_upper_fence(&sorted).expect("fence");
+        assert!(fence < 180.0);
+        let smoothed = compute_ewma_tps(&[48.0, 52.0, 55.0, 60.0, 64.0, 380.0], 0.45)
+            .expect("smoothed ewma");
+        assert!(smoothed > 50.0 && smoothed < 65.0);
     }
 
     #[test]
@@ -788,6 +876,16 @@ mod domain_tps_and_title_tests {
         );
         assert_eq!(
             sanitize_session_title("<system-reminder>Internal note</system-reminder>"),
+            None
+        );
+        assert_eq!(
+            sanitize_session_title(
+                "# AGENTS.md instructions for c:\\Projects\\TokenTracker\n\n<INSTRUCTIONS>\n# 工作偏好\n\n这些是跨项目的工作偏好，默认长期有效。\n</INSTRUCTIONS>"
+            ),
+            None
+        );
+        assert_eq!(
+            sanitize_session_title("# 工作偏好\n\n这些是跨项目的工作偏好，默认长期有效。"),
             None
         );
         assert_eq!(

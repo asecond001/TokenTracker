@@ -395,34 +395,74 @@ pub fn parse_compatible_jsonl_line(
 
     if let Some(explicit_title) = first_str(&val, &["title", "session_title", "summary"])
         .or_else(|| envelope.and_then(|e| first_str(e, &["title", "session_title", "summary"])))
+        .or_else(|| {
+            nested_payload.and_then(|p| first_str(p, &["title", "session_title", "summary"]))
+        })
     {
         ctx.record_session_title(explicit_title, "explicit", ts_ms);
     }
 
     if matches!(
         role_or_type.as_str(),
-        "user" | "prompt" | "tool_result" | "turnbegin" | "turn_begin"
+        "user"
+            | "prompt"
+            | "tool_result"
+            | "turnbegin"
+            | "turn_begin"
+            | "user_message"
+            | "usermessage"
+            | "human"
     ) {
-        if matches!(role_or_type.as_str(), "user" | "prompt") {
+        if !matches!(role_or_type.as_str(), "tool_result") {
             let prompt_text = extract_text_from_content(
-                val.get("content")
-                    .or_else(|| val.get("prompt"))
-                    .or_else(|| val.get("text"))
-                    .or_else(|| val.pointer("/message/content"))
+                nested_payload
+                    .and_then(|p| {
+                        p.get("user_input")
+                            .or_else(|| p.get("content"))
+                            .or_else(|| p.get("prompt"))
+                            .or_else(|| p.get("text"))
+                            .or_else(|| p.get("input"))
+                            .or_else(|| p.get("message"))
+                    })
                     .or_else(|| {
                         envelope.and_then(|e| {
-                            e.get("content")
+                            e.get("user_input")
+                                .or_else(|| e.get("content"))
                                 .or_else(|| e.get("prompt"))
                                 .or_else(|| e.get("text"))
+                                .or_else(|| e.get("input"))
+                                .or_else(|| e.get("message"))
                         })
+                    })
+                    .or_else(|| {
+                        val.get("user_input")
+                            .or_else(|| val.get("content"))
+                            .or_else(|| val.get("prompt"))
+                            .or_else(|| val.get("text"))
+                            .or_else(|| val.get("input"))
+                            .or_else(|| val.pointer("/message/content"))
+                            .or_else(|| val.pointer("/message/payload/user_input"))
+                            .or_else(|| val.pointer("/params/payload/user_input"))
                     }),
             );
             if let Some(text) = prompt_text {
-                ctx.record_session_title(&text, "derived", ts_ms);
+                ctx.record_session_title(&text, "user_prompt", ts_ms);
             }
         }
         ctx.last_prompt_ts_ms = Some(ts_ms);
         return None;
+    }
+
+    if ctx.session_title.is_none() {
+        let inline_prompt = extract_text_from_content(
+            nested_payload
+                .and_then(|p| p.get("user_input").or_else(|| p.get("prompt")))
+                .or_else(|| envelope.and_then(|e| e.get("user_input").or_else(|| e.get("prompt"))))
+                .or_else(|| val.get("user_input").or_else(|| val.get("prompt"))),
+        );
+        if let Some(text) = inline_prompt {
+            ctx.record_session_title(&text, "derived", ts_ms);
+        }
     }
 
     let usage = envelope

@@ -156,7 +156,7 @@ impl ProviderLogParser for ClaudeCodeParser {
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
-        let (duration_ms, ttft_ms, tps_output_tokens) = if let Some(msg_id) = message_id {
+        let (duration_ms, ttft_ms, tps_output_tokens, tps_duration_ms) = if let Some(msg_id) = message_id {
             let turn = ctx.resolve_message_turn(msg_id, ts_ms, effective_output);
             let anchor = turn.turn_prompt_ts_ms.unwrap_or(turn.first_chunk_ts_ms);
             let delta = ts_ms - anchor;
@@ -174,11 +174,23 @@ impl ProviderLogParser for ClaudeCodeParser {
                 }
             });
             let tps_tok = if turn.turn_prompt_ts_ms.is_some() {
-                effective_output
+                if ttft.unwrap_or(0) > 2_000 && ts_ms > turn.first_chunk_ts_ms {
+                    effective_output.saturating_sub(turn.first_chunk_output_tokens)
+                } else {
+                    effective_output
+                }
             } else {
                 effective_output.saturating_sub(turn.first_chunk_output_tokens)
             };
-            (dur, ttft, tps_tok)
+            let decode_dur = if turn.turn_prompt_ts_ms.is_some()
+                && ttft.unwrap_or(0) > 2_000
+                && ts_ms - turn.first_chunk_ts_ms >= 500
+            {
+                Some(ts_ms - turn.first_chunk_ts_ms)
+            } else {
+                dur
+            };
+            (dur, ttft, tps_tok, decode_dur)
         } else {
             let dur = ctx
                 .last_prompt_ts_ms
@@ -191,12 +203,12 @@ impl ProviderLogParser for ClaudeCodeParser {
                         None
                     }
                 });
-            (dur, None, effective_output)
+            (dur, None, effective_output, dur)
         };
         let output_tps = if is_compact {
             None
         } else {
-            compute_tps(tps_output_tokens, duration_ms)
+            compute_tps(tps_output_tokens, tps_duration_ms)
         };
 
         // Prefer Anthropic's globally unique `message.id` so multi-block assistant records

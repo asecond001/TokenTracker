@@ -66,6 +66,13 @@ pub fn default_pricing_catalog() -> Vec<ModelPricingEntry> {
         entry("gpt-4o", provider_ids::CODEX, 2.50, 10.0, 1.25, 0.0, 10.0),
         entry("_default_codex", provider_ids::CODEX, 1.25, 10.0, 0.125, 0.0, 10.0),
         // Google Gemini / Antigravity models
+        entry("orchestrator", provider_ids::ANTIGRAVITY, 2.0, 12.0, 0.20, 0.0, 12.0),
+        entry("gemini 4 argon", provider_ids::ANTIGRAVITY, 2.0, 12.0, 0.20, 0.0, 12.0),
+        entry("gemini-4-argon", provider_ids::ANTIGRAVITY, 2.0, 12.0, 0.20, 0.0, 12.0),
+        entry("gemini 4 hydrogen", provider_ids::ANTIGRAVITY, 0.50, 3.0, 0.05, 0.0, 3.0),
+        entry("gemini-4-hydrogen", provider_ids::ANTIGRAVITY, 0.50, 3.0, 0.05, 0.0, 3.0),
+        entry("claude sonnet", provider_ids::ANTIGRAVITY, 3.0, 15.0, 0.30, 3.75, 15.0),
+        entry("claude opus", provider_ids::ANTIGRAVITY, 15.0, 75.0, 1.50, 18.75, 75.0),
         entry("gemini-3.1-pro", provider_ids::ANTIGRAVITY, 2.0, 12.0, 0.20, 0.0, 12.0),
         entry("gemini-3-pro", provider_ids::ANTIGRAVITY, 2.0, 12.0, 0.20, 0.0, 12.0),
         entry("gemini-3-flash", provider_ids::ANTIGRAVITY, 0.50, 3.0, 0.05, 0.0, 3.0),

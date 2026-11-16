@@ -44,10 +44,25 @@ pub struct FileParseContext {
     pub active_message_turns: Vec<(String, ActiveMessageTurn)>,
     /// Tracks cumulative context token checkpoint (e.g. Kimi CLI `_usage` records) to derive step deltas.
     pub last_context_tokens: Option<i64>,
+    /// Retains the most recent Antigravity `PLANNER_RESPONSE` with `tool_calls` so the following
+    /// `GENERIC` tool invocation step timestamp provides exact generation completion duration.
+    pub pending_antigravity_event: Option<NormalizedUsageEvent>,
+    /// Detected subscription plan tier hint from local public settings or session metadata.
+    pub detected_plan_hint: Option<String>,
+    pub plan_hint_emitted: bool,
     /// Sanitized session display title `(title, source, updated_at_ms)` discovered during scan.
     pub session_title: Option<(String, String, i64)>,
     pub session_title_dirty: bool,
+    pub last_emitted_title_session_id: Option<String>,
     pub line_number: u64,
+}
+
+fn title_source_priority(source: &str) -> u8 {
+    match source {
+        "explicit" => 3,
+        "user_prompt" => 2,
+        _ => 1,
+    }
 }
 
 impl FileParseContext {
@@ -90,41 +105,51 @@ impl FileParseContext {
         turn
     }
 
-    /// Record a candidate session title (explicit titles always override prompt-derived titles;
-    /// derived titles prefer the earliest user prompt observed in the session).
+    /// Record a candidate session title (`explicit` > `user_prompt` > `derived`;
+    /// within non-explicit tiers, the earliest user prompt observed in the session wins).
     pub fn record_session_title(&mut self, raw_title: &str, source: &str, ts_ms: i64) -> bool {
         let Some(clean) = sanitize_session_title(raw_title) else {
             return false;
         };
-        let norm_source = if source == "explicit" {
-            "explicit"
-        } else {
-            "derived"
+        let norm_source = match source {
+            "explicit" => "explicit",
+            "user_prompt" => "user_prompt",
+            _ => "derived",
         };
+        let new_prio = title_source_priority(norm_source);
         let should_replace = match &self.session_title {
             None => true,
             Some((_, prev_source, prev_ts)) => {
-                norm_source == "explicit" || (prev_source != "explicit" && ts_ms < *prev_ts)
+                let prev_prio = title_source_priority(prev_source);
+                new_prio > prev_prio
+                    || (new_prio == prev_prio && (new_prio == 3 || ts_ms < *prev_ts))
             }
         };
         if should_replace {
             self.session_title = Some((clean, norm_source.to_string(), ts_ms));
             self.session_title_dirty = true;
+            self.last_emitted_title_session_id = None;
             true
         } else {
             false
         }
     }
 
-    /// Build a [`SessionTitleRecord`] using the latest resolved `session_id` if dirty.
+    /// Build a [`SessionTitleRecord`] using the latest resolved `session_id` if dirty or if `session_id` changed.
     pub fn take_session_title_record(&mut self, provider_id: &str) -> Option<SessionTitleRecord> {
-        if !self.session_title_dirty || self.session_id.trim().is_empty() {
+        let sid = self.session_id.trim();
+        if sid.is_empty() {
             return None;
         }
-        self.session_title_dirty = false;
+        let sid_changed = self.last_emitted_title_session_id.as_deref() != Some(sid);
+        if !self.session_title_dirty && !sid_changed {
+            return None;
+        }
         let (title, source, updated_at_ms) = self.session_title.clone()?;
+        self.session_title_dirty = false;
+        self.last_emitted_title_session_id = Some(sid.to_string());
         Some(SessionTitleRecord {
-            session_key: format!("{}:{}", provider_id, self.session_id),
+            session_key: format!("{}:{}", provider_id, sid),
             provider_id: provider_id.to_string(),
             title,
             source,
@@ -133,16 +158,21 @@ impl FileParseContext {
     }
 }
 
-/// Extract readable plain text from OpenAI/Anthropic `content` fields (string, object, or block array).
+/// Extract readable plain text from OpenAI/Anthropic/Kimi `content` or `user_input` fields (string, object, or block array).
 pub(crate) fn extract_text_from_content(content: Option<&Value>) -> Option<String> {
     let val = content?;
     match val {
-        Value::String(s) => Some(s.clone()),
-        Value::Object(map) => map
-            .get("text")
-            .or_else(|| map.get("content"))
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string),
+        Value::String(s) => sanitize_session_title(s).map(|_| s.clone()),
+        Value::Object(map) => {
+            for key in ["user_input", "text", "input_text", "content", "prompt", "message"] {
+                if let Some(inner) = map.get(key) {
+                    if let Some(found) = extract_text_from_content(Some(inner)) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
         Value::Array(items) => {
             for item in items {
                 if let Some(s) = item.as_str() {
@@ -152,13 +182,11 @@ pub(crate) fn extract_text_from_content(content: Option<&Value>) -> Option<Strin
                 }
                 let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if matches!(item_type, "" | "text" | "input_text" | "output_text") {
-                    if let Some(s) = item
-                        .get("text")
-                        .or_else(|| item.get("input_text"))
-                        .and_then(|v| v.as_str())
-                    {
-                        if sanitize_session_title(s).is_some() {
-                            return Some(s.to_string());
+                    for key in ["text", "input_text", "content", "user_input"] {
+                        if let Some(inner) = item.get(key) {
+                            if let Some(found) = extract_text_from_content(Some(inner)) {
+                                return Some(found);
+                            }
                         }
                     }
                 }

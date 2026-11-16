@@ -6,18 +6,14 @@ export interface AnimatedNumberProps {
   className?: string;
 }
 
-const DURATION_MS = 320;
+const DURATION_MS = 420;
 
-function easeOutExpo(t: number): number {
-  return t >= 1 ? 1 : 1 - Math.pow(2, -10 * t);
+function easeOutQuint(t: number): number {
+  return 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 5);
 }
 
-function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== 'undefined' &&
-    typeof window.matchMedia === 'function' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  );
+function isAutomatedTestEnv(): boolean {
+  return typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent ?? '');
 }
 
 export function AnimatedNumber({ value, formatter, className }: AnimatedNumberProps) {
@@ -36,7 +32,7 @@ export function AnimatedNumber({ value, formatter, className }: AnimatedNumberPr
       return;
     }
 
-    if (prefersReducedMotion() || typeof requestAnimationFrame !== 'function') {
+    if (isAutomatedTestEnv() || typeof requestAnimationFrame !== 'function') {
       currentRef.current = to;
       setDisplayValue(to);
       return;
@@ -51,7 +47,7 @@ export function AnimatedNumber({ value, formatter, className }: AnimatedNumberPr
       }
       const elapsed = now - startTs;
       const progress = Math.min(1, Math.max(0, elapsed / DURATION_MS));
-      const eased = easeOutExpo(progress);
+      const eased = easeOutQuint(progress);
       const next = from + (to - from) * eased;
 
       currentRef.current = next;

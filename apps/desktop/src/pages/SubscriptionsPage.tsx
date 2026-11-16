@@ -621,9 +621,6 @@ export function SubscriptionsPage() {
       >
         <div>
           <h1 className="text-[16px] font-semibold tracking-tight">订阅配额</h1>
-          <p className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
-            官方限额与滚动窗口追踪
-          </p>
         </div>
 
         <button
@@ -1025,9 +1022,6 @@ export function SubscriptionsPage() {
                   >
                     各档位参考配额实时对照
                   </h2>
-                  <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                    按当前本地用量与官方实时限额动态推算各公开订阅档位窗口消耗，随货币汇率与采集事件实时联动（仅供参考）
-                  </p>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-1">
@@ -1187,9 +1181,6 @@ export function SubscriptionsPage() {
                 >
                   跨设备同步配额快照（只读）
                 </h2>
-                <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                  来自 Cloudflare Worker 同步的远端设备订阅窗口状态，与本机可编辑套餐完全隔离展示
-                </p>
               </div>
 
               <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
@@ -1295,11 +1286,6 @@ export function SubscriptionsPage() {
                 <h2 className="text-[14.5px] font-semibold">
                   {draft.mode === 'create' ? '添加我的订阅配置' : '编辑订阅推算规则'}
                 </h2>
-                <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                  {draft.mode === 'create'
-                    ? '可选择参考套餐模板快速预填，或完全自定义名称、月费与滚动窗口'
-                    : draft.plan_name || '自定义订阅规则'}
-                </p>
               </div>
               <button
                 type="button"

@@ -1490,7 +1490,7 @@ fn kimi_code_wire_and_context_logs_parse_without_double_counting() {
 
     let wire_path = session_dir.join("wire.jsonl");
     let wire_lines = [
-        r#"{"timestamp":1763300000.0,"message":{"type":"TurnBegin","payload":{"user_input":"hi"}}}"#,
+        r#"{"timestamp":1763300000.0,"message":{"type":"TurnBegin","payload":{"user_input":"Refactor Kimi auth module"}}}"#,
         r#"{"timestamp":1763300002.5,"message":{"type":"StatusUpdate","payload":{"token_usage":{"input_other":1200,"output":300,"input_cache_read":800,"input_cache_creation":200}}}}"#,
         r#"{"jsonrpc":"2.0","method":"event","timestamp":1763300005.0,"params":{"type":"StatusUpdate","payload":{"token_usage":{"inputOther":500,"outputTokens":150,"inputCacheRead":250,"inputCacheCreation":0}}}}"#,
         r#"{"timestamp":1763300006.0,"type":"usage.record","scope":"session","usage":{"inputOther":1700,"output":450}}"#,
@@ -1560,8 +1560,39 @@ fn kimi_code_wire_and_context_logs_parse_without_double_counting() {
         s.provider_id == provider_ids::KIMI_CODE
             && s.project_label == "my-kimi-app"
             && s.model_id == "kimi-for-coding"
+            && s.session_title.as_deref() == Some("Refactor Kimi auth module")
             && s.total_tokens == 3_400
     }));
+
+    // Verify Codex rollout with injected AGENTS.md / 工作偏好 preamble resolves the real user_message title
+    let codex_file = tmp.path().join("rollout-2025-11-16T13-33-00-sess-codex-99.jsonl");
+    let codex_lines = [
+        r#"{"timestamp":"2025-11-16T13:33:20Z","type":"session_meta","payload":{"id":"019a9000-1111-7222-8333-444455556666","cwd":"C:\\Projects\\TokenTracker"}}"#,
+        r##"{"timestamp":"2025-11-16T13:33:21Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for C:\\Projects\\TokenTracker\n\n<INSTRUCTIONS>\n# 工作偏好\n\n这些是跨项目的工作偏好，默认长期有效。\n</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n  <cwd>C:\\Projects\\TokenTracker</cwd>\n</environment_context>"}]}}"##,
+        r#"{"timestamp":"2025-11-16T13:33:22Z","type":"event_msg","payload":{"type":"user_message","message":"修复悬浮窗与会话名称读取问题"}}"#,
+        r#"{"timestamp":"2025-11-16T13:33:25Z","type":"event_msg","payload":{"type":"token_count","info":{"model":"gpt-5.2-codex","last_token_usage":{"input_tokens":2000,"cached_input_tokens":1500,"output_tokens":300,"reasoning_output_tokens":60}}}}"#,
+    ]
+    .join("\n");
+    std::fs::write(&codex_file, format!("{codex_lines}\n")).expect("write codex rollout");
+    let codex_parser = CodexParser::new();
+    tail_file_incremental(&storage, &codex_parser, &codex_file, &dev_id).expect("tail codex");
+    let codex_ov = storage
+        .query_overview(
+            &AnalyticsFilter {
+                start_ms: 1_763_000_000_000,
+                end_ms: 1_764_000_000_000,
+                provider_id: Some(provider_ids::CODEX.to_string()),
+                device_id: None,
+                tz_offset_minutes: 480,
+                all_time: false,
+            },
+            1_763_300_100_000,
+        )
+        .expect("codex overview");
+    assert_eq!(
+        codex_ov.active_sessions[0].session_title.as_deref(),
+        Some("修复悬浮窗与会话名称读取问题")
+    );
 }
 
 #[tokio::test]

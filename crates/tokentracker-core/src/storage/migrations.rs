@@ -9,7 +9,7 @@ use crate::error::CoreResult;
 use crate::pricing::default_pricing_catalog;
 use crate::storage::repository::{rebuild_rollup_from_events, DAY_MS, HOUR_MS};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 6;
+pub const CURRENT_SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -208,6 +208,10 @@ pub fn run_migrations(conn: &mut Connection) -> CoreResult<()> {
 
     if current_version < 6 {
         migrate_v5_to_v6(conn, now_ms)?;
+    }
+
+    if current_version < 7 {
+        migrate_v6_to_v7(conn, now_ms)?;
     }
 
     seed_defaults(conn, now_ms)?;
@@ -624,6 +628,54 @@ fn migrate_v5_to_v6(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     tx.execute(
         "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
         params![6i64, now_ms],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v6_to_v7(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+
+    // Clean historical Antigravity TPS entries where 1s-quantized USER_INPUT -> PLANNER_RESPONSE
+    // start deltas (<= 2000ms for >= 80 tokens) distorted speed before GENERIC step-end tracking.
+    tx.execute(
+        r#"
+        UPDATE usage_events
+        SET output_tps = NULL,
+            duration_ms = NULL
+        WHERE provider_id = 'antigravity'
+           AND output_tps IS NOT NULL
+           AND duration_ms IS NOT NULL
+           AND duration_ms <= 2000
+           AND (output_tokens + reasoning_tokens) >= 80
+        "#,
+        [],
+    )?;
+
+    // Purge stale/injected AGENTS.md session titles and reset codex/kimi_code cursors so their
+    // session titles are cleanly backfilled (with strict event_id deduplication) on next scan.
+    tx.execute_batch(
+        r#"
+        DELETE FROM session_titles
+        WHERE provider_id IN ('codex', 'kimi_code')
+           OR title LIKE '%工作偏好%'
+           OR title LIKE '%AGENTS.md%'
+           OR title LIKE '%<INSTRUCTIONS%';
+        DELETE FROM ingestion_cursors
+        WHERE provider_id IN ('codex', 'kimi_code');
+        "#,
+    )?;
+
+    crate::storage::repository::rebuild_local_rollups_conn(&tx, now_ms)?;
+    crate::storage::repository::sync_auto_subscription_for_provider_conn(
+        &tx,
+        provider_ids::ANTIGRAVITY,
+        now_ms,
+    )?;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![7i64, now_ms],
     )?;
     tx.commit()?;
     Ok(())

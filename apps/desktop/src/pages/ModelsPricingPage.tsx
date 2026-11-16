@@ -589,9 +589,6 @@ export function ModelsPricingPage() {
               >
                 <div>
                   <h2 className="text-[14.5px] font-semibold">汇率与自定义模型单价</h2>
-                  <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                    定价单位为 USD / 1M Tokens，用户覆盖优先级高于内置官方价格表
-                  </p>
                 </div>
                 <button
                   type="button"

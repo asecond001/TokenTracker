@@ -18,6 +18,11 @@ import {
   BACKGROUND_GRADIENT_PRESETS,
   type BackgroundPresetId,
 } from '../components/WorkspaceBackdrop';
+import {
+  FLOATING_SIZE_PRESETS,
+  useFloatingConfig,
+  type FloatingWindowConfig,
+} from '../lib/floatingConfig';
 import { formatRelativeTime } from '../lib/format';
 import { ipc, isTauriRuntime } from '../lib/ipc';
 import {
@@ -72,6 +77,20 @@ const BG_MODE_OPTIONS: ReadonlyArray<{ id: BackgroundMode; label: string }> = [
   { id: 'image', label: '本地壁纸' },
 ];
 
+const FLOATING_ELEMENT_TOGGLES: ReadonlyArray<{
+  key: keyof Pick<
+    FloatingWindowConfig,
+    'showTokens' | 'showCost' | 'showSpeed' | 'showSession' | 'showSubscriptions'
+  >;
+  label: string;
+}> = [
+  { key: 'showTokens', label: 'Token 用量' },
+  { key: 'showCost', label: '等效费用' },
+  { key: 'showSpeed', label: '生成速率' },
+  { key: 'showSession', label: '活跃会话' },
+  { key: 'showSubscriptions', label: '订阅配额' },
+];
+
 function normalizeThemeMode(raw: string | undefined | null): ThemeMode {
   return raw === 'light' || raw === 'dark' || raw === 'system' ? raw : 'dark';
 }
@@ -103,6 +122,7 @@ export function PreferencesPage({
     setUsdToCnyRate,
     setTheme,
   } = useWorkspaceStore();
+  const [floatingConfig, updateFloatingConfig] = useFloatingConfig();
 
   const { data: bootstrap } = useQuery({
     queryKey: ['bootstrap'],
@@ -700,26 +720,21 @@ export function PreferencesPage({
   return (
     <div className="space-y-6">
       <section
-        className="flex flex-wrap items-center justify-between gap-4 pb-5"
+        className="flex flex-wrap items-center justify-between gap-4 pb-4"
         style={{ borderBottom: '1px solid var(--border-subtle)' }}
       >
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-[16px] font-semibold tracking-tight">偏好设置与同步契约</h1>
-            <span
-              className="px-1.5 py-0.5 rounded text-[10.5px] font-mono tabular-nums"
-              style={{
-                backgroundColor: 'var(--bg-hover)',
-                border: '1px solid var(--border-hairline)',
-                color: 'var(--text-secondary)',
-              }}
-            >
-              v0.2.2
-            </span>
-          </div>
-          <p className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
-            配置全局币种、主题与外观、桌面悬浮窗与多端同步（SyncEnvelope v1）
-          </p>
+        <div className="flex items-center gap-2">
+          <h1 className="text-[16px] font-semibold tracking-tight">偏好设置</h1>
+          <span
+            className="px-1.5 py-0.5 rounded text-[10.5px] font-mono tabular-nums"
+            style={{
+              backgroundColor: 'var(--bg-hover)',
+              border: '1px solid var(--border-hairline)',
+              color: 'var(--text-secondary)',
+            }}
+          >
+            v0.2.3
+          </span>
         </div>
 
         <button
@@ -750,213 +765,24 @@ export function PreferencesPage({
         </div>
       )}
 
-      {updater.availableUpdate &&
-        (updater.dismissedVersion !== updater.availableUpdate.version ||
-          updater.status === 'downloading' ||
-          updater.status === 'installing') && (
-          <div
-            className="px-4 py-3 space-y-2"
-            style={{
-              backgroundColor: 'var(--bg-elevated)',
-              borderTop: '1px solid var(--border-subtle)',
-              borderBottom: '1px solid var(--border-subtle)',
-            }}
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="space-y-0.5 min-w-0">
-                <div className="flex items-center gap-2 text-[12.5px] font-medium">
-                  <span style={{ color: 'var(--accent-emerald)' }}>
-                    发现新版本 v{updater.availableUpdate.version}
-                  </span>
-                  <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-                    当前 v{updater.availableUpdate.currentVersion}
-                    {updater.availableUpdate.date ? ` · ${updater.availableUpdate.date.slice(0, 10)}` : ''}
-                  </span>
-                </div>
-                {updater.availableUpdate.body && (
-                  <p
-                    className="text-[11.5px] line-clamp-2"
-                    style={{ color: 'var(--text-secondary)' }}
-                  >
-                    {updater.availableUpdate.body}
-                  </p>
-                )}
-              </div>
-
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  disabled={updater.status === 'downloading' || updater.status === 'installing'}
-                  onClick={() => void downloadAndInstallUpdate()}
-                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded text-[11.5px] font-medium hover:opacity-90 cursor-pointer disabled:opacity-50"
-                  style={{
-                    backgroundColor: 'var(--accent-emerald)',
-                    color: '#ffffff',
-                  }}
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>
-                    {updater.status === 'downloading'
-                      ? `下载中 ${updateDownloadPercent.toFixed(0)}%`
-                      : updater.status === 'installing'
-                        ? '正在安装并重启…'
-                        : '立即下载并重启安装'}
-                  </span>
-                </button>
-                {updater.status !== 'downloading' && updater.status !== 'installing' && (
-                  <button
-                    type="button"
-                    onClick={() => updater.dismissBanner()}
-                    className="px-2 py-1 rounded text-[11px] cursor-pointer"
-                    style={{ color: 'var(--text-muted)' }}
-                  >
-                    稍后提醒
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {(updater.status === 'downloading' || updater.status === 'installing') && (
-              <InlineProgressBar
-                percent={updateDownloadPercent}
-                accentColor="var(--accent-emerald)"
-                heightPx={4}
-              />
-            )}
-          </div>
-        )}
-
-      {/* Flat Hairline-Divided Preferences Form */}
-      <section style={{ borderTop: '1px solid var(--border-subtle)' }}>
+      {/* 1. 外观 */}
+      <section className="space-y-1">
         <div
-          className="py-4 grid grid-cols-12 gap-4 items-start"
-          style={{ borderBottom: '1px solid var(--border-subtle)' }}
+          className="pb-2 text-[11px] font-semibold uppercase tracking-wider"
+          style={{
+            color: 'var(--text-muted)',
+            borderBottom: '1px solid var(--border-subtle)',
+          }}
         >
-          <div className="col-span-4 pt-0.5">
-            <div className="text-[13px] font-medium">显示币种、汇率与定价同步</div>
-            <div className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-              所有成本金额在核心层使用 micro-USD 定点数换算，支持免鉴权公开汇率与开源模型定价自动同步
-            </div>
-          </div>
-          <div className="col-span-8 space-y-2.5">
-            <div className="flex flex-wrap items-center gap-3">
-              <select
-                aria-label="显示币种"
-                value={currencyDraft}
-                onChange={(e) => setCurrencyDraft(e.target.value as CurrencyCode)}
-                className="px-2.5 py-1 text-[12px] rounded outline-none cursor-pointer"
-                style={{
-                  backgroundColor: 'var(--bg-input)',
-                  border: '1px solid var(--border-subtle)',
-                  color: 'var(--text-primary)',
-                }}
-              >
-                <option value="USD">USD（美元）</option>
-                <option value="CNY">CNY（人民币）</option>
-              </select>
-
-              <div
-                className="inline-flex items-center p-0.5 rounded"
-                style={{
-                  backgroundColor: 'var(--bg-input)',
-                  border: '1px solid var(--border-subtle)',
-                }}
-              >
-                <button
-                  type="button"
-                  data-active={exchangeRateAuto ? 'true' : undefined}
-                  onClick={() => handleExchangeRateAutoToggle(true)}
-                  className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
-                  style={{
-                    color: exchangeRateAuto ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    fontWeight: exchangeRateAuto ? 500 : 400,
-                  }}
-                >
-                  自动汇率
-                </button>
-                <button
-                  type="button"
-                  data-active={!exchangeRateAuto ? 'true' : undefined}
-                  onClick={() => handleExchangeRateAutoToggle(false)}
-                  className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
-                  style={{
-                    color: !exchangeRateAuto ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    fontWeight: !exchangeRateAuto ? 500 : 400,
-                  }}
-                >
-                  手动锁定
-                </button>
-              </div>
-
-              <label className="flex items-center gap-2 text-[12px]">
-                <span style={{ color: 'var(--text-secondary)' }}>1 USD =</span>
-                <input
-                  type="text"
-                  aria-label="USD 对 CNY 汇率"
-                  readOnly={exchangeRateAuto}
-                  value={rateDraft}
-                  onChange={(e) => setRateDraft(e.target.value)}
-                  className="w-24 px-2 py-1 text-[12px] rounded outline-none tabular-nums"
-                  style={{
-                    backgroundColor: 'var(--bg-input)',
-                    border: '1px solid var(--border-subtle)',
-                    color: exchangeRateAuto ? 'var(--text-secondary)' : 'var(--text-primary)',
-                  }}
-                />
-                <span style={{ color: 'var(--text-secondary)' }}>CNY</span>
-              </label>
-
-              <button
-                type="button"
-                disabled={syncNowMutation.isPending}
-                onClick={() => syncNowMutation.mutate()}
-                className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 text-[11.5px] rounded cursor-pointer disabled:opacity-50"
-                style={{
-                  backgroundColor: 'var(--bg-elevated)',
-                  border: '1px solid var(--border-subtle)',
-                  color: 'var(--text-primary)',
-                }}
-              >
-                <RefreshCw
-                  className={`w-3 h-3 ${syncNowMutation.isPending ? 'animate-spin' : ''}`}
-                />
-                <span>{syncNowMutation.isPending ? '刷新中…' : '刷新汇率与价格'}</span>
-              </button>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-4 text-[11.5px]">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={autoSyncPricing}
-                  onChange={(e) => handleAutoSyncPricingToggle(e.target.checked)}
-                />
-                <span style={{ color: 'var(--text-secondary)' }}>
-                  自动联网更新开源模型价格目录与汇率（启动及每 6 小时静默巡检）
-                </span>
-              </label>
-              <span className="tabular-nums" style={{ color: 'var(--text-muted)' }}>
-                {activePrefs?.last_pricing_sync_at_ms
-                  ? `定价同步于 ${formatRelativeTime(activePrefs.last_pricing_sync_at_ms)}`
-                  : '定价使用内置基线'}
-                {' · '}
-                {activePrefs?.last_rate_sync_at_ms
-                  ? `汇率同步于 ${formatRelativeTime(activePrefs.last_rate_sync_at_ms)}`
-                  : '汇率待首次同步'}
-              </span>
-            </div>
-          </div>
+          外观
         </div>
 
         <div
-          className="py-4 grid grid-cols-12 gap-4 items-center"
-          style={{ borderBottom: '1px solid var(--border-subtle)' }}
+          className="py-3.5 grid grid-cols-12 gap-4 items-center"
+          style={{ borderBottom: '1px solid var(--border-hairline)' }}
         >
           <div className="col-span-4">
-            <div className="text-[13px] font-medium">界面主题</div>
-            <div className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-              即时生效并同步至主工作台、系统托盘与原生窗口边框
-            </div>
+            <div className="text-[13px] font-medium">深色/浅色模式</div>
           </div>
           <div className="col-span-8 flex flex-wrap items-center gap-2">
             {THEME_OPTIONS.map((opt) => {
@@ -984,20 +810,15 @@ export function PreferencesPage({
           </div>
         </div>
 
-        {/* Appearance & Custom Background System */}
         <div
-          className="py-4 grid grid-cols-12 gap-4 items-start"
+          className="py-3.5 grid grid-cols-12 gap-4 items-start"
           style={{ borderBottom: '1px solid var(--border-subtle)' }}
         >
-          <div className="col-span-4 pt-0.5">
-            <div className="text-[13px] font-medium">外观与自定义背景</div>
-            <div className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-              支持纯色工作台、内置克制微光渐变或本地壁纸，保持高密度数据锐利可读
-            </div>
+          <div className="col-span-4 pt-1">
+            <div className="text-[13px] font-medium">自定义背景</div>
           </div>
 
-          <div className="col-span-8 space-y-4">
-            {/* Mode Segmented Selector */}
+          <div className="col-span-8 space-y-3.5">
             <div
               className="inline-flex items-center p-0.5 rounded"
               style={{
@@ -1025,7 +846,6 @@ export function PreferencesPage({
               })}
             </div>
 
-            {/* Gradient Presets */}
             {bgMode === 'gradient' && (
               <div className="space-y-2">
                 <div
@@ -1033,7 +853,7 @@ export function PreferencesPage({
                   style={{ color: 'var(--text-secondary)' }}
                 >
                   <Sparkles className="w-3.5 h-3.5" style={{ color: 'var(--accent-primary)' }} />
-                  <span>内置微光渐变预设</span>
+                  <span>渐变预设</span>
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                   {BACKGROUND_GRADIENT_PRESETS.map((preset) => {
@@ -1067,19 +887,11 @@ export function PreferencesPage({
                             }}
                           />
                         </div>
-                        <div>
-                          <div
-                            className="text-[12px] font-medium leading-tight"
-                            style={{ color: 'var(--text-primary)' }}
-                          >
-                            {preset.label}
-                          </div>
-                          <div
-                            className="text-[10.5px] leading-tight mt-0.5 truncate"
-                            style={{ color: 'var(--text-muted)' }}
-                          >
-                            {preset.subtitle}
-                          </div>
+                        <div
+                          className="text-[12px] font-medium leading-tight"
+                          style={{ color: 'var(--text-primary)' }}
+                        >
+                          {preset.label}
                         </div>
                       </button>
                     );
@@ -1088,7 +900,6 @@ export function PreferencesPage({
               </div>
             )}
 
-            {/* Local Image Picker & Clear */}
             {bgMode === 'image' && (
               <div
                 className="flex flex-wrap items-center justify-between gap-3 px-3 py-2.5 rounded"
@@ -1102,16 +913,11 @@ export function PreferencesPage({
                     className="w-4 h-4 shrink-0"
                     style={{ color: 'var(--text-muted)' }}
                   />
-                  <div className="min-w-0">
-                    <div
-                      className="text-[12px] truncate"
-                      style={{ color: 'var(--text-primary)' }}
-                    >
-                      {bgImagePath ? `当前壁纸：${bgImagePath}` : '尚未选择本地壁纸'}
-                    </div>
-                    <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
-                      支持 PNG / JPG / WEBP / GIF / BMP（最大 15 MiB，自动复制至应用托管目录）
-                    </div>
+                  <div
+                    className="text-[12px] truncate"
+                    style={{ color: 'var(--text-primary)' }}
+                  >
+                    {bgImagePath ? `当前壁纸：${bgImagePath}` : '尚未选择本地壁纸'}
                   </div>
                 </div>
 
@@ -1154,7 +960,6 @@ export function PreferencesPage({
               </div>
             )}
 
-            {/* Live Opacity & Blur Sliders */}
             {bgMode !== 'none' && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
                 <label className="space-y-1.5 block">
@@ -1220,16 +1025,26 @@ export function PreferencesPage({
             )}
           </div>
         </div>
+      </section>
+
+      {/* 2. 桌面与悬浮窗 */}
+      <section className="space-y-1">
+        <div
+          className="pb-2 text-[11px] font-semibold uppercase tracking-wider"
+          style={{
+            color: 'var(--text-muted)',
+            borderBottom: '1px solid var(--border-subtle)',
+          }}
+        >
+          桌面与悬浮窗
+        </div>
 
         <div
-          className="py-4 grid grid-cols-12 gap-4 items-center"
-          style={{ borderBottom: '1px solid var(--border-subtle)' }}
+          className="py-3.5 grid grid-cols-12 gap-4 items-center"
+          style={{ borderBottom: '1px solid var(--border-hairline)' }}
         >
           <div className="col-span-4">
-            <div className="text-[13px] font-medium">桌面常驻与开机自启</div>
-            <div className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-              关闭主窗口时最小化至系统托盘继续静默增量采集
-            </div>
+            <div className="text-[13px] font-medium">窗口与启动</div>
           </div>
           <div className="col-span-8 flex flex-wrap items-center gap-6 text-[12px]">
             <label className="flex items-center gap-2 cursor-pointer">
@@ -1243,14 +1058,6 @@ export function PreferencesPage({
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
-                checked={floatingWindowEnabled}
-                onChange={(e) => handleFloatingWindowToggle(e.target.checked)}
-              />
-              <span>显示桌面实时悬浮窗</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
                 checked={launchAtStartup}
                 onChange={(e) => setLaunchAtStartup(e.target.checked)}
               />
@@ -1260,14 +1067,262 @@ export function PreferencesPage({
         </div>
 
         <div
-          className="py-4 grid grid-cols-12 gap-4 items-center"
+          className="py-3.5 grid grid-cols-12 gap-4 items-start"
+          style={{ borderBottom: '1px solid var(--border-subtle)' }}
+        >
+          <div className="col-span-4 pt-0.5">
+            <div className="text-[13px] font-medium">桌面悬浮窗</div>
+          </div>
+          <div className="col-span-8 space-y-3 text-[12px]">
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={floatingWindowEnabled}
+                  onChange={(e) => handleFloatingWindowToggle(e.target.checked)}
+                />
+                <span>显示桌面实时悬浮窗</span>
+              </label>
+
+              <div
+                className="inline-flex items-center p-0.5 rounded"
+                style={{
+                  backgroundColor: 'var(--bg-input)',
+                  border: '1px solid var(--border-subtle)',
+                }}
+              >
+                {FLOATING_SIZE_PRESETS.map((preset) => {
+                  const active = floatingConfig.sizePreset === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      data-active={active ? 'true' : undefined}
+                      onClick={() => updateFloatingConfig({ sizePreset: preset.id })}
+                      className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
+                      style={{
+                        color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                        fontWeight: active ? 500 : 400,
+                      }}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {FLOATING_ELEMENT_TOGGLES.map((item) => {
+                const enabled = floatingConfig[item.key];
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    aria-pressed={enabled}
+                    onClick={() => updateFloatingConfig({ [item.key]: !enabled })}
+                    className="btn-interactive px-2 py-0.5 rounded text-[11px] cursor-pointer"
+                    style={{
+                      backgroundColor: enabled ? 'var(--bg-hover)' : 'var(--bg-input)',
+                      border: enabled
+                        ? '1px solid var(--accent-primary)'
+                        : '1px solid var(--border-subtle)',
+                      color: enabled ? 'var(--text-primary)' : 'var(--text-muted)',
+                      fontWeight: enabled ? 500 : 400,
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="max-w-xs">
+              <label className="space-y-1 block">
+                <div className="flex items-center justify-between text-[11.5px]">
+                  <span style={{ color: 'var(--text-secondary)' }}>悬浮窗不透明度</span>
+                  <span
+                    className="font-mono tabular-nums"
+                    style={{ color: 'var(--text-primary)' }}
+                  >
+                    {Math.round(floatingConfig.opacity * 100)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  aria-label="悬浮窗不透明度"
+                  min={0.55}
+                  max={0.98}
+                  step={0.01}
+                  value={floatingConfig.opacity}
+                  onChange={(e) => {
+                    const val = Number.parseFloat(e.target.value);
+                    if (Number.isFinite(val)) {
+                      updateFloatingConfig({ opacity: val });
+                    }
+                  }}
+                  className="w-full cursor-pointer accent-[var(--accent-primary)]"
+                />
+              </label>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* 3. 货币与定价 */}
+      <section className="space-y-1">
+        <div
+          className="pb-2 text-[11px] font-semibold uppercase tracking-wider"
+          style={{
+            color: 'var(--text-muted)',
+            borderBottom: '1px solid var(--border-subtle)',
+          }}
+        >
+          货币与定价
+        </div>
+
+        <div
+          className="py-3.5 grid grid-cols-12 gap-4 items-center"
+          style={{ borderBottom: '1px solid var(--border-hairline)' }}
+        >
+          <div className="col-span-4">
+            <div className="text-[13px] font-medium">显示币种与汇率</div>
+          </div>
+          <div className="col-span-8 flex flex-wrap items-center gap-3">
+            <select
+              aria-label="显示币种"
+              value={currencyDraft}
+              onChange={(e) => setCurrencyDraft(e.target.value as CurrencyCode)}
+              className="px-2.5 py-1 text-[12px] rounded outline-none cursor-pointer"
+              style={{
+                backgroundColor: 'var(--bg-input)',
+                border: '1px solid var(--border-subtle)',
+                color: 'var(--text-primary)',
+              }}
+            >
+              <option value="USD">USD（美元）</option>
+              <option value="CNY">CNY（人民币）</option>
+            </select>
+
+            <div
+              className="inline-flex items-center p-0.5 rounded"
+              style={{
+                backgroundColor: 'var(--bg-input)',
+                border: '1px solid var(--border-subtle)',
+              }}
+            >
+              <button
+                type="button"
+                data-active={exchangeRateAuto ? 'true' : undefined}
+                onClick={() => handleExchangeRateAutoToggle(true)}
+                className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
+                style={{
+                  color: exchangeRateAuto ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  fontWeight: exchangeRateAuto ? 500 : 400,
+                }}
+              >
+                自动汇率
+              </button>
+              <button
+                type="button"
+                data-active={!exchangeRateAuto ? 'true' : undefined}
+                onClick={() => handleExchangeRateAutoToggle(false)}
+                className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
+                style={{
+                  color: !exchangeRateAuto ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  fontWeight: !exchangeRateAuto ? 500 : 400,
+                }}
+              >
+                手动锁定
+              </button>
+            </div>
+
+            <label className="flex items-center gap-2 text-[12px]">
+              <span style={{ color: 'var(--text-secondary)' }}>1 USD =</span>
+              <input
+                type="text"
+                aria-label="USD 对 CNY 汇率"
+                readOnly={exchangeRateAuto}
+                value={rateDraft}
+                onChange={(e) => setRateDraft(e.target.value)}
+                className="w-24 px-2 py-1 text-[12px] rounded outline-none tabular-nums"
+                style={{
+                  backgroundColor: 'var(--bg-input)',
+                  border: '1px solid var(--border-subtle)',
+                  color: exchangeRateAuto ? 'var(--text-secondary)' : 'var(--text-primary)',
+                }}
+              />
+              <span style={{ color: 'var(--text-secondary)' }}>CNY</span>
+            </label>
+
+            <button
+              type="button"
+              disabled={syncNowMutation.isPending}
+              onClick={() => syncNowMutation.mutate()}
+              className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 text-[11.5px] rounded cursor-pointer disabled:opacity-50"
+              style={{
+                backgroundColor: 'var(--bg-elevated)',
+                border: '1px solid var(--border-subtle)',
+                color: 'var(--text-primary)',
+              }}
+            >
+              <RefreshCw
+                className={`w-3 h-3 ${syncNowMutation.isPending ? 'animate-spin' : ''}`}
+              />
+              <span>{syncNowMutation.isPending ? '刷新中…' : '刷新汇率与价格'}</span>
+            </button>
+          </div>
+        </div>
+
+        <div
+          className="py-3.5 grid grid-cols-12 gap-4 items-center"
           style={{ borderBottom: '1px solid var(--border-subtle)' }}
         >
           <div className="col-span-4">
-            <div className="text-[13px] font-medium">客户端版本与自动更新</div>
-            <div className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-              基于 GitHub Releases 无服务器静态分发与 Minisign 公钥验签，离线时静默跳过
-            </div>
+            <div className="text-[13px] font-medium">模型价格同步</div>
+          </div>
+          <div className="col-span-8 flex flex-wrap items-center gap-4 text-[11.5px]">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autoSyncPricing}
+                onChange={(e) => handleAutoSyncPricingToggle(e.target.checked)}
+              />
+              <span style={{ color: 'var(--text-secondary)' }}>
+                自动联网更新开源模型价格目录与汇率
+              </span>
+            </label>
+            <span className="tabular-nums" style={{ color: 'var(--text-muted)' }}>
+              {activePrefs?.last_pricing_sync_at_ms
+                ? `定价同步于 ${formatRelativeTime(activePrefs.last_pricing_sync_at_ms)}`
+                : '定价使用内置基线'}
+              {' · '}
+              {activePrefs?.last_rate_sync_at_ms
+                ? `汇率同步于 ${formatRelativeTime(activePrefs.last_rate_sync_at_ms)}`
+                : '汇率待首次同步'}
+            </span>
+          </div>
+        </div>
+      </section>
+
+      {/* 4. 系统与更新 */}
+      <section className="space-y-1">
+        <div
+          className="pb-2 text-[11px] font-semibold uppercase tracking-wider"
+          style={{
+            color: 'var(--text-muted)',
+            borderBottom: '1px solid var(--border-subtle)',
+          }}
+        >
+          系统与更新
+        </div>
+
+        <div
+          className="py-3.5 grid grid-cols-12 gap-4 items-center"
+          style={{ borderBottom: '1px solid var(--border-hairline)' }}
+        >
+          <div className="col-span-4">
+            <div className="text-[13px] font-medium">版本更新</div>
           </div>
           <div className="col-span-8 space-y-2 text-[12px]">
             <div className="flex flex-wrap items-center gap-3">
@@ -1279,27 +1334,61 @@ export function PreferencesPage({
                 />
                 <span>启动时与每 12 小时自动检查客户端更新</span>
               </label>
-              <button
-                type="button"
-                disabled={
-                  updater.status === 'checking' ||
-                  updater.status === 'downloading' ||
-                  updater.status === 'installing'
-                }
-                onClick={() => void checkForUpdates(true)}
-                className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 text-[11.5px] rounded cursor-pointer disabled:opacity-50"
-                style={{
-                  backgroundColor: 'var(--bg-elevated)',
-                  border: '1px solid var(--border-subtle)',
-                  color: 'var(--text-primary)',
-                }}
-              >
-                <RefreshCw
-                  className={`w-3 h-3 ${updater.status === 'checking' ? 'animate-spin' : ''}`}
-                />
-                <span>{updater.status === 'checking' ? '检查中…' : '检查更新'}</span>
-              </button>
+
+              {updater.availableUpdate ? (
+                <button
+                  type="button"
+                  disabled={updater.status === 'downloading' || updater.status === 'installing'}
+                  onClick={() => void downloadAndInstallUpdate()}
+                  className="btn-primary inline-flex items-center gap-1.5 px-3 py-1 rounded text-[11.5px] font-medium cursor-pointer disabled:opacity-50"
+                  style={{
+                    backgroundColor: 'var(--accent-emerald)',
+                    color: '#ffffff',
+                  }}
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>
+                    {updater.status === 'downloading'
+                      ? `下载中 ${updateDownloadPercent.toFixed(0)}%`
+                      : updater.status === 'installing'
+                        ? '正在安装并重启…'
+                        : `立即更新 v${updater.availableUpdate.version}`}
+                  </span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={
+                    updater.status === 'checking' ||
+                    updater.status === 'downloading' ||
+                    updater.status === 'installing'
+                  }
+                  onClick={() => void checkForUpdates(true)}
+                  className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 text-[11.5px] rounded cursor-pointer disabled:opacity-50"
+                  style={{
+                    backgroundColor: 'var(--bg-elevated)',
+                    border: '1px solid var(--border-subtle)',
+                    color: 'var(--text-primary)',
+                  }}
+                >
+                  <RefreshCw
+                    className={`w-3 h-3 ${updater.status === 'checking' ? 'animate-spin' : ''}`}
+                  />
+                  <span>{updater.status === 'checking' ? '检查中…' : '检查更新'}</span>
+                </button>
+              )}
             </div>
+
+            {(updater.status === 'downloading' || updater.status === 'installing') && (
+              <div className="max-w-xs">
+                <InlineProgressBar
+                  percent={updateDownloadPercent}
+                  accentColor="var(--accent-emerald)"
+                  heightPx={4}
+                />
+              </div>
+            )}
+
             <div className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
               {updater.status === 'error' && updater.errorMessage
                 ? `检查更新受限：${updater.errorMessage}`
@@ -1315,14 +1404,11 @@ export function PreferencesPage({
         </div>
 
         <div
-          className="py-4 grid grid-cols-12 gap-4 items-center"
+          className="py-3.5 grid grid-cols-12 gap-4 items-center"
           style={{ borderBottom: '1px solid var(--border-subtle)' }}
         >
           <div className="col-span-4">
-            <div className="text-[13px] font-medium">本地设备与 SQLite 存储</div>
-            <div className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-              仅导出脱敏聚合统计时使用的匿名设备别名与本地 WAL 数据库路径
-            </div>
+            <div className="text-[13px] font-medium">设备与存储</div>
           </div>
           <div className="col-span-8 space-y-2 text-[12px]">
             <div className="flex flex-wrap items-center gap-3">
@@ -1353,22 +1439,20 @@ export function PreferencesPage({
         </div>
       </section>
 
-      {/* Cloud Multi-Device Sync (Cloudflare Worker + Optional E2EE) */}
+      {/* 5. 云端同步 */}
       <section className="space-y-4 pb-6">
         <div
-          className="flex flex-wrap items-center justify-between gap-3 pb-3"
+          className="flex flex-wrap items-center justify-between gap-3 pb-2"
           style={{ borderBottom: '1px solid var(--border-subtle)' }}
         >
-          <div className="space-y-0.5">
-            <div className="flex items-center gap-2">
-              <Cloud className="w-4 h-4" style={{ color: 'var(--accent-sky)' }} />
-              <h2 className="text-[13.5px] font-semibold">
-                云端多端同步（Cloudflare Worker）
-              </h2>
-            </div>
-            <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-              自托管 Cloudflare Worker + Durable Object 实时 SSE 推拉；仅传输脱敏小时级统计与订阅快照，支持可选端到端加密（AES-256-GCM）
-            </p>
+          <div className="flex items-center gap-2">
+            <Cloud className="w-4 h-4" style={{ color: 'var(--accent-sky)' }} />
+            <h2
+              className="text-[11px] font-semibold uppercase tracking-wider"
+              style={{ color: 'var(--text-muted)' }}
+            >
+              云端同步
+            </h2>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 text-[11px] tabular-nums">
@@ -1409,16 +1493,12 @@ export function PreferencesPage({
           </div>
         </div>
 
-        {/* Row 1: Worker Endpoint & E2EE Toggle */}
         <div
-          className="pb-4 grid grid-cols-12 gap-4 items-start"
+          className="pb-3.5 grid grid-cols-12 gap-4 items-start"
           style={{ borderBottom: '1px solid var(--border-hairline)' }}
         >
-          <div className="col-span-4 space-y-0.5">
-            <div className="text-[13px] font-medium">Worker 网关与同步开关</div>
-            <div className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-              填写您部署的 `services/sync-worker` 域名，开启后本地写入 3s 防抖自动推送
-            </div>
+          <div className="col-span-4">
+            <div className="text-[13px] font-medium">同步服务</div>
           </div>
           <div className="col-span-8 space-y-2.5 text-[12px]">
             <div className="flex flex-wrap items-center gap-4">
@@ -1479,18 +1559,14 @@ export function PreferencesPage({
           </div>
         </div>
 
-        {/* Row 2: OS Keyring Sync Credentials */}
         <div
-          className="pb-4 grid grid-cols-12 gap-4 items-start"
+          className="pb-3.5 grid grid-cols-12 gap-4 items-start"
           style={{ borderBottom: '1px solid var(--border-hairline)' }}
         >
-          <div className="col-span-4 space-y-0.5">
+          <div className="col-span-4">
             <div className="flex items-center gap-1.5 text-[13px] font-medium">
               <KeyRound className="w-3.5 h-3.5" style={{ color: 'var(--text-secondary)' }} />
-              <span>系统凭据库密钥（Zero SQLite）</span>
-            </div>
-            <div className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-              Bearer Token 与 E2EE 同步口令独占存储于系统凭据管理器，绝不写入本地 SQLite 或上传明文
+              <span>同步凭据</span>
             </div>
           </div>
           <div className="col-span-8 space-y-2.5 text-[12px]">
@@ -1584,50 +1660,54 @@ export function PreferencesPage({
           </div>
         </div>
 
-        {/* Row 3: Watermarks, Diagnostics & Sanitized Payload Preview */}
-        <div className="space-y-2.5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div
-              className="flex flex-wrap items-center gap-4 text-[11.5px] tabular-nums"
-              style={{ color: 'var(--text-muted)' }}
-            >
-              <span>Push 水位线: {syncStatus?.last_push_watermark_ms ?? 0}</span>
-              <span>Pull 水位线: {syncStatus?.last_pull_watermark_ms ?? 0}</span>
-              <span>
-                最近同步:{' '}
-                {syncStatus?.last_sync_at_ms
-                  ? formatRelativeTime(syncStatus.last_sync_at_ms)
-                  : '尚未同步'}
-              </span>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => previewSyncMutation.mutate()}
-              disabled={previewSyncMutation.isPending}
-              className="btn-interactive px-3 py-1.5 rounded text-[12px] cursor-pointer disabled:opacity-50"
-              style={{
-                backgroundColor: 'var(--bg-elevated)',
-                color: 'var(--text-primary)',
-                border: '1px solid var(--border-subtle)',
-              }}
-            >
-              {previewSyncMutation.isPending ? '生成中…' : '生成脱敏同步负载预览'}
-            </button>
+        <div className="grid grid-cols-12 gap-4 items-center">
+          <div className="col-span-4">
+            <div className="text-[13px] font-medium">同步状态</div>
           </div>
+          <div className="col-span-8 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div
+                className="flex flex-wrap items-center gap-4 text-[11.5px] tabular-nums"
+                style={{ color: 'var(--text-muted)' }}
+              >
+                <span>Push 水位线: {syncStatus?.last_push_watermark_ms ?? 0}</span>
+                <span>Pull 水位线: {syncStatus?.last_pull_watermark_ms ?? 0}</span>
+                <span>
+                  最近同步:{' '}
+                  {syncStatus?.last_sync_at_ms
+                    ? formatRelativeTime(syncStatus.last_sync_at_ms)
+                    : '尚未同步'}
+                </span>
+              </div>
 
-          {syncStatus?.last_sync_error && (
-            <div
-              className="px-3 py-2 rounded text-[11.5px]"
-              style={{
-                backgroundColor: 'rgba(244, 63, 94, 0.08)',
-                border: '1px solid rgba(244, 63, 94, 0.35)',
-                color: 'var(--accent-rose)',
-              }}
-            >
-              最近同步异常：{syncStatus.last_sync_error}
+              <button
+                type="button"
+                onClick={() => previewSyncMutation.mutate()}
+                disabled={previewSyncMutation.isPending}
+                className="btn-interactive px-3 py-1.5 rounded text-[12px] cursor-pointer disabled:opacity-50"
+                style={{
+                  backgroundColor: 'var(--bg-elevated)',
+                  color: 'var(--text-primary)',
+                  border: '1px solid var(--border-subtle)',
+                }}
+              >
+                {previewSyncMutation.isPending ? '生成中…' : '生成脱敏同步负载预览'}
+              </button>
             </div>
-          )}
+
+            {syncStatus?.last_sync_error && (
+              <div
+                className="px-3 py-2 rounded text-[11.5px]"
+                style={{
+                  backgroundColor: 'rgba(244, 63, 94, 0.08)',
+                  border: '1px solid rgba(244, 63, 94, 0.35)',
+                  color: 'var(--accent-rose)',
+                }}
+              >
+                最近同步异常：{syncStatus.last_sync_error}
+              </div>
+            )}
+          </div>
         </div>
 
         {syncEnvelope && envelopeJson && (

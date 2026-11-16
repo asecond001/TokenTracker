@@ -16,8 +16,8 @@ use crate::providers::ProviderLogParser;
 const FLUSH_BATCH_EVENTS: usize = 2_000;
 const READ_BUF_CAPACITY: usize = 64 * 1024;
 const WARMUP_TAIL_BYTES: u64 = 64 * 1024;
-const HEADER_SCAN_MAX_BYTES: u64 = 32 * 1024;
-const HEADER_SCAN_MAX_LINES: usize = 16;
+const HEADER_SCAN_MAX_BYTES: u64 = 128 * 1024;
+const HEADER_SCAN_MAX_LINES: usize = 64;
 
 #[derive(Debug, Clone, Default)]
 pub struct TailFileOutcome {
@@ -144,6 +144,7 @@ pub fn tail_file_incremental(
         ctx.active_message_turns.clear();
         ctx.last_codex_totals = None;
         ctx.last_context_tokens = None;
+        ctx.pending_antigravity_event = None;
         ctx.line_number = 0;
 
         // 2. Trailing warmup slice (up to 64 KB immediately before start_offset) to reconstruct

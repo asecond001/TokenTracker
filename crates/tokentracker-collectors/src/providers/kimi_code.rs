@@ -37,18 +37,20 @@ fn push_kimi_base_dir(roots: &mut BTreeSet<PathBuf>, base: PathBuf) {
     roots.insert(base.join("logs"));
 }
 
-fn read_session_metadata(meta_path: &Path) -> (Option<String>, Option<String>, Option<String>) {
+fn read_session_metadata(
+    meta_path: &Path,
+) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
     let Ok(meta) = std::fs::metadata(meta_path) else {
-        return (None, None, None);
+        return (None, None, None, None);
     };
     if !meta.is_file() || meta.len() > 65_536 {
-        return (None, None, None);
+        return (None, None, None, None);
     }
     let Ok(raw) = std::fs::read_to_string(meta_path) else {
-        return (None, None, None);
+        return (None, None, None, None);
     };
     let Ok(val) = serde_json::from_str::<Value>(&raw) else {
-        return (None, None, None);
+        return (None, None, None, None);
     };
 
     let non_empty = |keys: &[&str]| -> Option<String> {
@@ -71,7 +73,54 @@ fn read_session_metadata(meta_path: &Path) -> (Option<String>, Option<String>, O
         "project_root",
     ]);
     let model = non_empty(&["model", "model_id", "model_name", "modelName"]);
-    (session_id, work_dir, model)
+    let title = non_empty(&["title", "name", "summary", "session_title", "topic"]);
+    (session_id, work_dir, model, title)
+}
+
+fn read_kimi_sibling_prompt(session_dir: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    for filename in ["context.jsonl", "wire.jsonl"] {
+        let p = session_dir.join(filename);
+        let Ok(file) = crate::watcher::open_shared_readonly(&p) else {
+            continue;
+        };
+        let reader = BufReader::new(file);
+        for line_res in reader.lines().take(32) {
+            let Ok(line) = line_res else {
+                break;
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(val) = serde_json::from_str::<Value>(trimmed) else {
+                continue;
+            };
+            let role = val
+                .get("role")
+                .or_else(|| val.pointer("/message/type"))
+                .or_else(|| val.pointer("/params/type"))
+                .or_else(|| val.get("type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if role.eq_ignore_ascii_case("user")
+                || role.eq_ignore_ascii_case("turnbegin")
+                || role.eq_ignore_ascii_case("turn_begin")
+            {
+                let candidate = val
+                    .pointer("/message/payload/user_input")
+                    .or_else(|| val.pointer("/params/payload/user_input"))
+                    .or_else(|| val.pointer("/payload/user_input"))
+                    .or_else(|| val.get("user_input"))
+                    .or_else(|| val.get("content"))
+                    .or_else(|| val.pointer("/message/content"));
+                if let Some(text) = crate::providers::extract_text_from_content(candidate) {
+                    return Some(text);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn is_named_dir(p: &Path, name: &str) -> bool {
@@ -161,7 +210,7 @@ impl ProviderLogParser for KimiCodeParser {
                                         sanitize_project_label(ws_dir.file_name().and_then(|n| n.to_str()));
                                 }
                             }
-                            let (meta_sid, meta_work_dir, meta_model) =
+                            let (meta_sid, meta_work_dir, meta_model, meta_title) =
                                 read_session_metadata(&session_dir.join("metadata.json"));
                             let base_sid = meta_sid.or_else(|| {
                                 session_dir
@@ -182,6 +231,11 @@ impl ProviderLogParser for KimiCodeParser {
                             if let Some(m) = meta_model {
                                 ctx.current_model = Some(m);
                             }
+                            if let Some(t) = meta_title {
+                                ctx.record_session_title(&t, "explicit", now_ms());
+                            } else if let Some(prompt) = read_kimi_sibling_prompt(session_dir) {
+                                ctx.record_session_title(&prompt, "user_prompt", 1);
+                            }
                         }
                     } else {
                         // Layout: .../<ws>/<session-id>/wire.jsonl
@@ -201,7 +255,7 @@ impl ProviderLogParser for KimiCodeParser {
                         }
                     }
                 }
-                let (meta_sid, meta_work_dir, meta_model) =
+                let (meta_sid, meta_work_dir, meta_model, meta_title) =
                     read_session_metadata(&parent.join("metadata.json"));
                 if let Some(sid) = meta_sid {
                     ctx.session_id = sid;
@@ -211,6 +265,13 @@ impl ProviderLogParser for KimiCodeParser {
                 }
                 if let Some(m) = meta_model {
                     ctx.current_model = Some(m);
+                }
+                if let Some(t) = meta_title {
+                    ctx.record_session_title(&t, "explicit", now_ms());
+                } else if ctx.session_title.is_none() {
+                    if let Some(prompt) = read_kimi_sibling_prompt(parent) {
+                        ctx.record_session_title(&prompt, "user_prompt", 1);
+                    }
                 }
             }
         }

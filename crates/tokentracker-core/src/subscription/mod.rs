@@ -218,6 +218,9 @@ fn match_observed_snapshot<'a>(
             if !obs.provider_id.eq_ignore_ascii_case(provider_id) {
                 return false;
             }
+            if obs.source.as_deref() == Some("local_log_hint") || obs.window_name == "tier_hint" {
+                return false;
+            }
             // Only apply snapshots whose reset deadline has not expired yet,
             // or that were observed within the window duration when reset time is omitted.
             let fresh = match obs.resets_at_ms {

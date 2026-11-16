@@ -564,9 +564,6 @@ export function OverviewPage() {
             </span>
             {showDeltas && <DeltaBadge pct={data?.cost_delta_pct ?? null} />}
           </div>
-          <div className="mt-1 text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-            按公开定价折算
-          </div>
         </div>
 
         <div
@@ -585,9 +582,6 @@ export function OverviewPage() {
               )}
             </span>
             {showDeltas && <DeltaBadge pct={data?.cache_delta_pct ?? null} />}
-          </div>
-          <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
-            Cache Read / (Uncached + Cache)
           </div>
         </div>
 

@@ -435,18 +435,11 @@ export function DataSourcesPage() {
         className="flex flex-wrap items-center justify-between gap-4 pb-5"
         style={{ borderBottom: '1px solid var(--border-subtle)' }}
       >
-        <div className="space-y-1.5">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4" style={{ color: 'var(--accent-emerald)' }} />
-            <h1 className="text-[16px] font-semibold tracking-tight">
-              数据源与合规采集
-            </h1>
-          </div>
-          <p className="text-[12px] max-w-3xl" style={{ color: 'var(--text-secondary)' }}>
-            仅支持本地只读日志、
-            <code className="text-[11.5px]">127.0.0.1</code>{' '}
-            OTLP 接收与系统凭据库托管的官方公开 API。
-          </p>
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="w-4 h-4" style={{ color: 'var(--accent-emerald)' }} />
+          <h1 className="text-[16px] font-semibold tracking-tight">
+            数据源与合规采集
+          </h1>
         </div>
 
         <button
@@ -944,9 +937,6 @@ export function DataSourcesPage() {
                   : '未启动'}
               </span>
             </div>
-            <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-              仅监听本地回环接口（/v1/metrics、/v1/logs、/healthz），严格拒绝非 127.0.0.1 绑定
-            </p>
           </div>
 
           <div className="flex items-center gap-2.5">
@@ -1037,9 +1027,6 @@ export function DataSourcesPage() {
             >
               自定义兼容网关与声明式接入规则（custom_compatible）
             </h2>
-            <p className="text-[11.5px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-              内置 OpenAI / Anthropic JSONL 预设与声明式 JSON Pointer 字段映射，无需重编译即可接入新工具日志
-            </p>
           </div>
           <button
             type="button"
@@ -1441,9 +1428,6 @@ export function DataSourcesPage() {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-[13px] font-semibold">断点续读游标明细（ingestion_cursors）</h2>
-            <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-              记录每个日志文件的 file_identity、字节偏移与末行 SHA-256 指纹，保证日志轮转与重启零重复计数
-            </p>
           </div>
           <span className="text-[11.5px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
             共 {cursors.length} 个已跟踪文件

@@ -1,12 +1,14 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use tokentracker_core::domain::{compute_event_id, provider_ids, NormalizedUsageEvent};
+use tokentracker_core::domain::{
+    compute_event_id, provider_ids, NormalizedUsageEvent, ObservedRateLimitWindow,
+};
 
 use crate::providers::{
-    compute_tps, get_i64, now_ms, parse_timestamp_ms, user_home_dir, FileParseContext,
-    ParsedLineResult, ProviderLogParser,
+    collapse_duplicate_events_keep_last, compute_tps, get_i64, now_ms, parse_timestamp_ms,
+    user_home_dir, FileParseContext, ParsedLineResult, ProviderLogParser,
 };
 use crate::watcher::open_shared_readonly;
 
@@ -44,6 +46,182 @@ fn extract_model_selection_from_content(content: &str) -> Option<String> {
     }
 
     Some(before_sentence_end.to_string())
+}
+
+/// Extract an explicit subscription / tier hint from `<USER_SETTINGS_CHANGE>` or JSON metadata.
+fn normalize_antigravity_plan_hint(raw: &str) -> Option<String> {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.is_empty() || lower == "none" || lower == "unknown" {
+        return None;
+    }
+    if lower.contains("ultra") && (lower.contains("20x") || lower.contains("199")) {
+        Some("ultra_20x".to_string())
+    } else if lower.contains("ultra") && (lower.contains("5x") || lower.contains("99")) {
+        Some("ultra_5x".to_string())
+    } else if lower.contains("ultra") {
+        Some("ultra".to_string())
+    } else if lower.contains("enterprise") || lower.contains("business") {
+        Some("enterprise".to_string())
+    } else if lower.contains("free") {
+        Some("free".to_string())
+    } else if lower.contains("pro") || lower.contains("g1") || lower.contains("premium") {
+        Some("pro".to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_settings_json_for_plan_hint(path: &Path) -> Option<String> {
+    if !path.is_file() {
+        return None;
+    }
+    let mut file = open_shared_readonly(path).ok()?;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw).ok()?;
+    let val = serde_json::from_str::<Value>(&raw).ok()?;
+
+    for key in [
+        "subscriptionTier",
+        "subscription_tier",
+        "planTier",
+        "plan_tier",
+        "quotaTier",
+        "quota_tier",
+        "tier",
+        "plan",
+        "membership",
+    ] {
+        if let Some(s) = val.get(key).and_then(|v| v.as_str()) {
+            if let Some(hint) = normalize_antigravity_plan_hint(s) {
+                return Some(hint);
+            }
+        }
+    }
+
+    // Official Antigravity CLI `settings.json` documents `useG1Credits` for Google AI Pro / Ultra personal tiers.
+    if val
+        .get("useG1Credits")
+        .or_else(|| val.get("use_g1_credits"))
+        .and_then(|v| v.as_bool())
+        .is_some()
+    {
+        return Some("pro".to_string());
+    }
+
+    None
+}
+
+/// Inspect documented public Antigravity `settings.json` locations read-only for subscription tier hints.
+fn resolve_antigravity_plan_hint(transcript_path: &Path) -> Option<String> {
+    // Check ancestor directories (e.g., <root>/settings.json or ~/.gemini/antigravity-cli/settings.json)
+    let mut ancestor = transcript_path.parent();
+    for _ in 0..5 {
+        let Some(dir) = ancestor else {
+            break;
+        };
+        if let Some(hint) = parse_settings_json_for_plan_hint(&dir.join("settings.json")) {
+            return Some(hint);
+        }
+        ancestor = dir.parent();
+    }
+
+    if let Some(home) = user_home_dir() {
+        let gemini_dir = home.join(".gemini");
+        for candidate in [
+            gemini_dir.join("antigravity-cli").join("settings.json"),
+            gemini_dir.join("antigravity").join("settings.json"),
+            gemini_dir.join("settings.json"),
+        ] {
+            if let Some(hint) = parse_settings_json_for_plan_hint(&candidate) {
+                return Some(hint);
+            }
+        }
+    }
+
+    None
+}
+
+fn extract_antigravity_rate_limits(
+    val: &Value,
+    observed_at_ms: i64,
+    fallback_hint: Option<&str>,
+) -> Vec<ObservedRateLimitWindow> {
+    let explicit_hint = val
+        .get("plan_tier")
+        .or_else(|| val.get("subscription_tier"))
+        .or_else(|| val.get("tier"))
+        .or_else(|| val.get("plan"))
+        .and_then(|v| v.as_str())
+        .and_then(normalize_antigravity_plan_hint)
+        .or_else(|| fallback_hint.map(ToString::to_string));
+
+    let mut out = Vec::new();
+    let Some(rl_obj) = val
+        .get("rate_limits")
+        .or_else(|| val.get("rate_limit"))
+        .or_else(|| val.get("quota"))
+        .and_then(|v| v.as_object())
+    else {
+        return out;
+    };
+
+    let obj_hint = rl_obj
+        .get("plan_type")
+        .or_else(|| rl_obj.get("tier"))
+        .or_else(|| rl_obj.get("plan"))
+        .and_then(|v| v.as_str())
+        .and_then(normalize_antigravity_plan_hint)
+        .or(explicit_hint);
+
+    for (window_name, win_val) in rl_obj {
+        let Some(win_obj) = win_val.as_object() else {
+            continue;
+        };
+        let used_percent = win_obj
+            .get("used_percent")
+            .or_else(|| win_obj.get("usedPercent"))
+            .and_then(|v| v.as_f64())
+            .or_else(|| {
+                let limit = win_obj.get("limit")?.as_f64()?;
+                if limit <= 0.0 {
+                    return None;
+                }
+                if let Some(used) = win_obj.get("used").and_then(|v| v.as_f64()) {
+                    Some(((used / limit) * 100.0).clamp(0.0, 100.0))
+                } else {
+                    let rem = win_obj.get("remaining")?.as_f64()?;
+                    Some((((limit - rem).max(0.0) / limit) * 100.0).clamp(0.0, 100.0))
+                }
+            });
+        let Some(pct) = used_percent.filter(|p| p.is_finite()) else {
+            continue;
+        };
+        let window_minutes = win_obj.get("window_minutes").and_then(|v| v.as_i64());
+        let resets_at_ms = parse_timestamp_ms(
+            win_obj
+                .get("resets_at")
+                .or_else(|| win_obj.get("reset_at"))
+                .or_else(|| win_obj.get("resetTime")),
+        )
+        .or_else(|| {
+            win_obj
+                .get("resets_in_seconds")
+                .and_then(|v| v.as_i64())
+                .map(|secs| observed_at_ms + secs.max(0) * 1000)
+        });
+        out.push(ObservedRateLimitWindow {
+            provider_id: provider_ids::ANTIGRAVITY.to_string(),
+            window_name: window_name.clone(),
+            used_percent: pct.clamp(0.0, 100.0),
+            window_minutes,
+            resets_at_ms,
+            observed_at_ms,
+            source: Some("local_log".to_string()),
+            plan_hint: obj_hint.clone(),
+        });
+    }
+
+    out
 }
 
 /// Scan an existing `transcript.jsonl` read-only for `<USER_SETTINGS_CHANGE>` entries so
@@ -122,6 +300,8 @@ impl ProviderLogParser for AntigravityParser {
 
         let initial_model =
             resolve_initial_model_from_file(path).unwrap_or_else(|| DEFAULT_ANTIGRAVITY_MODEL.to_string());
+        let detected_plan_hint = resolve_antigravity_plan_hint(path)
+            .or_else(|| normalize_antigravity_plan_hint(&initial_model));
 
         FileParseContext {
             file_path: path.to_string_lossy().to_string(),
@@ -129,6 +309,7 @@ impl ProviderLogParser for AntigravityParser {
             session_id,
             project_label: "antigravity".to_string(),
             current_model: Some(initial_model),
+            detected_plan_hint,
             ..Default::default()
         }
     }
@@ -159,16 +340,59 @@ impl ProviderLogParser for AntigravityParser {
             ctx.record_session_title(title, "explicit", ts_ms);
         }
 
+        if let Some(explicit_tier) = val
+            .get("plan_tier")
+            .or_else(|| val.get("subscription_tier"))
+            .or_else(|| val.get("tier"))
+            .and_then(|v| v.as_str())
+            .and_then(normalize_antigravity_plan_hint)
+        {
+            if ctx.detected_plan_hint.as_deref() != Some(explicit_tier.as_str()) {
+                ctx.detected_plan_hint = Some(explicit_tier);
+                ctx.plan_hint_emitted = false;
+            }
+        }
+
         let content_opt = val.get("content").and_then(|v| v.as_str());
         if let Some(content) = content_opt {
             if let Some(selected_model) = extract_model_selection_from_content(content) {
+                if let Some(model_hint) = normalize_antigravity_plan_hint(&selected_model) {
+                    if ctx.detected_plan_hint.is_none() {
+                        ctx.detected_plan_hint = Some(model_hint);
+                        ctx.plan_hint_emitted = false;
+                    }
+                }
                 ctx.current_model = Some(selected_model);
+            }
+        }
+
+        let mut rate_limits =
+            extract_antigravity_rate_limits(&val, ts_ms, ctx.detected_plan_hint.as_deref());
+        if !rate_limits.is_empty() {
+            ctx.plan_hint_emitted = true;
+        }
+
+        // When a `GENERIC` tool execution step immediately follows a `PLANNER_RESPONSE` that had
+        // `tool_calls`, its `created_at` marks the exact completion of the model's generation step.
+        if step_type.eq_ignore_ascii_case("GENERIC") {
+            if let Some(mut pending) = ctx.pending_antigravity_event.take() {
+                let decode_dur = ts_ms - pending.timestamp_ms;
+                if decode_dur > 0 && decode_dur <= 600_000 {
+                    pending.duration_ms = Some(decode_dur);
+                    let eff_out = pending.output_tokens + pending.reasoning_tokens;
+                    pending.output_tps = compute_tps(eff_out, Some(decode_dur));
+                    return Some(ParsedLineResult {
+                        event: Some(pending),
+                        rate_limits,
+                    });
+                }
             }
         }
 
         let is_user_step = step_type.eq_ignore_ascii_case("USER_INPUT")
             || source.eq_ignore_ascii_case("USER_EXPLICIT");
         if is_user_step {
+            ctx.pending_antigravity_event = None;
             ctx.last_prompt_ts_ms = Some(ts_ms);
             if let Some(content) = content_opt {
                 let user_req = if let Some(s) = content.find("<USER_REQUEST>") {
@@ -206,27 +430,70 @@ impl ProviderLogParser for AntigravityParser {
             || upper_type.ends_with("_RESPONSE")
             || total_tokens > 0;
         if !is_model_step {
-            return None;
+            return if rate_limits.is_empty() {
+                None
+            } else {
+                Some(ParsedLineResult {
+                    event: None,
+                    rate_limits,
+                })
+            };
         }
+
+        ctx.pending_antigravity_event = None;
+
+        // `CHECKPOINT` / `SYSTEM` compaction steps record cumulative context compaction tokens,
+        // not live streaming generation; never compute generation duration or TPS on them.
+        let is_compaction_or_system = step_type.eq_ignore_ascii_case("CHECKPOINT")
+            || source.eq_ignore_ascii_case("SYSTEM");
+        let has_tool_calls = val
+            .get("tool_calls")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty());
 
         let explicit_dur = val
             .get("duration_ms")
             .and_then(|v| v.as_i64())
             .filter(|&d| d > 0);
-        // Only fall back to explicit USER_INPUT prompt timestamp, never arbitrary preceding system/tool steps.
-        let duration_ms = explicit_dur.or_else(|| {
+        let explicit_ttft = val.get("ttft_ms").and_then(|v| v.as_i64());
+
+        let effective_output = output_tokens + reasoning_tokens;
+        let prompt_delta = if is_compaction_or_system {
+            None
+        } else {
             ctx.last_prompt_ts_ms.take().and_then(|prompt_ts| {
                 let delta = ts_ms - prompt_ts;
                 if delta > 0 && delta <= 600_000 {
-                    Some(delta)
+                    Some((prompt_ts, delta))
                 } else {
                     None
                 }
             })
-        });
+        };
+
+        let (duration_ms, ttft_ms) = if is_compaction_or_system {
+            (None, None)
+        } else if explicit_dur.is_some() {
+            (explicit_dur, explicit_ttft)
+        } else if has_tool_calls {
+            // `created_at` on `PLANNER_RESPONSE` with `tool_calls` is the step start timestamp;
+            // the following `GENERIC` step's `created_at` will supply the true generation duration.
+            let ttft = explicit_ttft
+                .or_else(|| prompt_delta.and_then(|(_, d)| (d <= 60_000).then_some(d)));
+            (None, ttft)
+        } else {
+            let dur = prompt_delta.and_then(|(prompt_ts, delta)| {
+                let both_second_quantized = ts_ms % 1_000 == 0 && prompt_ts % 1_000 == 0;
+                if both_second_quantized && delta <= 2_000 && effective_output >= 80 {
+                    None
+                } else {
+                    Some(delta)
+                }
+            });
+            (dur, explicit_ttft)
+        };
 
         let observable_only = total_tokens == 0;
-        let effective_output = output_tokens + reasoning_tokens;
         let output_tps = compute_tps(effective_output, duration_ms);
 
         let model_id = val
@@ -238,6 +505,26 @@ impl ProviderLogParser for AntigravityParser {
             .map(ToString::to_string)
             .or_else(|| ctx.current_model.clone())
             .unwrap_or_else(|| DEFAULT_ANTIGRAVITY_MODEL.to_string());
+
+        if !ctx.plan_hint_emitted {
+            if let Some(hint) = ctx
+                .detected_plan_hint
+                .clone()
+                .or_else(|| normalize_antigravity_plan_hint(&model_id))
+            {
+                ctx.plan_hint_emitted = true;
+                rate_limits.push(ObservedRateLimitWindow {
+                    provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                    window_name: "tier_hint".to_string(),
+                    used_percent: 0.0,
+                    window_minutes: None,
+                    resets_at_ms: None,
+                    observed_at_ms: ts_ms,
+                    source: Some("local_log_hint".to_string()),
+                    plan_hint: Some(hint),
+                });
+            }
+        }
 
         let step_key = val
             .get("step_index")
@@ -252,29 +539,39 @@ impl ProviderLogParser for AntigravityParser {
             ts_ms,
         );
 
+        let event = NormalizedUsageEvent {
+            event_id,
+            device_id: ctx.device_id.clone(),
+            provider_id: provider_ids::ANTIGRAVITY.to_string(),
+            session_id: ctx.session_id.clone(),
+            project_label: ctx.project_label.clone(),
+            model_id,
+            timestamp_ms: ts_ms,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            reasoning_tokens,
+            observable_only,
+            duration_ms,
+            ttft_ms,
+            output_tps,
+            estimated_cost_micro_usd: 0,
+            cache_saved_micro_usd: 0,
+        };
+
+        if !is_compaction_or_system && has_tool_calls && duration_ms.is_none() && !observable_only {
+            ctx.pending_antigravity_event = Some(event.clone());
+        }
+
         Some(ParsedLineResult {
-            event: Some(NormalizedUsageEvent {
-                event_id,
-                device_id: ctx.device_id.clone(),
-                provider_id: provider_ids::ANTIGRAVITY.to_string(),
-                session_id: ctx.session_id.clone(),
-                project_label: ctx.project_label.clone(),
-                model_id,
-                timestamp_ms: ts_ms,
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-                reasoning_tokens,
-                observable_only,
-                duration_ms,
-                ttft_ms: val.get("ttft_ms").and_then(|v| v.as_i64()),
-                output_tps,
-                estimated_cost_micro_usd: 0,
-                cache_saved_micro_usd: 0,
-            }),
-            rate_limits: Vec::new(),
+            event: Some(event),
+            rate_limits,
         })
+    }
+
+    fn finalize_batch(&self, events: Vec<NormalizedUsageEvent>) -> Vec<NormalizedUsageEvent> {
+        collapse_duplicate_events_keep_last(events)
     }
 }
 
@@ -348,5 +645,66 @@ mod tests {
         );
         // Step 4 followed step 3 without a new USER_INPUT prompt: must NOT divide 10 tokens by 5s prev_step
         assert_eq!(ev3.duration_ms, None);
+    }
+
+    #[test]
+    fn planner_response_with_tool_calls_uses_generic_step_completion_and_ignores_checkpoint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings_path = dir.path().join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"useG1Credits":true,"subscriptionTier":"Google AI Ultra 5x"}"#,
+        )
+        .expect("write settings");
+
+        let transcript = dir
+            .path()
+            .join("brain")
+            .join("conv-99")
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript.jsonl");
+        std::fs::create_dir_all(transcript.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&transcript, "").expect("touch transcript");
+
+        let parser = AntigravityParser::new();
+        let mut ctx = parser.init_context(&transcript, "dev-1");
+        assert_eq!(ctx.detected_plan_hint.as_deref(), Some("ultra_5x"));
+
+        // 1. User prompt at 01:13:07Z, PLANNER_RESPONSE (with tool_calls, 400 tokens) also starts at 01:13:07Z,
+        //    and GENERIC tool step starts at 01:13:23Z (16s true decode duration -> 25.0 tok/s).
+        let user_step = r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-16T01:13:07Z","content":"<USER_REQUEST>Audit speed</USER_REQUEST>"}"#;
+        let planner_step = r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-16T01:13:07Z","input_tokens":19000,"output_tokens":400,"tool_calls":[{"name":"read_file"}]}"#;
+        let generic_step = r#"{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-16T01:13:23Z","content":"Created At: 2026-11-16T09:13:23+08:00"}"#;
+        let checkpoint_step = r#"{"step_index":3,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE","created_at":"2026-11-16T01:13:24Z","input_tokens":490000,"output_tokens":2800,"content":"Compaction summary"}"#;
+
+        assert!(parser.parse_line(user_step, &mut ctx).is_none());
+        let p_res = parser.parse_line(planner_step, &mut ctx).expect("planner");
+        assert_eq!(p_res.rate_limits.len(), 1);
+        assert_eq!(p_res.rate_limits[0].plan_hint.as_deref(), Some("ultra_5x"));
+        let p_ev = p_res.event.expect("planner event");
+        assert_eq!(p_ev.duration_ms, None);
+        assert_eq!(p_ev.output_tps, None);
+
+        let g_ev = parser
+            .parse_line(generic_step, &mut ctx)
+            .and_then(|r| r.event)
+            .expect("upgraded planner event on generic step");
+        assert_eq!(g_ev.event_id, p_ev.event_id);
+        assert_eq!(g_ev.duration_ms, Some(16_000));
+        assert!((g_ev.output_tps.expect("valid tps") - 25.0).abs() < 1e-6);
+
+        let cp_ev = parser
+            .parse_line(checkpoint_step, &mut ctx)
+            .and_then(|r| r.event)
+            .expect("checkpoint event");
+        assert_eq!(cp_ev.duration_ms, None);
+        assert_eq!(cp_ev.output_tps, None);
+
+        let finalized = parser.finalize_batch(vec![p_ev, g_ev, cp_ev]);
+        assert_eq!(finalized.len(), 2);
+        assert_eq!(finalized[0].duration_ms, Some(16_000));
+        assert!((finalized[0].output_tps.expect("final tps") - 25.0).abs() < 1e-6);
+        assert_eq!(finalized[1].output_tps, None);
     }
 }

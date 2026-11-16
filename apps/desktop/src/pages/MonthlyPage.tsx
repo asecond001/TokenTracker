@@ -394,9 +394,6 @@ export function MonthlyPage() {
               <AnimatedNumber value={apiVal} formatter={costFormatter} />
             )}
           </div>
-          <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
-            按官方公开百万 Token 定价折算
-          </div>
         </div>
 
         <div
@@ -412,9 +409,6 @@ export function MonthlyPage() {
             ) : (
               <AnimatedNumber value={data?.month_total_tokens ?? 0} formatter={formatTokens} />
             )}
-          </div>
-          <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
-            Input、Output 与缓存汇总
           </div>
         </div>
 
@@ -437,9 +431,6 @@ export function MonthlyPage() {
                 formatter={costFormatter}
               />
             )}
-          </div>
-          <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
-            Prompt Cache 命中净减免估算
           </div>
         </div>
 
@@ -588,7 +579,7 @@ export function MonthlyPage() {
                 <ChevronRight className="w-3.5 h-3.5" style={{ color: 'var(--text-muted)' }} />
               )}
               <span className="text-[12.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
-                订阅回本参考（基于您录入的订阅月费计算）
+                订阅回本参考
               </span>
             </div>
 

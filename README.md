@@ -64,8 +64,8 @@ cargo run --release --offline -p tokentracker-collectors --example bench_million
 
 打包完成后，桌面端产物位于：
 - 可执行文件：`target/release/tokentracker-desktop.exe`
-- MSI 安装包：`target/release/bundle/msi/TokenTracker_0.2.2_x64_en-US.msi`
-- NSIS 安装包：`target/release/bundle/nsis/TokenTracker_0.2.2_x64-setup.exe`
+- MSI 安装包：`target/release/bundle/msi/TokenTracker_0.2.3_x64_en-US.msi`
+- NSIS 安装包：`target/release/bundle/nsis/TokenTracker_0.2.3_x64-setup.exe`
 
 ---
 

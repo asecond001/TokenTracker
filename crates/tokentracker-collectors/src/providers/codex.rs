@@ -119,7 +119,7 @@ impl ProviderLogParser for CodexParser {
                 let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
                 if role == "user" {
                     ctx.last_prompt_ts_ms = Some(ts_ms);
-                    if let Some(text) = extract_text_from_content(payload.get("content")) {
+                    if let Some(text) = extract_codex_user_prompt(payload.get("content")) {
                         ctx.record_session_title(&text, "derived", ts_ms);
                     }
                 }
@@ -129,8 +129,13 @@ impl ProviderLogParser for CodexParser {
                 let ev_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if ev_type == "user_message" {
                     ctx.last_prompt_ts_ms = Some(ts_ms);
-                    if let Some(msg) = payload.get("message").and_then(|v| v.as_str()) {
-                        ctx.record_session_title(msg, "derived", ts_ms);
+                    if let Some(msg) = extract_text_from_content(
+                        payload
+                            .get("message")
+                            .or_else(|| payload.get("text"))
+                            .or_else(|| payload.get("content")),
+                    ) {
+                        ctx.record_session_title(&msg, "user_prompt", ts_ms);
                     }
                     return None;
                 }
@@ -290,6 +295,45 @@ impl ProviderLogParser for CodexParser {
             }
             _ => None,
         }
+    }
+}
+
+fn is_codex_injected_preamble(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("# agents.md")
+        || lower.starts_with("agents.md instructions")
+        || lower.contains("<instructions>")
+        || trimmed.starts_with("# 工作偏好")
+        || trimmed.contains("这些是跨项目的工作偏好")
+}
+
+fn extract_codex_user_prompt(content: Option<&Value>) -> Option<String> {
+    let val = content?;
+    match val {
+        Value::String(s) if !is_codex_injected_preamble(s) => {
+            tokentracker_core::domain::sanitize_session_title(s)
+        }
+        Value::Array(items) => {
+            for item in items {
+                if let Some(s) = item
+                    .get("text")
+                    .or_else(|| item.get("input_text"))
+                    .and_then(|v| v.as_str())
+                {
+                    if !is_codex_injected_preamble(s) {
+                        if let Some(clean) = tokentracker_core::domain::sanitize_session_title(s) {
+                            return Some(clean);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => extract_text_from_content(Some(val)).filter(|s| !is_codex_injected_preamble(s)),
     }
 }
 

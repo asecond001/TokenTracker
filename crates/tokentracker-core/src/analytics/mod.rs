@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::domain::{
-    provider_ids, sanitize_session_title, CurrencyCode, ModelPricingEntry, ObservedRateLimitWindow,
-    MAX_VALID_OUTPUT_TPS, MIN_VALID_TPS_DURATION_MS, MIN_VALID_TPS_OUTPUT_TOKENS,
+    compute_ewma_tps, compute_iqr_upper_fence, provider_ids, sanitize_session_title, CurrencyCode,
+    ModelPricingEntry, ObservedRateLimitWindow, MAX_VALID_OUTPUT_TPS, MIN_VALID_TPS_DURATION_MS,
+    MIN_VALID_TPS_OUTPUT_TOKENS,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::pricing::resolve_pricing;
@@ -658,15 +659,20 @@ pub(crate) fn query_latest_tps(
           AND duration_ms IS NOT NULL
           AND duration_ms >= {MIN_VALID_TPS_DURATION_MS}
           AND (output_tokens + reasoning_tokens) >= {MIN_VALID_TPS_OUTPUT_TOKENS}
-        ORDER BY timestamp_ms DESC, rowid DESC LIMIT 1
+        ORDER BY timestamp_ms DESC, rowid DESC LIMIT 6
         "#,
         where_and = scope.sql_and
     );
     let bound = bound_range_params(start_ms, end_ms, &scope.params);
-    match conn.query_row(&sql, params_from_iter(bound), |r| r.get::<_, f64>(0)) {
-        Ok(v) => return Ok(Some(v)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => {}
-        Err(e) => return Err(CoreError::from(e)),
+    let mut stmt = conn.prepare(&sql)?;
+    let mut recent_desc: Vec<f64> = stmt
+        .query_map(params_from_iter(bound), |r| r.get::<_, f64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !recent_desc.is_empty() {
+        recent_desc.reverse();
+        if let Some(smoothed) = compute_ewma_tps(&recent_desc, 0.45) {
+            return Ok(Some(smoothed));
+        }
     }
 
     // Pure-rollup devices (e.g. mobile clients) do not hold raw `usage_events`.
@@ -904,7 +910,7 @@ fn query_active_sessions(
           AND duration_ms >= {MIN_VALID_TPS_DURATION_MS}
           AND (output_tokens + reasoning_tokens) >= {MIN_VALID_TPS_OUTPUT_TOKENS}
         ORDER BY timestamp_ms DESC, rowid DESC
-        LIMIT 1
+        LIMIT 6
         "#
     );
 
@@ -936,12 +942,11 @@ fn query_active_sessions(
             Err(e) => return Err(CoreError::from(e)),
         };
 
-        let latest_output_tps = match tps_stmt.query_row(params_from_iter(p), |r| r.get::<_, f64>(0))
-        {
-            Ok(v) => Some(v),
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => return Err(CoreError::from(e)),
-        };
+        let mut session_tps_desc: Vec<f64> = tps_stmt
+            .query_map(params_from_iter(p), |r| r.get::<_, f64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        session_tps_desc.reverse();
+        let latest_output_tps = compute_ewma_tps(&session_tps_desc, 0.45);
 
         let activity_state = if now_ms.saturating_sub(g.last_active_at_ms) <= ACTIVE_STATE_WINDOW_MS
         {
@@ -956,19 +961,31 @@ fn query_active_sessions(
             + g.reasoning_tokens;
 
         let canonical_key = format!("{}:{}", g.provider_id, g.session_id);
-        let stored_title: Option<String> = title_stmt
+        let mut stored_title: Option<String> = title_stmt
             .query_row(params![canonical_key], |r| r.get::<_, String>(0))
             .optional()?;
+        if stored_title.is_none() {
+            if let Some((base_sid, _)) = g.session_id.split_once('/') {
+                let base_key = format!("{}:{}", g.provider_id, base_sid);
+                stored_title = title_stmt
+                    .query_row(params![base_key], |r| r.get::<_, String>(0))
+                    .optional()?;
+            }
+        }
         let session_title = stored_title.or_else(|| {
             let trimmed = g.session_id.trim();
             let lower = trimmed.to_ascii_lowercase();
             let looks_synthetic_id = lower.is_empty()
                 || lower == "unknown"
                 || lower == "default"
+                || lower == "wire"
+                || lower == "context"
                 || lower.starts_with("sess-")
                 || lower.starts_with("session-")
+                || lower.starts_with("kimi-session")
                 || lower.starts_with("conv-")
                 || lower.starts_with("rollout-")
+                || lower.contains('/')
                 || trimmed.chars().all(|c| c.is_ascii_hexdigit() || c == '-' || c == '_');
             if looks_synthetic_id {
                 None
@@ -1899,29 +1916,71 @@ impl Storage {
             }
 
             let compute_group_metrics = |group: &[&RawSpeedEvent]| {
-                let mut tps_vals: Vec<f64> = group.iter().map(|e| e.output_tps).collect();
+                let mut raw_sorted: Vec<f64> = group.iter().map(|e| e.output_tps).collect();
+                raw_sorted.sort_by(|a, b| a.total_cmp(b));
+                let upper_fence = compute_iqr_upper_fence(&raw_sorted);
+
+                let inliers: Vec<&RawSpeedEvent> = match upper_fence {
+                    Some(fence) => {
+                        let filtered: Vec<&RawSpeedEvent> = group
+                            .iter()
+                            .copied()
+                            .filter(|e| e.output_tps <= fence)
+                            .collect();
+                        if filtered.is_empty() {
+                            group.to_vec()
+                        } else {
+                            filtered
+                        }
+                    }
+                    None => group.to_vec(),
+                };
+
+                let mut tps_vals: Vec<f64> = inliers.iter().map(|e| e.output_tps).collect();
                 tps_vals.sort_by(|a, b| a.total_cmp(b));
                 let n = tps_vals.len();
-                let mean_tps = tps_vals.iter().sum::<f64>() / n as f64;
+
+                // Duration-weighted harmonic throughput: sum(tps_i * dur_i) / sum(dur_i) == sum(tokens_i) / sum(dur_i),
+                // preventing short-duration bursts from inflating average generation speed.
+                let mut weighted_tps_num = 0.0_f64;
+                let mut total_weight_ms = 0.0_f64;
+                for ev in &inliers {
+                    let w = ev.duration_ms.unwrap_or(1_000).clamp(500, 60_000) as f64;
+                    weighted_tps_num += ev.output_tps * w;
+                    total_weight_ms += w;
+                }
+                let mean_tps = if total_weight_ms > 0.0 {
+                    weighted_tps_num / total_weight_ms
+                } else if n > 0 {
+                    tps_vals.iter().sum::<f64>() / n as f64
+                } else {
+                    0.0
+                };
+
                 let p50_tps = percentile_sorted(&tps_vals, 0.50);
                 let p95_tps = percentile_sorted(&tps_vals, 0.95);
                 let min_tps = tps_vals.first().copied().unwrap_or(0.0);
                 let max_tps = tps_vals.last().copied().unwrap_or(0.0);
-                let latest_tps = group.last().map(|e| e.output_tps).unwrap_or(0.0);
-                let durations: Vec<i64> = group.iter().filter_map(|e| e.duration_ms).collect();
+
+                let chrono_all: Vec<f64> = group.iter().map(|e| e.output_tps).collect();
+                let latest_tps = compute_ewma_tps(&chrono_all, 0.45)
+                    .or_else(|| inliers.last().map(|e| e.output_tps))
+                    .unwrap_or(0.0);
+
+                let durations: Vec<i64> = inliers.iter().filter_map(|e| e.duration_ms).collect();
                 let avg_duration_ms = if durations.is_empty() {
                     0.0
                 } else {
                     durations.iter().sum::<i64>() as f64 / durations.len() as f64
                 };
-                let ttfts: Vec<i64> = group.iter().filter_map(|e| e.ttft_ms).collect();
+                let ttfts: Vec<i64> = inliers.iter().filter_map(|e| e.ttft_ms).collect();
                 let avg_ttft_ms = if ttfts.is_empty() {
                     None
                 } else {
                     Some(ttfts.iter().sum::<i64>() as f64 / ttfts.len() as f64)
                 };
                 (
-                    n as i64,
+                    group.len() as i64,
                     mean_tps,
                     p50_tps,
                     p95_tps,

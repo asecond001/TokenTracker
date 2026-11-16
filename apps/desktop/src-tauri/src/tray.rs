@@ -181,10 +181,12 @@ fn ensure_floating_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
         FLOATING_MONITOR_LABEL,
         WebviewUrl::App("index.html?view=floating".into()),
     )
-    .title("TokenTracker 实时悬浮窗")
+    .title("TokenTracker")
     .inner_size(304.0, 248.0)
+    .min_inner_size(220.0, 48.0)
     .decorations(false)
-    .resizable(false)
+    .transparent(true)
+    .resizable(true)
     .always_on_top(true)
     .skip_taskbar(true)
     .visible(false);
@@ -238,12 +240,19 @@ pub fn toggle_floating_window_internal(app: &AppHandle) -> bool {
     set_floating_window_and_persist(app, !currently_visible)
 }
 
-pub fn resize_floating_window_internal(app: &AppHandle, compact: bool) {
+pub fn resize_floating_window_internal(
+    app: &AppHandle,
+    compact: bool,
+    width: Option<f64>,
+    height: Option<f64>,
+) {
     if let Some(win) = app.get_webview_window(FLOATING_MONITOR_LABEL) {
-        let (w, h) = if compact {
-            (288.0, 52.0)
-        } else {
-            (304.0, 248.0)
+        let (w, h) = match (width, height) {
+            (Some(cw), Some(ch)) if cw.is_finite() && ch.is_finite() => {
+                (cw.clamp(220.0, 640.0), ch.clamp(48.0, 560.0))
+            }
+            _ if compact => (288.0, 52.0),
+            _ => (304.0, 248.0),
         };
         let _ = win.set_size(LogicalSize::new(w, h));
     }

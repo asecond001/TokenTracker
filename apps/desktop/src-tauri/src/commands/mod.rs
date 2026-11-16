@@ -933,8 +933,13 @@ pub fn get_floating_window_visible(app: AppHandle) -> bool {
 }
 
 #[tauri::command]
-pub fn set_floating_window_compact(app: AppHandle, compact: bool) {
-    resize_floating_window_internal(&app, compact);
+pub fn set_floating_window_compact(
+    app: AppHandle,
+    compact: bool,
+    width: Option<f64>,
+    height: Option<f64>,
+) {
+    resize_floating_window_internal(&app, compact, width, height);
 }
 
 #[cfg(test)]

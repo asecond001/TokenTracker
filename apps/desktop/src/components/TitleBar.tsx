@@ -10,8 +10,10 @@ import {
   Moon,
   Monitor,
   PictureInPicture2,
+  Download,
 } from 'lucide-react';
 import { ipc, isTauriRuntime } from '../lib/ipc';
+import { downloadAndInstallUpdate, useUpdaterStore } from '../lib/updater';
 import { useWorkspaceStore, type NavPage } from '../stores/workspaceStore';
 import type { CurrencyCode, ThemeMode } from '../types/ipc';
 
@@ -129,6 +131,13 @@ export function TitleBar({
   }, [customRules]);
 
   const [livePulseActive, setLivePulseActive] = useState(false);
+  const updater = useUpdaterStore();
+  const updateDownloadPercent =
+    updater.totalBytes && updater.totalBytes > 0
+      ? Math.min(100, (updater.downloadedBytes / updater.totalBytes) * 100)
+      : updater.status === 'installing'
+        ? 100
+        : 0;
 
   useEffect(() => {
     if (livePulseSeq <= 0) {
@@ -307,8 +316,32 @@ export function TitleBar({
           })}
         </div>
 
-        {/* Collector Live Status Dot + Manual Refresh + Theme Cycle */}
+        {/* Collector Live Status Dot + Manual Refresh + Floating Toggle + Theme Cycle + Update Button */}
         <div className="flex items-center gap-1.5 pl-1 pr-1.5">
+          {updater.availableUpdate && (
+            <button
+              type="button"
+              aria-label="立即更新客户端"
+              title={`发现新版本 v${updater.availableUpdate.version}，点击立即更新`}
+              disabled={updater.status === 'downloading' || updater.status === 'installing'}
+              onClick={() => void downloadAndInstallUpdate()}
+              className="btn-interactive inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium tabular-nums cursor-pointer disabled:opacity-60"
+              style={{
+                backgroundColor: 'rgba(16, 185, 129, 0.14)',
+                border: '1px solid var(--accent-emerald)',
+                color: 'var(--accent-emerald)',
+              }}
+            >
+              <Download className="w-3 h-3" />
+              <span>
+                {updater.status === 'downloading'
+                  ? `下载中 ${updateDownloadPercent.toFixed(0)}%`
+                  : updater.status === 'installing'
+                    ? '安装中…'
+                    : `更新 v${updater.availableUpdate.version}`}
+              </span>
+            </button>
+          )}
           <span
             data-testid="titlebar-live-dot"
             title={dotTitle}

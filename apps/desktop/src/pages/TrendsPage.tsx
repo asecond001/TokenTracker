@@ -327,11 +327,6 @@ export function TrendsPage() {
           <h2 className="text-[13.5px] font-semibold">
             {isAllTime ? '全周期累计分布汇总' : '区间增量变化对比'}
           </h2>
-          <span className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-            {isAllTime
-              ? '全部历史周期模式下展示全量汇总，不计算上周期环比'
-              : '对比当前选中窗口与前一等长周期的变化幅度'}
-          </span>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-left">
