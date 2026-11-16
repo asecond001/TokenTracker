@@ -584,7 +584,7 @@ describe('Workspace store & UI shell navigation', () => {
     expect(screen.getByText('Token 构成趋势')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '数据源与合规' }));
-    expect(await screen.findByText('数据源与合规采集')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '数据源与合规' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '偏好设置' }));
     expect(await screen.findByRole('heading', { name: '偏好设置' })).toBeInTheDocument();
@@ -1207,7 +1207,7 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
 
     // Monthly, Subscriptions, DataSources, Preferences: absent
     fireEvent.click(screen.getByRole('button', { name: '月度统计' }));
-    expect(await screen.findByText('月度账单与活跃热力图')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '月度统计' })).toBeInTheDocument();
     expect(screen.queryByTestId('time-range-control')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '订阅用量' }));
@@ -1215,7 +1215,7 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
     expect(screen.queryByTestId('time-range-control')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '数据源与合规' }));
-    expect(await screen.findByText('数据源与合规采集')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '数据源与合规' })).toBeInTheDocument();
     expect(screen.queryByTestId('time-range-control')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '偏好设置' }));
@@ -2053,7 +2053,15 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
 
     expect(screen.getByText('TokenTracker')).toBeInTheDocument();
     expect(await screen.findByText('Refactor Floating Monitor HUD')).toBeInTheDocument();
-    expect(screen.getByText('78.4 tok/s')).toBeInTheDocument();
+    const speedEl = screen.getByText('78.4 tok/s');
+    expect(speedEl).toBeInTheDocument();
+
+    // Hovering over the live speed displays the model breakdown tooltip
+    fireEvent.mouseEnter(speedEl);
+    const speedTooltip = await screen.findByTestId('live-speed-tooltip');
+    expect(within(speedTooltip).getByText('实时速率来源模型')).toBeInTheDocument();
+    expect(within(speedTooltip).getByText('claude-sonnet-4-5')).toBeInTheDocument();
+    fireEvent.mouseLeave(speedEl);
 
     fireEvent.click(screen.getByRole('button', { name: '切换精简胶囊模式' }));
     expect(compactSpy).toHaveBeenCalledWith(true);
@@ -2061,6 +2069,72 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
 
     fireEvent.click(screen.getByRole('button', { name: '关闭悬浮窗' }));
     expect(toggleSpy).toHaveBeenCalled();
+  });
+
+  it('displays average speed across multiple active models and lists all active models on hover', async () => {
+    const now = Date.now();
+    window.localStorage.removeItem('tokentracker.floating_config.v1');
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(
+      makePreferences({ floating_window_enabled: true })
+    );
+    vi.spyOn(ipc, 'getTraySummary').mockResolvedValue(
+      makeTraySummary({
+        today_tokens: 320_000,
+        today_cost_micro_usd: 4_800_000,
+        latest_output_tps: 90.0,
+        active_sessions: [
+          {
+            session_key: '#111111',
+            session_title: 'Claude Task',
+            provider_id: 'claude_code',
+            model_id: 'claude-sonnet-4-5',
+            project_label: 'TokenTracker',
+            activity_state: 'active',
+            started_at_ms: now - 60_000,
+            last_active_at_ms: now - 5_000,
+            request_count: 4,
+            total_tokens: 40_000,
+            input_tokens: 30_000,
+            output_tokens: 10_000,
+            cache_read_tokens: 0,
+            estimated_cost_micro_usd: 600_000,
+            latest_output_tps: 80.0,
+          },
+          {
+            session_key: '#222222',
+            session_title: 'Codex Task',
+            provider_id: 'codex',
+            model_id: 'gpt-5.3-codex',
+            project_label: 'TokenTracker',
+            activity_state: 'active',
+            started_at_ms: now - 50_000,
+            last_active_at_ms: now - 3_000,
+            request_count: 3,
+            total_tokens: 30_000,
+            input_tokens: 20_000,
+            output_tokens: 10_000,
+            cache_read_tokens: 0,
+            estimated_cost_micro_usd: 500_000,
+            latest_output_tps: 100.0,
+          },
+        ],
+      })
+    );
+
+    renderWithQuery(<FloatingMonitorPage />);
+
+    // Mean of 80.0 and 100.0 is 90.0 tok/s
+    const avgSpeedEl = await screen.findByText('90.0 tok/s');
+    expect(avgSpeedEl).toBeInTheDocument();
+    expect(screen.getByText('实时生成速率 (2 模型均值)')).toBeInTheDocument();
+
+    fireEvent.mouseEnter(avgSpeedEl);
+    const tooltip = await screen.findByTestId('live-speed-tooltip');
+    expect(within(tooltip).getByText('活跃模型速率 (2 模型均值)')).toBeInTheDocument();
+    expect(within(tooltip).getByText('claude-sonnet-4-5')).toBeInTheDocument();
+    expect(within(tooltip).getByText('80.0 tok/s')).toBeInTheDocument();
+    expect(within(tooltip).getByText('gpt-5.3-codex')).toBeInTheDocument();
+    expect(within(tooltip).getByText('100.0 tok/s')).toBeInTheDocument();
   });
 
   it('supports categorized PreferencesPage, in-place update buttons, and customizable FloatingMonitorPage elements', async () => {

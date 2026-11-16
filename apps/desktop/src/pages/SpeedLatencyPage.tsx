@@ -361,7 +361,7 @@ export function SpeedLatencyPage() {
         style={{ borderBottom: '1px solid var(--border-hairline)' }}
       >
         <div>
-          <h1 className="text-[16px] font-semibold tracking-tight">生成速度与延迟监测</h1>
+          <h1 className="text-[16px] font-semibold tracking-tight">速度监测</h1>
         </div>
         <TimeRangeControl />
       </section>

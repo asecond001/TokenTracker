@@ -170,7 +170,11 @@ RunnerFn = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def _default_runner(cmd: list[str], *, check: bool = True, capture_output: bool = False, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, check=check, capture_output=capture_output, text=True, env=env)
+    result = subprocess.run(cmd, check=False, capture_output=capture_output, text=True, env=env)
+    if check and result.returncode:
+        # CalledProcessError includes argv, including security import passwords.
+        raise RuntimeError(f"{Path(cmd[0]).name} failed with exit code {result.returncode}")
+    return result
 
 
 def run_with_ephemeral_keychain(

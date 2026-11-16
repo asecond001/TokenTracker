@@ -418,6 +418,7 @@ pub async fn refresh_provider_balance_with_fetcher_inner(
             if selected_endpoint == endpoints.kimi_coding_url
                 || body.get("usage").is_some()
                 || body.get("limits").is_some()
+                || body.get("usages").is_some()
             {
                 parse_kimi_coding_usages(&body, provider_id, now_ms)?
             } else {
@@ -489,6 +490,14 @@ fn compute_usage_percent_from_obj(obj: &Value) -> Option<f64> {
     ) {
         return Some(pct.clamp(0.0, 100.0));
     }
+    if let Some(ratio) = json_number_as_f64(
+        obj.get("used_ratio")
+            .or_else(|| obj.get("usedRatio"))
+            .or_else(|| obj.get("ratio")),
+    ) {
+        let pct = if ratio <= 1.0 { ratio * 100.0 } else { ratio };
+        return Some(pct.clamp(0.0, 100.0));
+    }
     let limit = json_number_as_f64(obj.get("limit"))?;
     if limit <= 0.0 {
         return None;
@@ -544,16 +553,115 @@ fn parse_kimi_coding_usages(
                     .or_else(|| usage_obj.get("resetAt"))
                     .or_else(|| usage_obj.get("resets_at")),
             );
+            let unit_str = usage_obj
+                .pointer("/window/timeUnit")
+                .or_else(|| usage_obj.pointer("/window/time_unit"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            let raw_dur = json_number_as_f64(usage_obj.pointer("/window/duration"))
+                .map(|d| d.round() as i64)
+                .unwrap_or(0);
+            let is_monthly = unit_str.contains("MONTH")
+                || (unit_str.contains("DAY") && raw_dur >= 25)
+                || resets_at_ms.is_some_and(|r| r.saturating_sub(now_ms) > 8 * 86_400_000);
+            let (win_name, win_mins) = if is_monthly {
+                ("30d".to_string(), 43_200)
+            } else {
+                ("7d".to_string(), 10_080)
+            };
             windows.push(ObservedRateLimitWindow {
                 provider_id: provider_id.to_string(),
-                window_name: "7d".to_string(),
+                window_name: win_name,
                 used_percent,
-                window_minutes: Some(10_080),
+                window_minutes: Some(win_mins),
                 resets_at_ms,
                 observed_at_ms: now_ms,
                 source: Some("official_api".to_string()),
                 plan_hint: plan_hint.clone(),
             });
+        }
+    }
+
+    if let Some(monthly_obj) = data
+        .get("monthly_usage")
+        .or_else(|| body.get("monthly_usage"))
+        .or_else(|| data.get("monthlyUsage"))
+        .or_else(|| body.get("monthlyUsage"))
+    {
+        if let Some(used_percent) = compute_usage_percent_from_obj(monthly_obj) {
+            let resets_at_ms = parse_timestamp_ms(
+                monthly_obj
+                    .get("resetTime")
+                    .or_else(|| monthly_obj.get("reset_time"))
+                    .or_else(|| monthly_obj.get("resetAt"))
+                    .or_else(|| monthly_obj.get("resets_at")),
+            );
+            windows.push(ObservedRateLimitWindow {
+                provider_id: provider_id.to_string(),
+                window_name: "30d".to_string(),
+                used_percent,
+                window_minutes: Some(43_200),
+                resets_at_ms,
+                observed_at_ms: now_ms,
+                source: Some("official_api".to_string()),
+                plan_hint: plan_hint.clone(),
+            });
+        }
+    }
+
+    if let Some(usages_obj) = data
+        .get("usages")
+        .or_else(|| body.get("usages"))
+        .and_then(|v| v.as_object())
+    {
+        let map_entries: &[(&[&str], &str, i64)] = &[
+            (&["limit_5h", "5h", "primary"], "5h", 300),
+            (&["limit_7d", "limit_week", "7d", "weekly"], "7d", 10_080),
+            (
+                &[
+                    "limit_month_total",
+                    "limit_month_code",
+                    "limit_month",
+                    "limit_30d",
+                    "30d",
+                    "monthly",
+                ],
+                "30d",
+                43_200,
+            ),
+        ];
+        for (keys, win_name, win_mins) in map_entries {
+            let mut best: Option<(f64, Option<i64>)> = None;
+            for k in *keys {
+                if let Some(sub) = usages_obj.get(*k) {
+                    if let Some(pct) = compute_usage_percent_from_obj(sub) {
+                        let reset_ms = parse_timestamp_ms(
+                            sub.get("resetTime")
+                                .or_else(|| sub.get("reset_time"))
+                                .or_else(|| sub.get("resetAt"))
+                                .or_else(|| sub.get("resets_at")),
+                        );
+                        if best.is_none_or(|(prev_pct, _)| pct > prev_pct) {
+                            best = Some((pct, reset_ms));
+                        }
+                    }
+                }
+            }
+            if let Some((used_percent, resets_at_ms)) = best {
+                if !windows.iter().any(|w| w.window_name == *win_name) {
+                    windows.push(ObservedRateLimitWindow {
+                        provider_id: provider_id.to_string(),
+                        window_name: (*win_name).to_string(),
+                        used_percent,
+                        window_minutes: Some(*win_mins),
+                        resets_at_ms,
+                        observed_at_ms: now_ms,
+                        source: Some("official_api".to_string()),
+                        plan_hint: plan_hint.clone(),
+                    });
+                }
+            }
         }
     }
 
@@ -576,7 +684,9 @@ fn parse_kimi_coding_usages(
                 .and_then(|v| v.as_str())
                 .unwrap_or("TIME_UNIT_MINUTE")
                 .to_ascii_uppercase();
-            let window_minutes = if unit_str.contains("HOUR") {
+            let window_minutes = if unit_str.contains("MONTH") {
+                raw_dur.max(1) * 43_200
+            } else if unit_str.contains("HOUR") {
                 raw_dur.max(1) * 60
             } else if unit_str.contains("DAY") {
                 raw_dur.max(1) * 1_440
@@ -590,6 +700,7 @@ fn parse_kimi_coding_usages(
                 300 => "5h".to_string(),
                 1_440 => "24h".to_string(),
                 10_080 => "7d".to_string(),
+                m if m >= 40_000 => "30d".to_string(),
                 m if m % 60 == 0 => format!("{}h", m / 60),
                 m => format!("{m}m"),
             };
@@ -619,7 +730,11 @@ fn parse_kimi_coding_usages(
                 provider_id: provider_id.to_string(),
                 window_name,
                 used_percent,
-                window_minutes: Some(window_minutes),
+                window_minutes: Some(if window_minutes >= 40_000 {
+                    43_200
+                } else {
+                    window_minutes
+                }),
                 resets_at_ms,
                 observed_at_ms: now_ms,
                 source: Some("official_api".to_string()),

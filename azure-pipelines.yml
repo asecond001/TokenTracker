@@ -11,6 +11,7 @@ parameters:
       - native
 
 variables:
+  CARGO_HOME: $(Pipeline.Workspace)/cargo
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
   XDG_CACHE_HOME: $(Pipeline.Workspace)/.cache
@@ -38,7 +39,7 @@ jobs:
           import json, subprocess
           xcode_ver = subprocess.check_output(["xcodebuild", "-version"], text=True).strip()
           sdk_ver = subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--show-sdk-version"], text=True).strip()
-          xg_ver = subprocess.check_output(["bash", "-lc", "PATH=.tools/bin:$PATH xcodegen --version"], text=True).strip()
+          xg_ver = subprocess.check_output(["bash", "-c", "PATH=.tools/bin:$PATH xcodegen version"], text=True).strip()
           rustc_ver = subprocess.check_output(["rustc", "--version"], text=True).strip()
           sims = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"], text=True))
           print(json.dumps({
@@ -59,7 +60,7 @@ jobs:
 
   - job: NativeSimulatorCheck
     displayName: Native XcodeBuild & Simulator XCTests
-    timeoutInMinutes: 45
+    timeoutInMinutes: 60
     dependsOn: Preflight
     condition: and(succeeded(), eq('${{ parameters.validation }}', 'native'))
     pool:
@@ -72,19 +73,17 @@ jobs:
         inputs:
           versionSpec: "24.14.0"
       - task: Cache@2
-        displayName: Restore Cargo registry & build cache
+        displayName: Restore Cargo registry
         inputs:
-          key: 'cargo-ios-v1 | "$(Agent.OS)" | Cargo.lock'
+          key: 'cargo-registry-v2 | "$(Agent.OS)" | Cargo.lock'
           restoreKeys: |
-            cargo-ios-v1 | "$(Agent.OS)"
-          path: |
-            $(HOME)/.cargo/registry
-            $(HOME)/.cargo/git
-            $(Build.SourcesDirectory)/target
+            cargo-registry-v2 | "$(Agent.OS)"
+          path: $(CARGO_HOME)/registry
       - bash: |
           set -euo pipefail
-          python3 -m pip install --upgrade pip
-          python3 -m pip install cryptography==50.0.1
+            python3 -m venv .tools/test-venv
+            export PATH="$(pwd)/.tools/test-venv/bin:$PATH"
+            python3 -m pip install cryptography==50.0.1
           node scripts/ios/local-check.mjs --online --require-python
         displayName: Run Rust core/FFI, UniFFI & signing script unit tests
       - bash: bash scripts/ios/azure-setup.sh

@@ -412,7 +412,7 @@ export function ModelsPricingPage() {
         style={{ borderBottom: '1px solid var(--border-subtle)' }}
       >
         <div>
-          <h1 className="text-[16px] font-semibold tracking-tight">模型统计与定价覆盖</h1>
+          <h1 className="text-[16px] font-semibold tracking-tight">模型开销统计</h1>
           <p className="text-[12px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
             {isExchangeRateAuto ? '自动汇率' : '锁定汇率'} 1 USD ={' '}
             {prefs?.usd_to_cny_rate ?? usdToCnyRate} CNY · 已同步公开模型单价{' '}

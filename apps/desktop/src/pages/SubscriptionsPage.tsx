@@ -154,6 +154,9 @@ function formatObservedWindowLabel(obs: ObservedRateLimitWindow): string {
   if (lower.includes('secondary') || lower.includes('7d')) {
     return '7d 官方限额';
   }
+  if (lower.includes('30d') || lower.includes('month')) {
+    return '30d 官方限额';
+  }
   return `${obs.window_name} 官方限额`;
 }
 
@@ -164,6 +167,7 @@ function observedWindowSortKey(obs: ObservedRateLimitWindow): number {
   const lower = obs.window_name.toLowerCase();
   if (lower.includes('primary') || lower.includes('5h')) return 300;
   if (lower.includes('secondary') || lower.includes('7d')) return 10080;
+  if (lower.includes('30d') || lower.includes('month')) return 43200;
   return 999999;
 }
 
@@ -620,7 +624,7 @@ export function SubscriptionsPage() {
         style={{ borderBottom: '1px solid var(--border-subtle)' }}
       >
         <div>
-          <h1 className="text-[16px] font-semibold tracking-tight">订阅配额</h1>
+          <h1 className="text-[16px] font-semibold tracking-tight">订阅用量</h1>
         </div>
 
         <button

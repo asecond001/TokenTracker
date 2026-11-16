@@ -19,7 +19,7 @@ import {
   type BackgroundPresetId,
 } from '../components/WorkspaceBackdrop';
 import {
-  FLOATING_SIZE_PRESETS,
+  computeFloatingDimensions,
   useFloatingConfig,
   type FloatingWindowConfig,
 } from '../lib/floatingConfig';
@@ -599,6 +599,40 @@ export function PreferencesPage({
     });
   };
 
+  const handleMinimizeToTrayToggle = (enabled: boolean) => {
+    setMinimizeToTray(enabled);
+    void persistPreferences({ minimize_to_tray: enabled }).catch((err: unknown) => {
+      setNotice({
+        text: err instanceof Error ? err.message : '切换最小化至托盘设置失败',
+        kind: 'error',
+      });
+    });
+  };
+
+  const handleLaunchAtStartupToggle = (enabled: boolean) => {
+    setLaunchAtStartup(enabled);
+    void persistPreferences({ launch_at_startup: enabled })
+      .then(async (saved) => {
+        if (isTauriRuntime()) {
+          try {
+            if (saved.launch_at_startup) {
+              await enableAutostart();
+            } else {
+              await disableAutostart();
+            }
+          } catch {
+            // Handled by backend update_preferences
+          }
+        }
+      })
+      .catch((err: unknown) => {
+        setNotice({
+          text: err instanceof Error ? err.message : '切换开机自启设置失败',
+          kind: 'error',
+        });
+      });
+  };
+
   const handleFloatingWindowToggle = (enabled: boolean) => {
     setFloatingWindowEnabled(enabled);
     void persistPreferences({ floating_window_enabled: enabled }).catch((err: unknown) => {
@@ -607,6 +641,19 @@ export function PreferencesPage({
         kind: 'error',
       });
     });
+  };
+
+  const handleFloatingElementToggle = (
+    key: keyof Pick<
+      FloatingWindowConfig,
+      'showTokens' | 'showCost' | 'showSpeed' | 'showSession' | 'showSubscriptions'
+    >
+  ) => {
+    const nextCfg = updateFloatingConfig({ [key]: !floatingConfig[key] });
+    if (!nextCfg.compact) {
+      const dims = computeFloatingDimensions(nextCfg);
+      void ipc.setFloatingWindowCompact(false, dims.width, dims.height);
+    }
   };
 
   const updateDownloadPercent =
@@ -733,7 +780,7 @@ export function PreferencesPage({
               color: 'var(--text-secondary)',
             }}
           >
-            v0.2.3
+            v0.2.4
           </span>
         </div>
 
@@ -1051,7 +1098,7 @@ export function PreferencesPage({
               <input
                 type="checkbox"
                 checked={minimizeToTray}
-                onChange={(e) => setMinimizeToTray(e.target.checked)}
+                onChange={(e) => handleMinimizeToTrayToggle(e.target.checked)}
               />
               <span>关闭窗口时最小化至托盘</span>
             </label>
@@ -1059,7 +1106,7 @@ export function PreferencesPage({
               <input
                 type="checkbox"
                 checked={launchAtStartup}
-                onChange={(e) => setLaunchAtStartup(e.target.checked)}
+                onChange={(e) => handleLaunchAtStartupToggle(e.target.checked)}
               />
               <span>Windows 登录后自动启动</span>
             </label>
@@ -1083,33 +1130,6 @@ export function PreferencesPage({
                 />
                 <span>显示桌面实时悬浮窗</span>
               </label>
-
-              <div
-                className="inline-flex items-center p-0.5 rounded"
-                style={{
-                  backgroundColor: 'var(--bg-input)',
-                  border: '1px solid var(--border-subtle)',
-                }}
-              >
-                {FLOATING_SIZE_PRESETS.map((preset) => {
-                  const active = floatingConfig.sizePreset === preset.id;
-                  return (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      data-active={active ? 'true' : undefined}
-                      onClick={() => updateFloatingConfig({ sizePreset: preset.id })}
-                      className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
-                      style={{
-                        color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                        fontWeight: active ? 500 : 400,
-                      }}
-                    >
-                      {preset.label}
-                    </button>
-                  );
-                })}
-              </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-1.5">
@@ -1120,7 +1140,7 @@ export function PreferencesPage({
                     key={item.key}
                     type="button"
                     aria-pressed={enabled}
-                    onClick={() => updateFloatingConfig({ [item.key]: !enabled })}
+                    onClick={() => handleFloatingElementToggle(item.key)}
                     className="btn-interactive px-2 py-0.5 rounded text-[11px] cursor-pointer"
                     style={{
                       backgroundColor: enabled ? 'var(--bg-hover)' : 'var(--bg-input)',

@@ -306,7 +306,7 @@ export function MonthlyPage() {
         style={{ borderBottom: '1px solid var(--border-hairline)' }}
       >
         <div>
-          <h1 className="text-[16px] font-semibold tracking-tight">月度账单与活跃热力图</h1>
+          <h1 className="text-[16px] font-semibold tracking-tight">月度统计</h1>
         </div>
 
         <div className="flex items-center gap-3">

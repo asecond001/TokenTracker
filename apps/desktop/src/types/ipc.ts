@@ -149,6 +149,13 @@ export interface ActiveSessionSummary {
   latest_output_tps: number | null;
 }
 
+export interface LiveModelSpeed {
+  provider_id: string;
+  model_id: string;
+  output_tps: number;
+  activity_state: 'active' | 'recent' | string;
+}
+
 export interface WorkspaceNavigatePayload {
   page?: string | null;
   provider_id?: string | null;
@@ -163,6 +170,7 @@ export interface OverviewReport {
   avg_output_tps: number;
   peak_output_tps: number;
   latest_output_tps: number | null;
+  live_model_speeds?: LiveModelSpeed[];
   total_requests: number;
   observable_steps: number;
   tokens_delta_pct: number | null;
@@ -403,6 +411,7 @@ export interface TraySummary {
   today_cost_micro_usd: number;
   today_requests: number;
   latest_output_tps: number | null;
+  live_model_speeds?: LiveModelSpeed[];
   subscriptions: SubscriptionPlanStatus[];
   provider_shares: UsageShareItem[];
   active_sessions: ActiveSessionSummary[];

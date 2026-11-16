@@ -1,17 +1,5 @@
 import { useEffect, useState } from 'react';
 
-export type FloatingSizePreset = 'compact' | 'sm' | 'md' | 'lg';
-
-export const FLOATING_SIZE_PRESETS: ReadonlyArray<{
-  id: FloatingSizePreset;
-  label: string;
-}> = [
-  { id: 'compact', label: '胶囊' },
-  { id: 'sm', label: '小' },
-  { id: 'md', label: '标准' },
-  { id: 'lg', label: '大' },
-];
-
 export interface FloatingWindowConfig {
   showTokens: boolean;
   showCost: boolean;
@@ -19,7 +7,7 @@ export interface FloatingWindowConfig {
   showSession: boolean;
   showSubscriptions: boolean;
   opacity: number;
-  sizePreset: FloatingSizePreset;
+  compact: boolean;
 }
 
 const STORAGE_KEY = 'tokentracker.floating_config.v1';
@@ -32,11 +20,11 @@ export const DEFAULT_FLOATING_CONFIG: FloatingWindowConfig = {
   showSession: true,
   showSubscriptions: true,
   opacity: 0.88,
-  sizePreset: 'md',
+  compact: false,
 };
 
 export function normalizeFloatingConfig(
-  raw: Partial<FloatingWindowConfig> | null | undefined
+  raw: (Partial<FloatingWindowConfig> & { sizePreset?: string }) | null | undefined
 ): FloatingWindowConfig {
   const showTokens = raw?.showTokens ?? DEFAULT_FLOATING_CONFIG.showTokens;
   const showCost = raw?.showCost ?? DEFAULT_FLOATING_CONFIG.showCost;
@@ -48,13 +36,10 @@ export function normalizeFloatingConfig(
       ? raw.opacity
       : DEFAULT_FLOATING_CONFIG.opacity;
   const opacity = Math.min(1, Math.max(0.55, rawOpacity));
-  const sizePreset: FloatingSizePreset =
-    raw?.sizePreset === 'compact' ||
-    raw?.sizePreset === 'sm' ||
-    raw?.sizePreset === 'md' ||
-    raw?.sizePreset === 'lg'
-      ? raw.sizePreset
-      : 'md';
+  const compact =
+    typeof raw?.compact === 'boolean'
+      ? raw.compact
+      : raw?.sizePreset === 'compact';
 
   // Ensure at least one element remains visible
   const anyVisible = showTokens || showCost || showSpeed || showSession || showSubscriptions;
@@ -65,7 +50,7 @@ export function normalizeFloatingConfig(
     showSession,
     showSubscriptions,
     opacity,
-    sizePreset,
+    compact,
   };
 }
 
@@ -78,7 +63,7 @@ export function loadFloatingConfig(): FloatingWindowConfig {
     if (!raw) {
       return DEFAULT_FLOATING_CONFIG;
     }
-    const parsed = JSON.parse(raw) as Partial<FloatingWindowConfig>;
+    const parsed = JSON.parse(raw) as Partial<FloatingWindowConfig> & { sizePreset?: string };
     return normalizeFloatingConfig(parsed);
   } catch {
     return DEFAULT_FLOATING_CONFIG;
@@ -101,26 +86,29 @@ export function saveFloatingConfig(
   return next;
 }
 
-export function computeFloatingDimensions(cfg: FloatingWindowConfig): {
+export function computeFloatingDimensions(
+  cfg: FloatingWindowConfig,
+  currentWidth = 304
+): {
   width: number;
   height: number;
 } {
-  if (cfg.sizePreset === 'compact') {
-    return { width: 288, height: 52 };
+  const width = Math.min(640, Math.max(220, Math.round(currentWidth || 304)));
+  if (cfg.compact) {
+    return { width: Math.max(260, width), height: 52 };
   }
-  const baseWidth = cfg.sizePreset === 'sm' ? 268 : cfg.sizePreset === 'lg' ? 356 : 304;
   let height = 46; // Header bar + padding
   if (cfg.showTokens || cfg.showCost || cfg.showSpeed) {
-    height += cfg.sizePreset === 'sm' ? 54 : cfg.sizePreset === 'lg' ? 68 : 60;
+    height += 60;
   }
   if (cfg.showSession) {
-    height += cfg.sizePreset === 'sm' ? 44 : 50;
+    height += 50;
   }
   if (cfg.showSubscriptions) {
-    height += cfg.sizePreset === 'sm' ? 76 : cfg.sizePreset === 'lg' ? 98 : 86;
+    height += 86;
   }
   return {
-    width: baseWidth,
+    width,
     height: Math.max(96, height),
   };
 }

@@ -1,13 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ExternalLink, Maximize2, Minimize2, SlidersHorizontal, X } from 'lucide-react';
 import { AnimatedNumber } from '../components/AnimatedNumber';
 import { InlineProgressBar } from '../components/InlineProgressBar';
+import { LiveSpeedBadge } from '../components/LiveSpeedBadge';
 import {
   computeFloatingDimensions,
   useFloatingConfig,
-  type FloatingSizePreset,
   type FloatingWindowConfig,
 } from '../lib/floatingConfig';
 import {
@@ -30,13 +30,6 @@ export interface FloatingMonitorPageProps {
   livePulseSeq?: number;
 }
 
-const SIZE_PRESETS: ReadonlyArray<{ id: FloatingSizePreset; label: string }> = [
-  { id: 'compact', label: '胶囊' },
-  { id: 'sm', label: '小' },
-  { id: 'md', label: '标准' },
-  { id: 'lg', label: '大' },
-];
-
 const ELEMENT_TOGGLES: ReadonlyArray<{
   key: keyof Pick<
     FloatingWindowConfig,
@@ -57,9 +50,11 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
   const [recentDeltaTokens, setRecentDeltaTokens] = useState<number>(0);
   const [burstKey, setBurstKey] = useState(0);
   const prevTodayTokensRef = useRef<number | null>(null);
-  const nonCompactPresetRef = useRef<Exclude<FloatingSizePreset, 'compact'>>(
-    floatingConfig.sizePreset === 'compact' ? 'md' : floatingConfig.sizePreset
-  );
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [viewport, setViewport] = useState<{ width: number; height: number }>(() => ({
+    width: typeof window !== 'undefined' && window.innerWidth > 0 ? window.innerWidth : 304,
+    height: typeof window !== 'undefined' && window.innerHeight > 0 ? window.innerHeight : 248,
+  }));
 
   const {
     tzOffsetMinutes,
@@ -76,6 +71,26 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
     document.documentElement.dataset.floatingView = 'true';
     return () => {
       delete document.documentElement.dataset.floatingView;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const syncSize = () => {
+      const w = rootRef.current?.clientWidth || window.innerWidth || 304;
+      const h = rootRef.current?.clientHeight || window.innerHeight || 248;
+      setViewport((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }));
+    };
+    syncSize();
+    window.addEventListener('resize', syncSize);
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && rootRef.current) {
+      observer = new ResizeObserver(() => syncSize());
+      observer.observe(rootRef.current);
+    }
+    return () => {
+      window.removeEventListener('resize', syncSize);
+      observer?.disconnect();
     };
   }, []);
 
@@ -120,26 +135,16 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
     return () => clearTimeout(timer);
   }, [recentDeltaTokens, burstKey]);
 
-  const compact = floatingConfig.sizePreset === 'compact';
-  if (floatingConfig.sizePreset !== 'compact') {
-    nonCompactPresetRef.current = floatingConfig.sizePreset;
-  }
+  const isCompactViewport = floatingConfig.compact || viewport.height <= 68;
 
   const handleToggleCompact = () => {
-    const nextCompact = !compact;
-    const nextPreset: FloatingSizePreset = nextCompact ? 'compact' : nonCompactPresetRef.current;
+    const nextCompact = !floatingConfig.compact;
     setCustomizing(false);
-    updateFloatingConfig({ sizePreset: nextPreset });
-    void ipc.setFloatingWindowCompact(nextCompact);
-  };
-
-  const handleSelectSizePreset = (preset: FloatingSizePreset) => {
-    const nextCfg = updateFloatingConfig({ sizePreset: preset });
-    if (preset === 'compact') {
-      setCustomizing(false);
+    const nextCfg = updateFloatingConfig({ compact: nextCompact });
+    if (nextCompact) {
       void ipc.setFloatingWindowCompact(true);
     } else {
-      const dims = computeFloatingDimensions(nextCfg);
+      const dims = computeFloatingDimensions(nextCfg, viewport.width);
       void ipc.setFloatingWindowCompact(false, dims.width, dims.height);
     }
   };
@@ -151,8 +156,8 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
     >
   ) => {
     const nextCfg = updateFloatingConfig({ [key]: !floatingConfig[key] });
-    if (nextCfg.sizePreset !== 'compact') {
-      const dims = computeFloatingDimensions(nextCfg);
+    if (!nextCfg.compact) {
+      const dims = computeFloatingDimensions(nextCfg, viewport.width);
       void ipc.setFloatingWindowCompact(false, dims.width, dims.height);
     }
   };
@@ -179,9 +184,56 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
 
   const currency = prefs?.currency ?? summary?.currency ?? storeCurrency;
   const rate = prefs?.usd_to_cny_rate ?? summary?.usd_to_cny_rate ?? storeRate;
-  const activeSession = summary?.active_sessions?.[0] ?? null;
-  const topSubs = (summary?.subscriptions ?? []).slice(0, 2);
-  const effectiveTps = activeSession?.latest_output_tps ?? summary?.latest_output_tps ?? null;
+
+  // Dynamically determine how many sessions and subscription windows fit the current window height
+  const maxSessionRows =
+    viewport.height >= 320 ? 3 : viewport.height >= 255 ? 2 : 1;
+  const visibleSessions = (summary?.active_sessions ?? []).slice(0, maxSessionRows);
+
+  const flattenedSubWindows = useMemo(() => {
+    const list: Array<{
+      key: string;
+      providerId: string;
+      planName: string;
+      win: NonNullable<typeof summary>['subscriptions'][number]['windows'][number];
+    }> = [];
+    const subs = summary?.subscriptions ?? [];
+    // First pass: primary window of each enabled subscription
+    for (const sub of subs) {
+      const first = sub.windows[0];
+      if (first) {
+        list.push({
+          key: `${sub.plan.plan_id}-${first.window_id}`,
+          providerId: sub.plan.provider_id,
+          planName: sub.plan.plan_name,
+          win: first,
+        });
+      }
+    }
+    // Second pass: additional windows (e.g. 7d / 30d) when window is tall enough
+    for (const sub of subs) {
+      for (let i = 1; i < sub.windows.length; i += 1) {
+        const w = sub.windows[i];
+        list.push({
+          key: `${sub.plan.plan_id}-${w.window_id}`,
+          providerId: sub.plan.provider_id,
+          planName: sub.plan.plan_name,
+          win: w,
+        });
+      }
+    }
+    return list;
+  }, [summary]);
+
+  const maxSubRows =
+    viewport.height >= 330
+      ? 4
+      : viewport.height >= 265
+        ? 3
+        : viewport.height < 180
+          ? 1
+          : 2;
+  const visibleSubWindows = flattenedSubWindows.slice(0, maxSubRows);
 
   const isLight = resolvedTheme === 'light';
   const alpha = floatingConfig.opacity;
@@ -192,11 +244,12 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
     ? 'rgba(17, 24, 39, 0.14)'
     : 'rgba(255, 255, 255, 0.12)';
 
-  if (compact) {
+  if (isCompactViewport) {
     return (
       <div
+        ref={rootRef}
         data-theme={resolvedTheme}
-        className="h-screen w-screen flex items-center justify-between gap-2 px-3 select-none overflow-hidden"
+        className="h-screen w-screen flex items-center justify-between gap-2 px-3 select-none overflow-visible"
         style={{
           backgroundColor: surfaceBg,
           backdropFilter: 'blur(18px) saturate(140%)',
@@ -222,7 +275,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
               <AnimatedNumber value={todayTokens} formatter={formatTokens} />
             </span>
           )}
-          {floatingConfig.showCost && (
+          {floatingConfig.showCost && viewport.width >= 190 && (
             <span
               className="text-[11px] tabular-nums shrink-0"
               style={{ color: 'var(--text-secondary)' }}
@@ -233,13 +286,24 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
               />
             </span>
           )}
-          {floatingConfig.showSpeed && (
-            <span
-              className="text-[10.5px] tabular-nums shrink-0"
-              style={{ color: 'var(--accent-sky)' }}
+          {floatingConfig.showSpeed && viewport.width >= 235 && (
+            <LiveSpeedBadge
+              activeSessions={summary?.active_sessions}
+              liveModelSpeeds={summary?.live_model_speeds}
+              fallbackTps={summary?.latest_output_tps}
+              align="left"
+              placement="bottom"
+              className="shrink-0"
             >
-              {formatTps(effectiveTps)}
-            </span>
+              {(breakdown) => (
+                <span
+                  className="text-[10.5px] tabular-nums cursor-default"
+                  style={{ color: 'var(--accent-sky)' }}
+                >
+                  {formatTps(breakdown.primaryTps)}
+                </span>
+              )}
+            </LiveSpeedBadge>
           )}
           {recentDeltaTokens > 0 && (
             <span
@@ -277,17 +341,22 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
     );
   }
 
+  const isWide = viewport.width >= 350;
+  const isNarrow = viewport.width < 255;
+  const isShort = viewport.height < 185;
   const tokenFontClass =
-    floatingConfig.sizePreset === 'lg'
+    isWide && viewport.height >= 240
       ? 'text-[23px]'
-      : floatingConfig.sizePreset === 'sm'
+      : isNarrow || isShort
         ? 'text-[17px]'
         : 'text-[20px]';
+  const containerPaddingClass = isShort || isNarrow ? 'p-2.5' : 'p-3';
 
   return (
     <div
+      ref={rootRef}
       data-theme={resolvedTheme}
-      className="relative h-screen w-screen flex flex-col justify-between p-3 select-none overflow-hidden"
+      className={`relative h-screen w-screen flex flex-col justify-between ${containerPaddingClass} select-none overflow-hidden`}
       style={{
         backgroundColor: surfaceBg,
         backdropFilter: 'blur(18px) saturate(140%)',
@@ -321,7 +390,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
           <button
             type="button"
             aria-label="自定义悬浮窗"
-            title="自定义悬浮窗元素与尺寸"
+            title="自定义悬浮窗显示元素"
             data-active={customizing ? 'true' : undefined}
             onClick={() => setCustomizing((prev) => !prev)}
             className="btn-interactive p-1 rounded cursor-pointer"
@@ -367,35 +436,6 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
       {/* Inline Customization Panel (when toggled) */}
       {customizing ? (
         <div className="flex-1 py-2 space-y-2.5 overflow-y-auto text-[11px]">
-          <div className="space-y-1">
-            <div className="flex items-center justify-between" style={{ color: 'var(--text-muted)' }}>
-              <span>窗口尺寸</span>
-              <span>可拖拽右下角自由缩放</span>
-            </div>
-            <div className="grid grid-cols-4 gap-1">
-              {SIZE_PRESETS.map((preset) => {
-                const active = floatingConfig.sizePreset === preset.id;
-                return (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    data-active={active ? 'true' : undefined}
-                    onClick={() => handleSelectSizePreset(preset.id)}
-                    className="seg-pill py-0.5 rounded text-[10.5px] cursor-pointer"
-                    style={{
-                      border: active
-                        ? '1px solid var(--accent-primary)'
-                        : '1px solid var(--border-hairline)',
-                      color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    }}
-                  >
-                    {preset.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
           <div className="space-y-1">
             <div style={{ color: 'var(--text-muted)' }}>显示元素</div>
             <div className="flex flex-wrap gap-1">
@@ -483,14 +523,30 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
               </div>
 
               {floatingConfig.showSpeed && (
-                <div className="text-right shrink-0 tabular-nums">
-                  <div className="text-[12.5px] font-semibold" style={{ color: 'var(--accent-sky)' }}>
-                    {formatTps(effectiveTps)}
-                  </div>
-                  <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
-                    实时生成速率
-                  </div>
-                </div>
+                <LiveSpeedBadge
+                  activeSessions={summary?.active_sessions}
+                  liveModelSpeeds={summary?.live_model_speeds}
+                  fallbackTps={summary?.latest_output_tps}
+                  align="right"
+                  placement="bottom"
+                  className="text-right shrink-0 tabular-nums cursor-default"
+                >
+                  {(breakdown) => (
+                    <>
+                      <div
+                        className="text-[12.5px] font-semibold"
+                        style={{ color: 'var(--accent-sky)' }}
+                      >
+                        {formatTps(breakdown.primaryTps)}
+                      </div>
+                      <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                        {breakdown.isMultiModel
+                          ? `实时生成速率 (${breakdown.items.length} 模型均值)`
+                          : '实时生成速率'}
+                      </div>
+                    </>
+                  )}
+                </LiveSpeedBadge>
               )}
             </div>
           )}
@@ -498,30 +554,38 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
           {/* Active Session Strip */}
           {floatingConfig.showSession && (
             <div
-              className="py-1.5"
+              className="py-1.5 space-y-1"
               style={{ borderTop: '1px solid var(--border-hairline)' }}
             >
-              {activeSession ? (
-                <button
-                  type="button"
-                  onClick={() => void ipc.openMainWorkspace('overview', activeSession.provider_id)}
-                  className="row-interactive w-full text-left px-1 py-0.5 rounded flex items-center justify-between gap-2 cursor-pointer"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[11px] font-medium truncate">
-                      {formatSessionDisplayName(activeSession)}
-                    </div>
-                    <div className="text-[10px] truncate" style={{ color: 'var(--text-muted)' }}>
-                      {providerDisplayName(activeSession.provider_id)} · {activeSession.model_id}
-                    </div>
-                  </div>
-                  <span
-                    className="text-[10.5px] tabular-nums shrink-0"
-                    style={{ color: 'var(--text-secondary)' }}
+              {visibleSessions.length > 0 ? (
+                visibleSessions.map((sess) => (
+                  <button
+                    key={`${sess.provider_id}-${sess.session_key}`}
+                    type="button"
+                    onClick={() => void ipc.openMainWorkspace('overview', sess.provider_id)}
+                    className="row-interactive w-full text-left px-1 py-0.5 rounded flex items-center justify-between gap-2 cursor-pointer"
                   >
-                    {formatTokens(activeSession.total_tokens)}
-                  </span>
-                </button>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[11px] font-medium truncate">
+                        {formatSessionDisplayName(sess)}
+                      </div>
+                      {!isShort && (
+                        <div
+                          className="text-[10px] truncate"
+                          style={{ color: 'var(--text-muted)' }}
+                        >
+                          {providerDisplayName(sess.provider_id)} · {sess.model_id}
+                        </div>
+                      )}
+                    </div>
+                    <span
+                      className="text-[10.5px] tabular-nums shrink-0"
+                      style={{ color: 'var(--text-secondary)' }}
+                    >
+                      {formatTokens(sess.total_tokens)}
+                    </span>
+                  </button>
+                ))
               ) : (
                 <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
                   15 分钟内暂无活跃会话
@@ -530,37 +594,33 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
             </div>
           )}
 
-          {/* Top Subscription Windows */}
+          {/* Subscription Windows */}
           {floatingConfig.showSubscriptions && (
             <div
               className="pt-1.5 space-y-1.5"
               style={{ borderTop: '1px solid var(--border-hairline)' }}
             >
-              {topSubs.length > 0 ? (
-                topSubs.map((sub) => {
-                  const win = sub.windows[0];
-                  if (!win) return null;
-                  return (
-                    <div key={sub.plan.plan_id} className="space-y-0.5">
-                      <div className="flex items-center justify-between text-[10.5px] tabular-nums">
-                        <span
-                          className="truncate max-w-[165px]"
-                          style={{ color: 'var(--text-secondary)' }}
-                        >
-                          {providerDisplayName(sub.plan.provider_id)} · {win.label}
-                        </span>
-                        <span style={{ color: 'var(--text-primary)' }}>
-                          {win.used_percent.toFixed(0)}% · {formatCountdown(win.resets_in_seconds)}
-                        </span>
-                      </div>
-                      <InlineProgressBar
-                        percent={win.used_percent}
-                        alertLevel={win.alert_level}
-                        heightPx={3}
-                      />
+              {visibleSubWindows.length > 0 ? (
+                visibleSubWindows.map(({ key, providerId, win }) => (
+                  <div key={key} className="space-y-0.5">
+                    <div className="flex items-center justify-between text-[10.5px] tabular-nums">
+                      <span
+                        className="truncate max-w-[65%]"
+                        style={{ color: 'var(--text-secondary)' }}
+                      >
+                        {providerDisplayName(providerId)} · {win.label}
+                      </span>
+                      <span style={{ color: 'var(--text-primary)' }}>
+                        {win.used_percent.toFixed(0)}% · {formatCountdown(win.resets_in_seconds)}
+                      </span>
                     </div>
-                  );
-                })
+                    <InlineProgressBar
+                      percent={win.used_percent}
+                      alertLevel={win.alert_level}
+                      heightPx={3}
+                    />
+                  </div>
+                ))
               ) : (
                 <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
                   暂无启用订阅配额

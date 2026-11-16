@@ -93,6 +93,7 @@ payload = {
     "method": "app-store-connect",
     "signingStyle": "manual",
     "teamID": team_id,
+    "manageAppVersionAndBuildNumber": False,
     "uploadSymbols": True,
     "stripSwiftSymbols": True,
     "provisioningProfiles": {
@@ -103,6 +104,18 @@ payload = {
 with open(out_path, "wb") as fh:
     plistlib.dump(payload, fh)
 PY
+
+# Xcode 26 discovers profiles by UUID in the per-user Xcode directory.
+# Both profiles were decoded and identity-checked above, on an ephemeral agent.
+PROFILE_DIR="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+mkdir -p "$PROFILE_DIR"
+APP_PROFILE_UUID="$(node -p 'JSON.parse(process.argv[1]).app.uuid' "$PROFILES_JSON")"
+WIDGETS_PROFILE_UUID="$(node -p 'JSON.parse(process.argv[1]).widgets.uuid' "$PROFILES_JSON")"
+for uuid in "$APP_PROFILE_UUID" "$WIDGETS_PROFILE_UUID"; do
+  [[ "$uuid" =~ ^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$ ]] || exit 1
+done
+install -m 600 "$APP_PROFILE" "$PROFILE_DIR/$APP_PROFILE_UUID.mobileprovision"
+install -m 600 "$WIDGETS_PROFILE" "$PROFILE_DIR/$WIDGETS_PROFILE_UUID.mobileprovision"
 
 KEYCHAIN_AUTH_ARGS=(--p12-password-env APPLE_P12_PASSWORD)
 if [[ -n "$P12_PASSWORD_FILE" ]]; then
@@ -116,7 +129,6 @@ echo "[archive-ios] Applying manual profiles & archiving inside ephemeral keycha
   --cert-sha256 "$CERT_SHA256" \
   -- bash -c '
     set -euo pipefail
-    xcode-project use-profiles --project "$1" --profile "$2" --profile "$3"
     xcodebuild archive \
       -project "$1" \
       -scheme TokenTracker \
@@ -125,6 +137,8 @@ echo "[archive-ios] Applying manual profiles & archiving inside ephemeral keycha
       -archivePath "$4" \
       DEVELOPMENT_TEAM="$5" \
       CODE_SIGN_STYLE=Manual \
+      CODE_SIGN_IDENTITY="Apple Distribution" \
+      TT_APP_PROFILE="$2" TT_WIDGETS_PROFILE="$3" \
       CURRENT_PROJECT_VERSION="$6" \
       MARKETING_VERSION="$7"
     xcodebuild -exportArchive \
@@ -133,8 +147,8 @@ echo "[archive-ios] Applying manual profiles & archiving inside ephemeral keycha
       -exportOptionsPlist "$9"
   ' _ \
     "$ROOT_DIR/apps/ios/TokenTracker.xcodeproj" \
-    "$APP_PROFILE" \
-    "$WIDGETS_PROFILE" \
+    "$APP_PROFILE_UUID" \
+    "$WIDGETS_PROFILE_UUID" \
     "$ARCHIVE_PATH" \
     "$TEAM_ID" \
     "$BUILD_NUMBER" \

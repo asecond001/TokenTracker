@@ -4,6 +4,7 @@ import type { EChartsOption } from 'echarts';
 import { AnimatedNumber } from '../components/AnimatedNumber';
 import { EChartBox } from '../components/EChartBox';
 import { InlineProgressBar } from '../components/InlineProgressBar';
+import { LiveSpeedBadge } from '../components/LiveSpeedBadge';
 import { TimeRangeControl } from '../components/TimeRangeControl';
 import { useChartTheme } from '../lib/chartTheme';
 import {
@@ -433,6 +434,25 @@ export function OverviewPage() {
                 </span>
               )}
             </div>
+
+            <LiveSpeedBadge
+              activeSessions={data?.active_sessions}
+              liveModelSpeeds={data?.live_model_speeds}
+              fallbackTps={data?.latest_output_tps}
+              align="right"
+              placement="bottom"
+              className="tabular-nums cursor-default"
+            >
+              {(breakdown) => (
+                <span
+                  className="text-[11.5px] font-medium"
+                  style={{ color: 'var(--accent-sky)' }}
+                >
+                  实时速率 {formatTps(breakdown.primaryTps)}
+                  {breakdown.isMultiModel ? ` (${breakdown.items.length} 模型均值)` : ''}
+                </span>
+              )}
+            </LiveSpeedBadge>
           </div>
 
           {liveSessions.length > 0 ? (
@@ -603,7 +623,25 @@ export function OverviewPage() {
             {showDeltas && <DeltaBadge pct={data?.tps_delta_pct ?? null} />}
           </div>
           <div className="mt-1 text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-            当前 {formatTps(data?.latest_output_tps)} · 峰值 {formatTps(data?.peak_output_tps ?? 0)}
+            <LiveSpeedBadge
+              activeSessions={data?.active_sessions}
+              liveModelSpeeds={data?.live_model_speeds}
+              fallbackTps={data?.latest_output_tps}
+              align="right"
+              placement="bottom"
+              className="cursor-default"
+            >
+              {(breakdown) => (
+                <span>
+                  当前{' '}
+                  <span style={{ color: 'var(--accent-sky)' }}>
+                    {formatTps(breakdown.primaryTps)}
+                  </span>
+                  {breakdown.isMultiModel ? ` (${breakdown.items.length} 模型均值)` : ''}
+                </span>
+              )}
+            </LiveSpeedBadge>
+            {' · '}峰值 {formatTps(data?.peak_output_tps ?? 0)}
           </div>
         </div>
       </section>

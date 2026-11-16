@@ -9,7 +9,7 @@ use crate::error::CoreResult;
 use crate::pricing::default_pricing_catalog;
 use crate::storage::repository::{rebuild_rollup_from_events, DAY_MS, HOUR_MS};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 7;
+pub const CURRENT_SCHEMA_VERSION: i64 = 8;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -212,6 +212,10 @@ pub fn run_migrations(conn: &mut Connection) -> CoreResult<()> {
 
     if current_version < 7 {
         migrate_v6_to_v7(conn, now_ms)?;
+    }
+
+    if current_version < 8 {
+        migrate_v7_to_v8(conn, now_ms)?;
     }
 
     seed_defaults(conn, now_ms)?;
@@ -676,6 +680,86 @@ fn migrate_v6_to_v7(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     tx.execute(
         "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
         params![7i64, now_ms],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v7_to_v8(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+
+    // 1. Upgrade untouched Google AI Ultra ($249.99) auto plans to Google AI Ultra 20x ($199.99)
+    tx.execute(
+        r#"
+        UPDATE subscription_plans
+        SET plan_name = 'Google AI Ultra 20x',
+            monthly_fee_micro_usd = 199990000,
+            updated_at_ms = ?1
+        WHERE provider_id = 'antigravity'
+          AND plan_name = 'Google AI Ultra'
+          AND monthly_fee_micro_usd = 249990000
+          AND user_customized = 0
+        "#,
+        params![now_ms],
+    )?;
+
+    // 2. Ensure all existing Kimi Code subscription plans include the 30d monthly limit window
+    let kimi_rows: Vec<(String, String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT plan_id, plan_name, windows_json FROM subscription_plans WHERE provider_id = 'kimi_code'",
+        )?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+
+    for (plan_id, plan_name, windows_json) in kimi_rows {
+        let Ok(mut windows) = serde_json::from_str::<Vec<SubscriptionWindowRule>>(&windows_json)
+        else {
+            continue;
+        };
+        if !windows.iter().any(|w| w.window_id == "30d") {
+            let lower_name = plan_name.to_ascii_lowercase();
+            let monthly_limit = if lower_name.contains("vivace") || lower_name.contains("ultra") {
+                2_800_000_000
+            } else if lower_name.contains("allegro") || lower_name.contains("max") {
+                1_200_000_000
+            } else if lower_name.contains("allegretto") || lower_name.contains("pro") {
+                400_000_000
+            } else {
+                120_000_000
+            };
+            windows.push(SubscriptionWindowRule {
+                window_id: "30d".to_string(),
+                label: "30d 月度限额".to_string(),
+                duration_hours: 720,
+                rolling: false,
+                unit: QuotaUnit::MicroUsd,
+                limit_value: monthly_limit,
+                warning_percent: 80,
+                critical_percent: 95,
+            });
+            windows.sort_by_key(|w| w.duration_hours);
+            let next_json = serde_json::to_string(&windows)?;
+            tx.execute(
+                "UPDATE subscription_plans SET windows_json = ?2, updated_at_ms = ?3 WHERE plan_id = ?1",
+                params![plan_id, next_json, now_ms],
+            )?;
+        }
+    }
+
+    for pid in [provider_ids::ANTIGRAVITY, provider_ids::KIMI_CODE] {
+        crate::storage::repository::sync_auto_subscription_for_provider_conn(&tx, pid, now_ms)?;
+    }
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![8i64, now_ms],
     )?;
     tx.commit()?;
     Ok(())

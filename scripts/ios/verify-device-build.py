@@ -104,7 +104,7 @@ def _verify_single_bundle(
                 f"expected {expected_cert_sha256.lower()}, got {actual_cert_sha}"
             )
 
-    ent_proc = runner(["codesign", "-d", "--entitlements", "-", "--xml", str(bundle_dir)], check=True, capture_output=True)
+    ent_proc = runner(["codesign", "-d", "--entitlements", ":-", str(bundle_dir)], check=True, capture_output=True)
     entitlements = _extract_entitlements_plist((ent_proc.stdout or "") + "\n" + (ent_proc.stderr or ""))
 
     if entitlements.get("get-task-allow") is True:
@@ -174,8 +174,12 @@ def verify_signing_artifacts(
     )
 
     with tempfile.TemporaryDirectory(prefix="tt-ipa-verify-") as tmpdir:
-        with zipfile.ZipFile(ipa_path, "r") as zf:
-            zf.extractall(tmpdir)
+        if sys.platform == "darwin":
+            # Preserve executable modes and symlinks for codesign --strict.
+            subprocess.run(["ditto", "-x", "-k", str(ipa_path), tmpdir], check=True)
+        else:
+            with zipfile.ZipFile(ipa_path, "r") as zf:
+                zf.extractall(tmpdir)
         ipa_app = Path(tmpdir) / "Payload" / "TokenTracker.app"
         ipa_widgets = ipa_app / "PlugIns" / "TokenTrackerWidgets.appex"
         ipa_app_info = _verify_single_bundle(

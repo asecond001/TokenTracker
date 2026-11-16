@@ -438,7 +438,7 @@ export function DataSourcesPage() {
         <div className="flex items-center gap-2">
           <ShieldCheck className="w-4 h-4" style={{ color: 'var(--accent-emerald)' }} />
           <h1 className="text-[16px] font-semibold tracking-tight">
-            数据源与合规采集
+            数据源与合规
           </h1>
         </div>
 

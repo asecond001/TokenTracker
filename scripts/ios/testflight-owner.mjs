@@ -2,9 +2,10 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { readApiIdentifiers } from './testflight-handoff.mjs';
+import { checkCandidateForAction, readApiIdentifiers } from './testflight-handoff.mjs';
 
 export function base64UrlEncode(input) {
   const buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input), 'utf8');
@@ -49,11 +50,7 @@ export function selectMatchingBuild({ builds, marketingVersion, buildNumber, inc
       continue;
     }
     const relId = b?.relationships?.preReleaseVersion?.data?.id;
-    if (relId && preReleaseMap.has(relId) && marketingVersion) {
-      if (preReleaseMap.get(relId) !== String(marketingVersion)) {
-        continue;
-      }
-    }
+    if (!relId || preReleaseMap.get(relId) !== String(marketingVersion)) continue;
     return {
       id: b.id,
       version,
@@ -146,18 +143,18 @@ async function assignBuildToGroup({ appId, buildId, groupName, jwt, baseUrl }) {
     jwt
   });
   const group = groupsRes?.data?.[0];
-  if (!group?.id) {
-    throw new Error(`TestFlight betaGroup named "${groupName}" not found for app ${appId}`);
+  if (!group?.id || group.attributes?.isInternalGroup !== true || group.attributes?.name !== groupName) {
+    throw new Error(`Internal TestFlight group named "${groupName}" not found for app ${appId}`);
   }
-  await ascRequest({
-    url: `${baseUrl}/betaGroups/${encodeURIComponent(group.id)}/relationships/builds`,
-    method: 'POST',
-    jwt,
-    body: {
-      data: [{ type: 'builds', id: buildId }]
-    }
-  });
-  return { groupId: group.id, groupName };
+  const url = `${baseUrl}/betaGroups/${encodeURIComponent(group.id)}/relationships/builds`;
+  const includesBuild = async () => (await ascRequest({ url: url + '?limit=200', jwt }))
+    ?.data?.some(item => item.type === 'builds' && item.id === buildId);
+  if (!await includesBuild()) {
+    await ascRequest({ url, method: 'POST', jwt, body: { data: [{ type: 'builds', id: buildId }] } });
+    if (!await includesBuild()) throw new Error('Apple did not confirm the build in the internal group');
+  }
+  const detail = await ascRequest({ url: `${baseUrl}/builds/${encodeURIComponent(buildId)}/buildBetaDetail`, jwt });
+  return { groupId: group.id, groupName, groupBuildVerified: true, internalBuildState: detail?.data?.attributes?.internalBuildState };
 }
 
 function parseArgs(argv) {
@@ -188,6 +185,8 @@ if (path.resolve(process.argv[1] || '') === path.resolve(fileURLToPath(import.me
     throw new Error(`Unsupported testflight-owner mode: ${args.mode}`);
   }
   const candidate = JSON.parse(fs.readFileSync(args.candidate, 'utf8'));
+  checkCandidateForAction({ candidate, action: args.mode, queuedCommit: process.env.TT_RELEASE_COMMIT,
+    headCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() });
   const ids = args.apiIdentifiers
     ? readApiIdentifiers(JSON.parse(fs.readFileSync(args.apiIdentifiers, 'utf8')))
     : null;

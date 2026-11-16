@@ -63,7 +63,7 @@ export PATH="$LOCAL_BIN:$PATH"
 
 XCODEGEN_OK=0
 if command -v xcodegen >/dev/null 2>&1; then
-  CURRENT_XG="$(xcodegen --version || true)"
+  CURRENT_XG="$(xcodegen version || true)"
   if [[ "$CURRENT_XG" == *"$XCODEGEN_VER"* ]]; then
     XCODEGEN_OK=1
   fi
@@ -73,18 +73,12 @@ if [[ "$XCODEGEN_OK" -eq 0 ]]; then
   echo "[azure-setup] Installing pinned XcodeGen $XCODEGEN_VER"
   TMP_XG="$(mktemp -d)"
   curl -fsSL "$XCODEGEN_URL" -o "$TMP_XG/xcodegen.zip"
-  unzip -q "$TMP_XG/xcodegen.zip" -d "$TMP_XG/unzipped"
-  XG_BIN="$(find "$TMP_XG/unzipped" -type f -name xcodegen | head -n 1)"
-  if [[ -z "$XG_BIN" ]]; then
-    echo "Failed to locate xcodegen binary inside downloaded archive" >&2
-    rm -rf "$TMP_XG"
-    exit 1
-  fi
-  cp "$XG_BIN" "$LOCAL_BIN/xcodegen"
-  chmod +x "$LOCAL_BIN/xcodegen"
+  echo "a2e905fb68446e9bb4008cdfe2e13e3f176d0cbcca828b71770f8e53fca91b73  $TMP_XG/xcodegen.zip" | shasum -a 256 -c -
+  unzip -qo "$TMP_XG/xcodegen.zip" -d "$ROOT_DIR/.tools"
+  ln -sf "$ROOT_DIR/.tools/xcodegen/bin/xcodegen" "$LOCAL_BIN/xcodegen"
   rm -rf "$TMP_XG"
 fi
-echo "[azure-setup] XcodeGen: $("$LOCAL_BIN/xcodegen" --version 2>/dev/null || xcodegen --version)"
+xcodegen version
 
 rustup target add "$RUST_TARGET_DEVICE" "$RUST_TARGET_SIM_INTEL" "$RUST_TARGET_SIM_ARM64"
 cargo --version

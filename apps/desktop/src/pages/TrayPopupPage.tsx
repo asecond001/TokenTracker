@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ExternalLink, PictureInPicture2, RefreshCw } from 'lucide-react';
 import { InlineProgressBar } from '../components/InlineProgressBar';
+import { LiveSpeedBadge } from '../components/LiveSpeedBadge';
 import {
   formatCost,
   formatCountdown,
@@ -85,12 +86,23 @@ export function TrayPopupPage() {
             <span className="text-[12.5px] font-semibold">TokenTracker 实时摘要</span>
           </div>
           <div className="flex items-center gap-2">
-            <span
-              className="text-[11px] font-medium tabular-nums"
-              style={{ color: 'var(--accent-sky)' }}
+            <LiveSpeedBadge
+              activeSessions={summary?.active_sessions}
+              liveModelSpeeds={summary?.live_model_speeds}
+              fallbackTps={summary?.latest_output_tps}
+              align="right"
+              placement="bottom"
+              className="cursor-default"
             >
-              {formatTps(summary?.latest_output_tps)}
-            </span>
+              {(breakdown) => (
+                <span
+                  className="text-[11px] font-medium tabular-nums"
+                  style={{ color: 'var(--accent-sky)' }}
+                >
+                  {formatTps(breakdown.primaryTps)}
+                </span>
+              )}
+            </LiveSpeedBadge>
             <button
               type="button"
               aria-label="切换桌面悬浮窗"

@@ -65,6 +65,10 @@ test('testflight-handoff enforces sourceCommit immutability and UNSET rejection'
     teamId: 'TEAM123456',
     certificateSha256: certSha
   };
+  assert.equal(checkCandidateForAction({
+    candidate: { ...pinnedCandidate, sourceCommit: 'UNSET' }, action: 'upload', headCommit: commit, queuedCommit: commit
+  }).sourceCommit, commit);
+  assert.throws(() => checkCandidateForAction({ candidate: pinnedCandidate, action: 'upload', headCommit: commit, queuedCommit: 'c'.repeat(40) }));
   assert.equal(
     checkCandidateForAction({ candidate: pinnedCandidate, action: 'upload', headCommit: commit }).sourceCommit,
     commit
@@ -164,6 +168,10 @@ test('testflight-owner signs verifiable ES256 ASC JWT and enforces VALID process
     buildNumber: '7'
   });
   assert.equal(selected.id, 'b-1');
+  assert.throws(() => selectMatchingBuild({
+    builds: [{ id: 'other', attributes: { version: '7', processingState: 'VALID' } }],
+    marketingVersion: '0.3.0', buildNumber: '7'
+  }));
   assert.equal(assertBuildValidForDelivery(selected), true);
   assert.throws(() => assertBuildValidForDelivery({ id: 'b-2', processingState: 'PROCESSING' }));
 });

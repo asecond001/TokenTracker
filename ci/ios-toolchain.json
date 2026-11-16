@@ -9,7 +9,7 @@
   },
   "iosSdk": "26.2",
   "deploymentTarget": "18.0",
-  "swiftVersion": "5.10",
+  "swiftVersion": "5.0",
   "nodeVersion": "24.14.0",
   "xcodegen": {
     "version": "2.44.1",

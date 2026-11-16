@@ -2,6 +2,10 @@ trigger: none
 pr: none
 
 parameters:
+  - name: sourceCommit
+    displayName: Reviewed full Git SHA (required for upload, inspect and deliver)
+    type: string
+    default: UNSET
   - name: action
     displayName: Release pipeline action
     type: string
@@ -17,6 +21,10 @@ parameters:
     default: true
 
 variables:
+  - name: CARGO_HOME
+    value: $(Pipeline.Workspace)/cargo
+  - name: TT_RELEASE_COMMIT
+    value: ${{ parameters.sourceCommit }}
   - name: CARGO_TERM_COLOR
     value: always
   - name: RUST_BACKTRACE
@@ -51,7 +59,7 @@ stages:
                 import { checkCandidateForAction } from "./scripts/ios/testflight-handoff.mjs";
                 const candidate = JSON.parse(fs.readFileSync("ci/testflight-candidate.json", "utf8"));
                 const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-                const result = checkCandidateForAction({ candidate, action: "${{ parameters.action }}", headCommit: head });
+                const result = checkCandidateForAction({ candidate, action: "${{ parameters.action }}", headCommit: head, queuedCommit: process.env.TT_RELEASE_COMMIT });
                 console.log(JSON.stringify(result, null, 2));
               '
             displayName: Validate iOS project & testflight-candidate.json contract
@@ -114,7 +122,7 @@ stages:
     condition: and(succeeded(), in('${{ parameters.action }}', 'build', 'upload'), or(eq('${{ parameters.action }}', 'upload'), eq('${{ parameters.runNativeTests }}', true)))
     jobs:
       - job: SimulatorValidation
-        timeoutInMinutes: 45
+        timeoutInMinutes: 60
         pool:
           vmImage: macOS-26
         steps:
@@ -130,15 +138,12 @@ stages:
               artifact: apple-wheelhouse
               path: $(WHEELHOUSE_DIR)
           - task: Cache@2
-            displayName: Restore Cargo registry & build cache
+            displayName: Restore Cargo registry
             inputs:
-              key: 'cargo-ios-v1 | "$(Agent.OS)" | Cargo.lock'
+              key: 'cargo-registry-v2 | "$(Agent.OS)" | Cargo.lock'
               restoreKeys: |
-                cargo-ios-v1 | "$(Agent.OS)"
-              path: |
-                $(HOME)/.cargo/registry
-                $(HOME)/.cargo/git
-                $(Build.SourcesDirectory)/target
+                cargo-registry-v2 | "$(Agent.OS)"
+              path: $(CARGO_HOME)/registry
           - bash: bash scripts/ios/azure-setup.sh --with-apple-tools --wheelhouse-dir "$(WHEELHOUSE_DIR)"
             displayName: Setup toolchain & install offline wheelhouse
           - bash: |
@@ -189,7 +194,7 @@ stages:
       )
     jobs:
       - job: ArchiveAndVerify
-        timeoutInMinutes: 30
+        timeoutInMinutes: 60
         pool:
           vmImage: macOS-26
         steps:
@@ -225,15 +230,12 @@ stages:
             inputs:
               secureFile: tokentracker_widgets.mobileprovision
           - task: Cache@2
-            displayName: Restore Cargo registry & build cache
+            displayName: Restore Cargo registry
             inputs:
-              key: 'cargo-ios-v1 | "$(Agent.OS)" | Cargo.lock'
+              key: 'cargo-registry-v2 | "$(Agent.OS)" | Cargo.lock'
               restoreKeys: |
-                cargo-ios-v1 | "$(Agent.OS)"
-              path: |
-                $(HOME)/.cargo/registry
-                $(HOME)/.cargo/git
-                $(Build.SourcesDirectory)/target
+                cargo-registry-v2 | "$(Agent.OS)"
+              path: $(CARGO_HOME)/registry
           - task: Cache@2
             displayName: Cache release device+sim XCFramework
             inputs:

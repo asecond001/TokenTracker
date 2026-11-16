@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const SHA_40_RE = /^[0-9a-f]{40}$/i;
 const SHA_64_RE = /^[0-9a-f]{64}$/i;
 
-export function checkCandidateForAction({ candidate, action, headCommit }) {
+export function checkCandidateForAction({ candidate, action, headCommit, queuedCommit }) {
   if (!candidate || typeof candidate !== 'object') {
     throw new Error('testflight-candidate.json payload is invalid');
   }
@@ -32,17 +32,17 @@ export function checkCandidateForAction({ candidate, action, headCommit }) {
     throw new Error(`Unsupported TestFlight action: ${action}`);
   }
 
-  const sourceCommit = String(candidate.sourceCommit || '').trim();
+  const manifestCommit = String(candidate.sourceCommit || '').trim();
+  const sourceCommit = queuedCommit && queuedCommit !== 'UNSET' ? queuedCommit : manifestCommit;
+  if (manifestCommit && manifestCommit !== 'UNSET' && manifestCommit.toLowerCase() !== sourceCommit.toLowerCase()) {
+    throw new Error('Queued commit conflicts with the candidate sourceCommit');
+  }
   if (!sourceCommit || sourceCommit === 'UNSET' || !SHA_40_RE.test(sourceCommit)) {
     throw new Error('testflight-candidate.json sourceCommit must be a pinned 40-char git commit SHA before upload/deliver');
   }
-  if (headCommit) {
-    const normalizedHead = String(headCommit).trim();
-    if (!SHA_40_RE.test(normalizedHead) || normalizedHead.toLowerCase() !== sourceCommit.toLowerCase()) {
-      throw new Error(
-        `Source commit immutability check failed: HEAD (${normalizedHead}) != candidate.sourceCommit (${sourceCommit})`
-      );
-    }
+  const normalizedHead = String(headCommit || '').trim();
+  if (!SHA_40_RE.test(normalizedHead) || normalizedHead.toLowerCase() !== sourceCommit.toLowerCase()) {
+    throw new Error(`Source commit immutability check failed: HEAD (${normalizedHead}) != release commit (${sourceCommit})`);
   }
 
   const teamId = String(candidate.teamId || '').trim();
@@ -160,6 +160,7 @@ if (path.resolve(process.argv[1] || '') === path.resolve(fileURLToPath(import.me
   const candidateCheck = checkCandidateForAction({
     candidate,
     action: args.action,
+    queuedCommit: process.env.TT_RELEASE_COMMIT,
     headCommit
   });
 

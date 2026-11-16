@@ -2362,7 +2362,7 @@ fn infer_window_rule_from_observed(
         Some(m) if (9_600..=10_560).contains(&m) => {
             ("7d".to_string(), "7d 周额度".to_string(), 168, true)
         }
-        Some(m) if m >= 40_000 => ("30d".to_string(), "30d 月额度".to_string(), 720, false),
+        Some(m) if m >= 40_000 => ("30d".to_string(), "30d 月度限额".to_string(), 720, false),
         Some(m) => {
             let hours = (m / 60).max(1);
             (
@@ -2377,6 +2377,9 @@ fn infer_window_rule_from_observed(
         }
         None if name.contains("secondary") || name.contains("7d") || name.contains("week") => {
             ("7d".to_string(), "7d 周额度".to_string(), 168, true)
+        }
+        None if name.contains("30d") || name.contains("month") => {
+            ("30d".to_string(), "30d 月度限额".to_string(), 720, false)
         }
         None if name.contains("daily") || name.contains("24h") || name.contains("day") => {
             ("24h".to_string(), "24h 日额度".to_string(), 24, false)
@@ -2402,22 +2405,27 @@ fn infer_window_rule_from_observed(
     if let Some(tpl_win) = template_windows.iter().find(|w| w.window_id == window_id) {
         let mut cloned = tpl_win.clone();
         if provider_id == provider_ids::KIMI_CODE && balance_currency == Some("QUOTA") {
-            cloned.label = if window_id == "5h" {
-                "5h 请求/频次窗口".to_string()
-            } else {
-                "7d 周额度窗口".to_string()
+            cloned.label = match window_id.as_str() {
+                "5h" => "5h 请求/频次窗口".to_string(),
+                "7d" => "7d 周额度窗口".to_string(),
+                "30d" => "30d 月度限额".to_string(),
+                _ => cloned.label,
             };
         }
         return cloned;
     }
 
     SubscriptionWindowRule {
-        window_id,
+        window_id: window_id.clone(),
         label: default_label,
         duration_hours,
         rolling,
         unit: QuotaUnit::MicroUsd,
-        limit_value: 20_000_000,
+        limit_value: if window_id == "30d" {
+            120_000_000
+        } else {
+            20_000_000
+        },
         warning_percent: 80,
         critical_percent: 95,
     }
@@ -2565,11 +2573,56 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         tpl.provider_id == trimmed
             && match trimmed {
                 provider_ids::CODEX if hint_lower.contains("pro") => tpl.template_id == "codex_pro",
+                provider_ids::CODEX if hint_lower.contains("team") => {
+                    tpl.template_id == "codex_team"
+                }
                 provider_ids::CODEX => tpl.template_id == "codex_plus",
+                provider_ids::ANTIGRAVITY
+                    if hint_lower.contains("ultra")
+                        && (hint_lower.contains("5x") || hint_lower.contains("99")) =>
+                {
+                    tpl.template_id == "google_ai_ultra_5x"
+                }
                 provider_ids::ANTIGRAVITY if hint_lower.contains("ultra") => {
                     tpl.template_id == "google_ai_ultra"
                 }
+                provider_ids::ANTIGRAVITY
+                    if hint_lower.contains("enterprise") || hint_lower.contains("business") =>
+                {
+                    tpl.template_id == "gemini_enterprise"
+                }
+                provider_ids::ANTIGRAVITY if hint_lower.contains("plus") => {
+                    tpl.template_id == "google_ai_plus"
+                }
+                provider_ids::ANTIGRAVITY if hint_lower.contains("free") => {
+                    tpl.template_id == "google_ai_free"
+                }
                 provider_ids::ANTIGRAVITY => tpl.template_id == "google_ai_pro",
+                provider_ids::KIMI_CODE
+                    if matches!(
+                        hint_lower.as_str(),
+                        "level_max" | "vivace" | "ultra"
+                    ) =>
+                {
+                    tpl.template_id == "kimi_code_ultra"
+                }
+                provider_ids::KIMI_CODE
+                    if matches!(
+                        hint_lower.as_str(),
+                        "level_advanced" | "allegro" | "max"
+                    ) =>
+                {
+                    tpl.template_id == "kimi_code_max"
+                }
+                provider_ids::KIMI_CODE
+                    if matches!(
+                        hint_lower.as_str(),
+                        "level_basic" | "basic" | "moderato" | "plus"
+                    ) =>
+                {
+                    tpl.template_id == "kimi_code_plus"
+                }
+                provider_ids::KIMI_CODE => tpl.template_id == "kimi_code_allegretto",
                 _ => true,
             }
     });
@@ -2592,40 +2645,35 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         );
         rules_by_id.entry(rule.window_id.clone()).or_insert(rule);
     }
+
+    // Ensure Kimi Code plans always include the 30d monthly limit window alongside 5h/7d windows.
+    if trimmed == provider_ids::KIMI_CODE && !rules_by_id.is_empty() {
+        if let Some(monthly_rule) = tpl_windows.iter().find(|w| w.window_id == "30d") {
+            rules_by_id
+                .entry("30d".to_string())
+                .or_insert_with(|| monthly_rule.clone());
+        } else {
+            rules_by_id
+                .entry("30d".to_string())
+                .or_insert(SubscriptionWindowRule {
+                    window_id: "30d".to_string(),
+                    label: "30d 月度限额".to_string(),
+                    duration_hours: 720,
+                    rolling: false,
+                    unit: QuotaUnit::MicroUsd,
+                    limit_value: 120_000_000,
+                    warning_percent: 80,
+                    critical_percent: 95,
+                });
+        }
+    }
+
     let mut windows: Vec<SubscriptionWindowRule> = if rules_by_id.is_empty() {
-        if trimmed == provider_ids::ANTIGRAVITY {
-            if hint_lower.contains("free") {
-                tpl_windows
-                    .iter()
-                    .filter(|w| w.window_id == "7d")
-                    .cloned()
-                    .collect()
-            } else if hint_lower.contains("ultra") && (hint_lower.contains("5x") || hint_lower.contains("99")) {
-                vec![
-                    SubscriptionWindowRule {
-                        window_id: "5h".to_string(),
-                        label: "5h 滚动窗口".to_string(),
-                        duration_hours: 5,
-                        rolling: true,
-                        unit: QuotaUnit::MicroUsd,
-                        limit_value: 100_000_000,
-                        warning_percent: 80,
-                        critical_percent: 95,
-                    },
-                    SubscriptionWindowRule {
-                        window_id: "7d".to_string(),
-                        label: "7d 周额度".to_string(),
-                        duration_hours: 168,
-                        rolling: true,
-                        unit: QuotaUnit::MicroUsd,
-                        limit_value: 500_000_000,
-                        warning_percent: 80,
-                        critical_percent: 95,
-                    },
-                ]
-            } else {
-                tpl_windows
-            }
+        if matches!(
+            trimmed,
+            provider_ids::ANTIGRAVITY | provider_ids::KIMI_CODE
+        ) {
+            tpl_windows
         } else {
             Vec::new()
         }
@@ -2670,17 +2718,17 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         }
         provider_ids::ANTIGRAVITY => {
             if hint_lower.contains("ultra")
-                && (hint_lower.contains("20x") || hint_lower.contains("199"))
-            {
-                ("Google AI Ultra 20x".to_string(), 199_990_000)
-            } else if hint_lower.contains("ultra")
                 && (hint_lower.contains("5x") || hint_lower.contains("99"))
             {
                 ("Google AI Ultra 5x".to_string(), 99_990_000)
-            } else if hint_lower.contains("ultra") {
+            } else if hint_lower.contains("ultra") && hint_lower.contains("249") {
                 ("Google AI Ultra".to_string(), 249_990_000)
+            } else if hint_lower.contains("ultra") {
+                ("Google AI Ultra 20x".to_string(), 199_990_000)
             } else if hint_lower.contains("enterprise") || hint_lower.contains("business") {
                 ("Gemini Enterprise / Antigravity".to_string(), 30_000_000)
+            } else if hint_lower.contains("plus") {
+                ("Google AI Plus".to_string(), 4_990_000)
             } else if hint_lower.contains("free") {
                 ("Google AI Free / Antigravity".to_string(), 0)
             } else {
@@ -2690,9 +2738,13 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         provider_ids::KIMI_CODE => {
             let name = match hint_lower.as_str() {
                 "level_basic" | "basic" => "Kimi Code 基础会员",
+                "plus" | "moderato" => "Kimi Plus (Moderato)",
                 "level_intermediate" | "allegretto" => "Kimi Code Allegretto",
-                "level_advanced" | "moderato" => "Kimi Code Moderato",
+                "pro" => "Kimi Pro (Allegretto)",
+                "level_advanced" => "Kimi Code Moderato",
+                "allegro" => "Kimi Max (Allegro)",
                 "level_max" | "vivace" | "max" => "Kimi Code Vivace",
+                "ultra" => "Kimi Ultra (Vivace)",
                 _ => "Kimi Code 会员订阅",
             };
             (name.to_string(), 0)
@@ -3596,9 +3648,11 @@ mod tests {
         assert_eq!(subs[0].plan.plan_id, "auto_kimi_code");
         assert_eq!(subs[0].plan.auto_source.as_deref(), Some("official_api"));
         assert_eq!(subs[0].plan.plan_name, "Kimi Code Allegretto");
-        assert_eq!(subs[0].windows.len(), 2);
+        assert_eq!(subs[0].windows.len(), 3);
         assert_eq!(subs[0].windows[0].source, "official_api");
         assert!((subs[0].windows[0].used_percent - 25.0).abs() < 0.01);
+        assert_eq!(subs[0].windows[2].window_id, "30d");
+        assert_eq!(subs[0].windows[2].label, "30d 月度限额");
 
         // 3. Deleting an auto-discovered plan soft-dismisses it so future polls do not resurrect it.
         storage

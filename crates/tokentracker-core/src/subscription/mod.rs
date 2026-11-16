@@ -49,6 +49,25 @@ fn standard_two_windows(limit_5h_micro_usd: i64, limit_7d_micro_usd: i64) -> Vec
     ]
 }
 
+fn standard_three_windows(
+    limit_5h_micro_usd: i64,
+    limit_7d_micro_usd: i64,
+    limit_30d_micro_usd: i64,
+) -> Vec<SubscriptionWindowRule> {
+    let mut wins = standard_two_windows(limit_5h_micro_usd, limit_7d_micro_usd);
+    wins.push(SubscriptionWindowRule {
+        window_id: "30d".to_string(),
+        label: "30d 月度限额".to_string(),
+        duration_hours: 720,
+        rolling: false,
+        unit: QuotaUnit::MicroUsd,
+        limit_value: limit_30d_micro_usd,
+        warning_percent: 80,
+        critical_percent: 95,
+    });
+    wins
+}
+
 fn template_entry(
     template_id: &str,
     provider_id: &str,
@@ -69,37 +88,78 @@ fn template_entry(
     }
 }
 
-/// Optional reference subscription templates offered in the UI drawer for quick prefill
-/// and real-time tier comparison.
+#[allow(clippy::too_many_arguments)]
+fn template_entry_with_monthly(
+    template_id: &str,
+    provider_id: &str,
+    plan_name: &str,
+    monthly_fee_micro_usd: i64,
+    limit_5h_micro_usd: i64,
+    limit_7d_micro_usd: i64,
+    limit_30d_micro_usd: i64,
+    description: &str,
+) -> SubscriptionPlanTemplate {
+    SubscriptionPlanTemplate {
+        template_id: template_id.to_string(),
+        provider_id: provider_id.to_string(),
+        plan_name: plan_name.to_string(),
+        monthly_fee_micro_usd,
+        windows: standard_three_windows(
+            limit_5h_micro_usd,
+            limit_7d_micro_usd,
+            limit_30d_micro_usd,
+        ),
+        description: description.to_string(),
+        live_windows: Vec::new(),
+    }
+}
+
+/// Maintained subscription plan catalog offered in the UI for quick prefill
+/// and real-time multi-tier quota comparison.
 pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
     vec![
-        template_entry(
+        // Anthropic Claude Code
+        template_entry_with_monthly(
             "claude_pro",
             provider_ids::CLAUDE_CODE,
             "Claude Pro",
             20_000_000,
             15_000_000,
             75_000_000,
-            "Anthropic Claude Pro 个人订阅（含 5h 滚动与 7d 周参考窗口）",
+            200_000_000,
+            "Anthropic Claude Pro 个人订阅（含 5h 滚动、7d 周与 30d 月参考窗口）",
         ),
-        template_entry(
+        template_entry_with_monthly(
+            "claude_team",
+            provider_ids::CLAUDE_CODE,
+            "Claude Team",
+            30_000_000,
+            25_000_000,
+            125_000_000,
+            350_000_000,
+            "Anthropic Claude Team 团队席位订阅参考窗口",
+        ),
+        template_entry_with_monthly(
             "claude_max_5x",
             provider_ids::CLAUDE_CODE,
             "Claude Max 5x",
             100_000_000,
             75_000_000,
             375_000_000,
-            "Anthropic Claude Max 5x 高配额订阅（5 倍 Pro 参考额度）",
+            1_000_000_000,
+            "Anthropic Claude Max 5x 高配额订阅（5 倍 Pro 额度）",
         ),
-        template_entry(
+        template_entry_with_monthly(
             "claude_max_20x",
             provider_ids::CLAUDE_CODE,
             "Claude Max 20x",
             200_000_000,
             200_000_000,
             1_200_000_000,
-            "Anthropic Claude Max 20x 重度编码订阅（20 倍 Pro 参考额度）",
+            3_600_000_000,
+            "Anthropic Claude Max 20x 重度编码订阅（20 倍 Pro 额度）",
         ),
+        // OpenAI ChatGPT / Codex
         template_entry(
             "codex_plus",
             provider_ids::CODEX,
@@ -107,7 +167,16 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
             20_000_000,
             18_000_000,
             90_000_000,
-            "OpenAI ChatGPT Plus（可自动对齐 Codex 日志官方 5h / 7d 限额）",
+            "OpenAI ChatGPT Plus（自动对齐 Codex 日志官方 5h / 7d 限额）",
+        ),
+        template_entry(
+            "codex_team",
+            provider_ids::CODEX,
+            "ChatGPT Team / Codex",
+            25_000_000,
+            30_000_000,
+            150_000_000,
+            "OpenAI ChatGPT Team 团队席位（自动对齐 Codex 日志官方 5h / 7d 限额）",
         ),
         template_entry(
             "codex_pro",
@@ -116,7 +185,35 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
             200_000_000,
             150_000_000,
             900_000_000,
-            "OpenAI ChatGPT Pro（可自动对齐 Codex 日志官方 5h / 7d 限额）",
+            "OpenAI ChatGPT Pro 旗舰开发订阅（自动对齐 Codex 日志官方 5h / 7d 限额）",
+        ),
+        // Google AI / Antigravity
+        SubscriptionPlanTemplate {
+            template_id: "google_ai_free".to_string(),
+            provider_id: provider_ids::ANTIGRAVITY.to_string(),
+            plan_name: "Google AI Free".to_string(),
+            monthly_fee_micro_usd: 0,
+            windows: vec![SubscriptionWindowRule {
+                window_id: "7d".to_string(),
+                label: "7d 周额度".to_string(),
+                duration_hours: 168,
+                rolling: true,
+                unit: QuotaUnit::MicroUsd,
+                limit_value: 15_000_000,
+                warning_percent: 80,
+                critical_percent: 95,
+            }],
+            description: "Google AI Free / Antigravity 个人免费周额度窗口".to_string(),
+            live_windows: Vec::new(),
+        },
+        template_entry(
+            "google_ai_plus",
+            provider_ids::ANTIGRAVITY,
+            "Google AI Plus",
+            4_990_000,
+            6_000_000,
+            30_000_000,
+            "Google AI Plus / Antigravity 基础订阅参考窗口",
         ),
         template_entry(
             "google_ai_pro",
@@ -125,39 +222,101 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
             19_990_000,
             20_000_000,
             100_000_000,
-            "Google AI Pro / Antigravity 个人订阅参考窗口",
+            "Google AI Pro / Antigravity 标准开发订阅（5h 滚动 + 7d 周额度）",
+        ),
+        template_entry(
+            "google_ai_ultra_5x",
+            provider_ids::ANTIGRAVITY,
+            "Google AI Ultra 5x",
+            99_990_000,
+            100_000_000,
+            500_000_000,
+            "Google AI Ultra 5x / Antigravity 进阶开发订阅（5 倍 Pro 额度）",
         ),
         template_entry(
             "google_ai_ultra",
             provider_ids::ANTIGRAVITY,
-            "Google AI Ultra",
-            249_990_000,
+            "Google AI Ultra 20x",
+            199_990_000,
             250_000_000,
             1_250_000_000,
-            "Google AI Ultra / Antigravity 旗舰订阅参考窗口",
+            "Google AI Ultra 20x / Antigravity 旗舰订阅（20 倍 Pro 额度）",
         ),
         template_entry(
+            "gemini_enterprise",
+            provider_ids::ANTIGRAVITY,
+            "Gemini Enterprise",
+            30_000_000,
+            40_000_000,
+            200_000_000,
+            "Gemini Enterprise / Code Assist 企业席位参考窗口",
+        ),
+        // Kimi Code (Moonshot AI) — Plus/Moderato, Pro/Allegretto, Max/Allegro, Ultra/Vivace with 5h + 7d + 30d monthly limits
+        template_entry_with_monthly(
+            "kimi_code_plus",
+            provider_ids::KIMI_CODE,
+            "Kimi Plus (Moderato)",
+            19_000_000,
+            8_000_000,
+            40_000_000,
+            120_000_000,
+            "Kimi Plus / Moderato 个人订阅（含 5h 滚动、7d 周与 30d 月度限额）",
+        ),
+        template_entry_with_monthly(
             "kimi_code_allegretto",
             provider_ids::KIMI_CODE,
-            "Kimi Code Allegretto",
+            "Kimi Pro (Allegretto)",
+            39_000_000,
+            25_000_000,
+            125_000_000,
+            400_000_000,
+            "Kimi Pro / Allegretto 进阶编码会员（含 5h 滚动、7d 周与 30d 月度限额）",
+        ),
+        template_entry_with_monthly(
+            "kimi_code_max",
+            provider_ids::KIMI_CODE,
+            "Kimi Max (Allegro)",
+            99_000_000,
+            75_000_000,
+            375_000_000,
+            1_200_000_000,
+            "Kimi Max / Allegro 高并发编码会员（含 5h 滚动、7d 周与 30d 月度限额）",
+        ),
+        template_entry_with_monthly(
+            "kimi_code_ultra",
+            provider_ids::KIMI_CODE,
+            "Kimi Ultra (Vivace)",
+            199_000_000,
+            180_000_000,
+            900_000_000,
+            2_800_000_000,
+            "Kimi Ultra / Vivace 旗舰编码会员（含 5h 滚动、7d 周与 30d 月度限额）",
+        ),
+        // MiniMax Code
+        template_entry_with_monthly(
+            "minimax_coding_plus",
+            provider_ids::MINIMAX_CODE,
+            "MiniMax Coding Plus",
             7_000_000,
             8_000_000,
             40_000_000,
-            "Kimi Code 个人会员（配置 `sk-kimi-...` 官方 Key 后自动对接 `/coding/v1/usages` 实时限额）",
+            120_000_000,
+            "MiniMax Coding Plus 基础编码套餐参考窗口",
         ),
-        template_entry(
+        template_entry_with_monthly(
             "minimax_coding_plan",
             provider_ids::MINIMAX_CODE,
-            "MiniMax Coding Plan",
+            "MiniMax Coding Pro",
             15_000_000,
-            12_000_000,
-            60_000_000,
-            "MiniMax Coding Plan 编码订阅参考窗口（支持官方 Coding Plan 额度接口自动同步）",
+            18_000_000,
+            90_000_000,
+            280_000_000,
+            "MiniMax Coding Pro 编码订阅参考窗口（支持官方 Coding Plan 额度接口自动同步）",
         ),
         SubscriptionPlanTemplate {
             template_id: "minimax_token_plan".to_string(),
             provider_id: provider_ids::MINIMAX_CODE.to_string(),
-            plan_name: "MiniMax Token Plan".to_string(),
+            plan_name: "MiniMax Coding Max (Token Plan)".to_string(),
             monthly_fee_micro_usd: 49_000_000,
             windows: vec![
                 SubscriptionWindowRule {
@@ -172,7 +331,7 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
                 },
                 SubscriptionWindowRule {
                     window_id: "30d".to_string(),
-                    label: "月度 Token 额度".to_string(),
+                    label: "30d 月度限额".to_string(),
                     duration_hours: 720,
                     rolling: false,
                     unit: QuotaUnit::Tokens,
@@ -181,25 +340,99 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
                     critical_percent: 95,
                 },
             ],
-            description: "MiniMax Token Plan 按 Token 计量订阅参考模板（可按需修改额度）".to_string(),
+            description: "MiniMax Token Plan 按 Token 计量订阅参考模板".to_string(),
             live_windows: Vec::new(),
         },
+        // QCode
         SubscriptionPlanTemplate {
             template_id: "qcode_daily_plan".to_string(),
             provider_id: provider_ids::QCODE.to_string(),
-            plan_name: "QCode 日额度套餐".to_string(),
+            plan_name: "QCode 标准日额度套餐".to_string(),
             monthly_fee_micro_usd: 15_000_000,
-            windows: vec![SubscriptionWindowRule {
-                window_id: "24h".to_string(),
-                label: "24h 日额度".to_string(),
-                duration_hours: 24,
-                rolling: false,
-                unit: QuotaUnit::MicroUsd,
-                limit_value: 10_000_000,
-                warning_percent: 80,
-                critical_percent: 95,
-            }],
-            description: "QCode 每日额度参考模板（配置官方 Key 后自动同步日额度用量）".to_string(),
+            windows: vec![
+                SubscriptionWindowRule {
+                    window_id: "24h".to_string(),
+                    label: "24h 日额度".to_string(),
+                    duration_hours: 24,
+                    rolling: false,
+                    unit: QuotaUnit::MicroUsd,
+                    limit_value: 10_000_000,
+                    warning_percent: 80,
+                    critical_percent: 95,
+                },
+                SubscriptionWindowRule {
+                    window_id: "30d".to_string(),
+                    label: "30d 月度限额".to_string(),
+                    duration_hours: 720,
+                    rolling: false,
+                    unit: QuotaUnit::MicroUsd,
+                    limit_value: 200_000_000,
+                    warning_percent: 80,
+                    critical_percent: 95,
+                },
+            ],
+            description: "QCode 标准每日与月度额度参考模板".to_string(),
+            live_windows: Vec::new(),
+        },
+        SubscriptionPlanTemplate {
+            template_id: "qcode_pro_plan".to_string(),
+            provider_id: provider_ids::QCODE.to_string(),
+            plan_name: "QCode Pro 日额度套餐".to_string(),
+            monthly_fee_micro_usd: 45_000_000,
+            windows: vec![
+                SubscriptionWindowRule {
+                    window_id: "24h".to_string(),
+                    label: "24h 日额度".to_string(),
+                    duration_hours: 24,
+                    rolling: false,
+                    unit: QuotaUnit::MicroUsd,
+                    limit_value: 35_000_000,
+                    warning_percent: 80,
+                    critical_percent: 95,
+                },
+                SubscriptionWindowRule {
+                    window_id: "30d".to_string(),
+                    label: "30d 月度限额".to_string(),
+                    duration_hours: 720,
+                    rolling: false,
+                    unit: QuotaUnit::MicroUsd,
+                    limit_value: 700_000_000,
+                    warning_percent: 80,
+                    critical_percent: 95,
+                },
+            ],
+            description: "QCode Pro 高配额每日与月度额度参考模板".to_string(),
+            live_windows: Vec::new(),
+        },
+        // Workbuddy
+        SubscriptionPlanTemplate {
+            template_id: "workbuddy_pro".to_string(),
+            provider_id: provider_ids::WORKBUDDY.to_string(),
+            plan_name: "Workbuddy Pro".to_string(),
+            monthly_fee_micro_usd: 20_000_000,
+            windows: vec![
+                SubscriptionWindowRule {
+                    window_id: "5h".to_string(),
+                    label: "5h 滚动窗口".to_string(),
+                    duration_hours: 5,
+                    rolling: true,
+                    unit: QuotaUnit::MicroUsd,
+                    limit_value: 15_000_000,
+                    warning_percent: 80,
+                    critical_percent: 95,
+                },
+                SubscriptionWindowRule {
+                    window_id: "30d".to_string(),
+                    label: "30d 月度限额".to_string(),
+                    duration_hours: 720,
+                    rolling: false,
+                    unit: QuotaUnit::MicroUsd,
+                    limit_value: 150_000_000,
+                    warning_percent: 80,
+                    critical_percent: 95,
+                },
+            ],
+            description: "Workbuddy Pro 编码助手订阅参考模板".to_string(),
             live_windows: Vec::new(),
         },
     ]
@@ -449,30 +682,63 @@ mod tests {
     #[test]
     fn templates_cover_all_reference_plans() {
         let templates = subscription_plan_templates();
-        assert_eq!(templates.len(), 11);
+        assert_eq!(templates.len(), 23);
         let ids: Vec<&str> = templates.iter().map(|t| t.template_id.as_str()).collect();
         assert_eq!(
             ids,
             vec![
                 "claude_pro",
+                "claude_team",
                 "claude_max_5x",
                 "claude_max_20x",
                 "codex_plus",
+                "codex_team",
                 "codex_pro",
+                "google_ai_free",
+                "google_ai_plus",
                 "google_ai_pro",
+                "google_ai_ultra_5x",
                 "google_ai_ultra",
+                "gemini_enterprise",
+                "kimi_code_plus",
                 "kimi_code_allegretto",
+                "kimi_code_max",
+                "kimi_code_ultra",
+                "minimax_coding_plus",
                 "minimax_coding_plan",
                 "minimax_token_plan",
                 "qcode_daily_plan",
+                "qcode_pro_plan",
+                "workbuddy_pro",
             ]
         );
-        assert_eq!(templates[5].monthly_fee_micro_usd, 19_990_000);
-        assert_eq!(templates[6].monthly_fee_micro_usd, 249_990_000);
-        assert_eq!(templates[7].provider_id, provider_ids::KIMI_CODE);
-        assert_eq!(templates[8].provider_id, provider_ids::MINIMAX_CODE);
-        assert_eq!(templates[9].windows[0].unit, QuotaUnit::Tokens);
-        assert_eq!(templates[10].provider_id, provider_ids::QCODE);
+        let ag_pro = templates
+            .iter()
+            .find(|t| t.template_id == "google_ai_pro")
+            .expect("ag_pro");
+        assert_eq!(ag_pro.monthly_fee_micro_usd, 19_990_000);
+        let ag_ultra_5x = templates
+            .iter()
+            .find(|t| t.template_id == "google_ai_ultra_5x")
+            .expect("ag_ultra_5x");
+        assert_eq!(ag_ultra_5x.monthly_fee_micro_usd, 99_990_000);
+        let ag_ultra_20x = templates
+            .iter()
+            .find(|t| t.template_id == "google_ai_ultra")
+            .expect("ag_ultra_20x");
+        assert_eq!(ag_ultra_20x.monthly_fee_micro_usd, 199_990_000);
+
+        // Kimi Code templates must all include 30d monthly limit window
+        for kimi_tpl in templates
+            .iter()
+            .filter(|t| t.provider_id == provider_ids::KIMI_CODE)
+        {
+            assert!(
+                kimi_tpl.windows.iter().any(|w| w.window_id == "30d"),
+                "Kimi template {} missing 30d window",
+                kimi_tpl.template_id
+            );
+        }
     }
 
     #[test]

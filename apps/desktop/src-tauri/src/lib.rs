@@ -9,7 +9,7 @@ use std::io::Write;
 
 use chrono::Utc;
 use tauri::{Manager, RunEvent, WindowEvent};
-use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 use crate::state::{default_db_path, AppState};
 use crate::tray::setup_tray;
@@ -112,6 +112,11 @@ pub fn run() {
                 commands::apply_theme_to_app(app.handle(), &prefs.theme);
                 if prefs.floating_window_enabled {
                     tray::set_floating_window_visible(app.handle(), true);
+                }
+                if prefs.launch_at_startup {
+                    if let Err(err) = app.autolaunch().enable() {
+                        tracing::warn!("Failed to re-sync autostart on startup: {err}");
+                    }
                 }
             }
             state.start_background_services(app.handle().clone());

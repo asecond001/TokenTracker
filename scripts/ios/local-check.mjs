@@ -160,6 +160,7 @@ if (!skipRust) {
     'uniffi-bindgen',
     '--',
     'generate',
+    '--no-format',
     '--library',
     hostLib,
     '--language',

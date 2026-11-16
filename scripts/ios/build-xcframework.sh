@@ -45,13 +45,12 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "[build-xcframework] Building host tokentracker-ffi library and uniffi-bindgen..."
-cargo build -p tokentracker-ffi --release
-cargo build -p tokentracker-ffi --bin uniffi-bindgen --release
+cargo build --locked -p tokentracker-ffi --lib --bin uniffi-bindgen
 
 HOST_LIB=""
 for candidate in \
-  "$ROOT_DIR/target/release/libtokentracker_ffi.dylib" \
-  "$ROOT_DIR/target/release/libtokentracker_ffi.so"; do
+  "$ROOT_DIR/target/debug/libtokentracker_ffi.dylib" \
+  "$ROOT_DIR/target/debug/libtokentracker_ffi.so"; do
   if [[ -f "$candidate" ]]; then
     HOST_LIB="$candidate"
     break
@@ -63,7 +62,8 @@ if [[ -z "$HOST_LIB" ]]; then
 fi
 
 BINDGEN_OUT="$TMP_DIR/uniffi-swift"
-"$ROOT_DIR/target/release/uniffi-bindgen" generate \
+"$ROOT_DIR/target/debug/uniffi-bindgen" generate \
+  --no-format \
   --library "$HOST_LIB" \
   --language swift \
   --out-dir "$BINDGEN_OUT"
@@ -78,9 +78,9 @@ cp "$BINDGEN_OUT/TokenTrackerCoreFFI.modulemap" "$HEADERS_DIR/module.modulemap"
 
 echo "[build-xcframework] Building iOS Simulator static libraries ($TARGET_SIM_INTEL, $TARGET_SIM_ARM64)..."
 SDKROOT="$(xcrun --sdk iphonesimulator --show-sdk-path)" \
-  cargo build -p tokentracker-ffi --target "$TARGET_SIM_INTEL" --release
+  cargo build --locked --lib -p tokentracker-ffi --target "$TARGET_SIM_INTEL" --release
 SDKROOT="$(xcrun --sdk iphonesimulator --show-sdk-path)" \
-  cargo build -p tokentracker-ffi --target "$TARGET_SIM_ARM64" --release
+  cargo build --locked --lib -p tokentracker-ffi --target "$TARGET_SIM_ARM64" --release
 
 SIM_FAT_LIB="$TMP_DIR/sim-fat/libtokentracker_ffi.a"
 mkdir -p "$(dirname "$SIM_FAT_LIB")"
@@ -97,7 +97,7 @@ XC_ARGS=(
 if [[ "$MODE" == "release" ]]; then
   echo "[build-xcframework] Building iOS Device static library ($TARGET_DEVICE)..."
   SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)" \
-    cargo build -p tokentracker-ffi --target "$TARGET_DEVICE" --release
+    cargo build --locked --lib -p tokentracker-ffi --target "$TARGET_DEVICE" --release
   XC_ARGS+=(
     -library "$ROOT_DIR/target/$TARGET_DEVICE/release/libtokentracker_ffi.a"
     -headers "$HEADERS_DIR"

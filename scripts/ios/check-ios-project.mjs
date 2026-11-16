@@ -79,7 +79,7 @@ export function validateIosProject(rootDir = repoRoot) {
   // CoreFFI Package.swift & AppIcon PNG magic check
   const pkgSwift = fs.readFileSync(path.join(rootDir, 'apps/ios/CoreFFI/Package.swift'), 'utf8');
   check(pkgSwift.includes('Artifacts/TokenTrackerCoreFFI.xcframework'), 'CoreFFI/Package.swift missing xcframework binaryTarget');
-  check(pkgSwift.includes('.swiftLanguageVersion(.v5)'), 'CoreFFI/Package.swift missing .swiftLanguageVersion(.v5)');
+  check(pkgSwift.includes('swiftLanguageModes: [.v5]'), 'CoreFFI/Package.swift must select Swift 5 language mode');
 
   const appIconPath = path.join(rootDir, 'apps/ios/App/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png');
   check(fs.existsSync(appIconPath), 'AppIcon.png missing');

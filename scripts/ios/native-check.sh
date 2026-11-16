@@ -23,11 +23,13 @@ fi
 echo "[native-check] Generating Xcode project via XcodeGen..."
 (cd "$ROOT_DIR/apps/ios" && xcodegen generate --spec project.yml)
 
-SIM_UDID="$(xcrun simctl list devices available -j | python3 - "$PREFERRED_SIMS_JSON" "$RUNTIME_PREFIX" <<'PY'
+xcrun simctl list devices available -j > "$ARTIFACTS_DIR/simulators.json"
+SIM_UDID="$(python3 - "$PREFERRED_SIMS_JSON" "$RUNTIME_PREFIX" "$ARTIFACTS_DIR/simulators.json" <<'PY'
 import json, sys
 preferred = json.loads(sys.argv[1])
 runtime_prefix = sys.argv[2]
-data = json.load(sys.stdin)
+with open(sys.argv[3], encoding="utf-8") as devices_file:
+    data = json.load(devices_file)
 devices_by_rt = data.get("devices", {})
 
 candidates = []
@@ -35,14 +37,14 @@ for rt, devs in devices_by_rt.items():
     if runtime_prefix and not rt.startswith(runtime_prefix):
         continue
     for d in devs:
-        if d.get("isAvailable"):
+        if d.get("isAvailable") and d.get("name", "").startswith("iPhone"):
             candidates.append((rt, d))
 
 if not candidates:
     for rt, devs in devices_by_rt.items():
         if "iOS-" in rt:
             for d in devs:
-                if d.get("isAvailable"):
+                if d.get("isAvailable") and d.get("name", "").startswith("iPhone"):
                     candidates.append((rt, d))
 
 for name in preferred:

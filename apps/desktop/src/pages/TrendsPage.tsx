@@ -177,7 +177,7 @@ export function TrendsPage() {
       >
         <div>
           <div className="flex items-center gap-2">
-            <h1 className="text-[16px] font-semibold tracking-tight">用量趋势</h1>
+            <h1 className="text-[16px] font-semibold tracking-tight">趋势分析</h1>
             {data?.effective_granularity && (
               <span
                 className="px-1.5 py-0.5 text-[10.5px] rounded tabular-nums"

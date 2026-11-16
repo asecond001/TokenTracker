@@ -117,6 +117,14 @@ pub struct ActiveSessionSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LiveModelSpeed {
+    pub provider_id: String,
+    pub model_id: String,
+    pub output_tps: f64,
+    pub activity_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageShareItem {
     pub key: String,
     pub label: String,
@@ -136,6 +144,8 @@ pub struct OverviewReport {
     pub avg_output_tps: f64,
     pub peak_output_tps: f64,
     pub latest_output_tps: Option<f64>,
+    #[serde(default)]
+    pub live_model_speeds: Vec<LiveModelSpeed>,
     pub total_requests: i64,
     pub observable_steps: i64,
     pub tokens_delta_pct: Option<f64>,
@@ -296,6 +306,8 @@ pub struct TraySummary {
     pub today_cost_micro_usd: i64,
     pub today_requests: i64,
     pub latest_output_tps: Option<f64>,
+    #[serde(default)]
+    pub live_model_speeds: Vec<LiveModelSpeed>,
     pub subscriptions: Vec<SubscriptionPlanStatus>,
     pub provider_shares: Vec<UsageShareItem>,
     pub active_sessions: Vec<ActiveSessionSummary>,
@@ -648,10 +660,23 @@ pub(crate) fn query_latest_tps(
     provider: Option<&str>,
     device_id: Option<&str>,
 ) -> CoreResult<Option<f64>> {
+    Ok(
+        query_latest_tps_with_model(conn, start_ms, end_ms, provider, device_id)?
+            .map(|(tps, _, _)| tps),
+    )
+}
+
+pub(crate) fn query_latest_tps_with_model(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    provider: Option<&str>,
+    device_id: Option<&str>,
+) -> CoreResult<Option<(f64, String, String)>> {
     let scope = build_scope_clause(2, provider, device_id);
     let sql = format!(
         r#"
-        SELECT output_tps FROM usage_events
+        SELECT output_tps, model_id, provider_id FROM usage_events
         WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2{where_and}
           AND output_tps IS NOT NULL
           AND output_tps > 0.0
@@ -665,13 +690,24 @@ pub(crate) fn query_latest_tps(
     );
     let bound = bound_range_params(start_ms, end_ms, &scope.params);
     let mut stmt = conn.prepare(&sql)?;
-    let mut recent_desc: Vec<f64> = stmt
-        .query_map(params_from_iter(bound), |r| r.get::<_, f64>(0))?
+    let recent_rows: Vec<(f64, String, String)> = stmt
+        .query_map(params_from_iter(bound), |r| {
+            Ok((
+                r.get::<_, f64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
-    if !recent_desc.is_empty() {
-        recent_desc.reverse();
-        if let Some(smoothed) = compute_ewma_tps(&recent_desc, 0.45) {
-            return Ok(Some(smoothed));
+    if let Some((_, latest_model, latest_provider)) = recent_rows.first().cloned() {
+        let mut recent_tps: Vec<f64> = recent_rows
+            .iter()
+            .filter(|(_, m, p)| m == &latest_model && p == &latest_provider)
+            .map(|(tps, _, _)| *tps)
+            .collect();
+        recent_tps.reverse();
+        if let Some(smoothed) = compute_ewma_tps(&recent_tps, 0.45) {
+            return Ok(Some((smoothed, latest_model, latest_provider)));
         }
     }
 
@@ -679,7 +715,7 @@ pub(crate) fn query_latest_tps(
     let aligned_start = start_ms.div_euclid(HOUR_MS) * HOUR_MS;
     let rollup_sql = format!(
         r#"
-        SELECT tps_sum / tps_sample_count AS avg_tps
+        SELECT tps_sum / tps_sample_count AS avg_tps, model_id, provider_id
         FROM usage_hourly_rollups
         WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2{where_and}
           AND tps_sample_count > 0
@@ -691,12 +727,86 @@ pub(crate) fn query_latest_tps(
     );
     let rollup_bound = bound_range_params(aligned_start, end_ms, &scope.params);
     match conn.query_row(&rollup_sql, params_from_iter(rollup_bound), |r| {
-        r.get::<_, f64>(0)
+        Ok((
+            r.get::<_, f64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
     }) {
-        Ok(v) if v.is_finite() && v > 0.0 && v <= MAX_VALID_OUTPUT_TPS => Ok(Some(v)),
+        Ok((v, m, p)) if v.is_finite() && v > 0.0 && v <= MAX_VALID_OUTPUT_TPS => {
+            Ok(Some((v, m, p)))
+        }
         Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(CoreError::from(e)),
     }
+}
+
+fn compute_live_model_speeds_and_tps(
+    active_sessions: &[ActiveSessionSummary],
+    fallback_recent: Option<(f64, String, String)>,
+) -> (Option<f64>, Vec<LiveModelSpeed>) {
+    let has_active_with_tps = active_sessions.iter().any(|s| {
+        s.activity_state == "active"
+            && s.latest_output_tps.is_some_and(|v| v.is_finite() && v > 0.0)
+    });
+
+    let mut grouped_order: Vec<(String, String)> = Vec::new();
+    let mut grouped_vals: HashMap<(String, String), (Vec<f64>, bool)> = HashMap::new();
+
+    for sess in active_sessions {
+        let Some(tps) = sess.latest_output_tps.filter(|v| v.is_finite() && *v > 0.0) else {
+            continue;
+        };
+        if has_active_with_tps && sess.activity_state != "active" {
+            continue;
+        }
+        let key = (sess.provider_id.clone(), sess.model_id.clone());
+        if !grouped_vals.contains_key(&key) {
+            grouped_order.push(key.clone());
+        }
+        let entry = grouped_vals.entry(key).or_insert_with(|| (Vec::new(), false));
+        entry.0.push(tps);
+        if sess.activity_state == "active" {
+            entry.1 = true;
+        }
+    }
+
+    if !grouped_order.is_empty() {
+        let mut items = Vec::with_capacity(grouped_order.len());
+        for (provider_id, model_id) in grouped_order {
+            if let Some((vals, is_active)) =
+                grouped_vals.remove(&(provider_id.clone(), model_id.clone()))
+            {
+                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                items.push(LiveModelSpeed {
+                    provider_id,
+                    model_id,
+                    output_tps: mean,
+                    activity_state: if is_active {
+                        "active".to_string()
+                    } else {
+                        "recent".to_string()
+                    },
+                });
+            }
+        }
+        let primary_tps = items.iter().map(|i| i.output_tps).sum::<f64>() / items.len() as f64;
+        return (Some(primary_tps), items);
+    }
+
+    if let Some((tps, model_id, provider_id)) = fallback_recent {
+        return (
+            Some(tps),
+            vec![LiveModelSpeed {
+                provider_id,
+                model_id,
+                output_tps: tps,
+                activity_state: "recent".to_string(),
+            }],
+        );
+    }
+
+    (None, Vec::new())
 }
 
 pub(crate) fn query_provider_shares(
@@ -1042,8 +1152,8 @@ impl Storage {
                     )
                 };
 
-            let latest_output_tps =
-                query_latest_tps(conn, eff_start_ms, eff_end_ms, provider, device_id)?;
+            let fallback_latest =
+                query_latest_tps_with_model(conn, eff_start_ms, eff_end_ms, provider, device_id)?;
 
             // Choose hourly series when range <= 48 hours, otherwise daily series
             let use_hourly = span <= 48 * HOUR_MS;
@@ -1279,6 +1389,8 @@ impl Storage {
             )?;
             let active_sessions =
                 query_active_sessions(conn, now_ms, provider, device_id, 8)?;
+            let (latest_output_tps, live_model_speeds) =
+                compute_live_model_speeds_and_tps(&active_sessions, fallback_latest);
 
             Ok(OverviewReport {
                 total_tokens: current.total_tokens(),
@@ -1289,6 +1401,7 @@ impl Storage {
                 avg_output_tps: current.avg_tps(),
                 peak_output_tps: current.max_tps,
                 latest_output_tps,
+                live_model_speeds,
                 total_requests: current.requests,
                 observable_steps: current.observable_steps,
                 tokens_delta_pct,
@@ -2068,7 +2181,8 @@ impl Storage {
         self.with_conn(|conn| {
             let (today_start_ms, _) = local_day_bounds_ms(now_ms, tz_offset_minutes);
             let today_totals = query_period_totals(conn, today_start_ms, now_ms, None, None)?;
-            let latest_output_tps = query_latest_tps(conn, today_start_ms, now_ms, None, None)?;
+            let fallback_latest =
+                query_latest_tps_with_model(conn, today_start_ms, now_ms, None, None)?;
             let prefs = load_preferences(conn)?;
 
             let plans = load_subscription_plans(conn)?;
@@ -2088,7 +2202,9 @@ impl Storage {
                 .collect();
 
             let provider_shares = query_provider_shares(conn, today_start_ms, now_ms, None, None)?;
-            let active_sessions = query_active_sessions(conn, now_ms, None, None, 3)?;
+            let active_sessions = query_active_sessions(conn, now_ms, None, None, 8)?;
+            let (latest_output_tps, live_model_speeds) =
+                compute_live_model_speeds_and_tps(&active_sessions, fallback_latest);
 
             let active_providers_count: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM provider_configs WHERE enabled = 1",
@@ -2103,6 +2219,7 @@ impl Storage {
                 today_cost_micro_usd: today_totals.cost_micro_usd,
                 today_requests: today_totals.requests,
                 latest_output_tps,
+                live_model_speeds,
                 subscriptions,
                 provider_shares,
                 active_sessions,
