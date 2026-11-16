@@ -1,12 +1,16 @@
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
+use chrono::DateTime;
 use serde_json::Value;
 use tokentracker_core::domain::{
     compute_event_id, provider_ids, sanitize_session_title, NormalizedUsageEvent,
-    ObservedRateLimitWindow,
+    ObservedRateLimitWindow, ProviderBalanceSnapshot,
 };
 
+use crate::error::{CollectorError, CollectorResult};
 use crate::providers::{
     collapse_duplicate_events_keep_last, compute_tps, get_i64, now_ms, parse_timestamp_ms,
     user_home_dir, FileParseContext, ParsedLineResult, ProviderLogParser,
@@ -141,6 +145,22 @@ fn parse_settings_json_for_plan_hint(path: &Path) -> Option<String> {
     None
 }
 
+/// Read-only inspection of documented public Antigravity `settings.json` files in `~/.gemini/`.
+pub fn detect_explicit_tier_from_local_settings() -> Option<String> {
+    let home = user_home_dir()?;
+    let gemini_dir = home.join(".gemini");
+    for candidate in [
+        gemini_dir.join("antigravity-cli").join("settings.json"),
+        gemini_dir.join("antigravity").join("settings.json"),
+        gemini_dir.join("settings.json"),
+    ] {
+        if let Some(hint) = parse_settings_json_for_plan_hint(&candidate) {
+            return Some(hint);
+        }
+    }
+    None
+}
+
 /// Inspect documented public Antigravity `settings.json` locations read-only for subscription tier hints.
 fn resolve_antigravity_plan_hint(transcript_path: &Path) -> Option<String> {
     // Check ancestor directories (e.g., <root>/settings.json or ~/.gemini/antigravity-cli/settings.json)
@@ -155,20 +175,460 @@ fn resolve_antigravity_plan_hint(transcript_path: &Path) -> Option<String> {
         ancestor = dir.parent();
     }
 
-    if let Some(home) = user_home_dir() {
-        let gemini_dir = home.join(".gemini");
-        for candidate in [
-            gemini_dir.join("antigravity-cli").join("settings.json"),
-            gemini_dir.join("antigravity").join("settings.json"),
-            gemini_dir.join("settings.json"),
-        ] {
-            if let Some(hint) = parse_settings_json_for_plan_hint(&candidate) {
-                return Some(hint);
+    detect_explicit_tier_from_local_settings()
+}
+
+/// Locate the official Antigravity CLI executable (`agy` / `agy.exe`) without triggering GUI wrappers.
+pub fn resolve_agy_cli_binary() -> Option<PathBuf> {
+    if let Some(override_bin) = std::env::var_os("TOKENTRACKER_AGY_BIN") {
+        let path = PathBuf::from(override_bin);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    #[cfg(windows)]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let base = PathBuf::from(local_app_data);
+            candidates.push(base.join("agy").join("bin").join("agy.exe"));
+            candidates.push(base.join("agy").join("bin").join("agy.cmd"));
+            candidates.push(base.join("Programs").join("Antigravity").join("bin").join("agy.exe"));
+            candidates.push(
+                base.join("Programs")
+                    .join("Antigravity")
+                    .join("resources")
+                    .join("app")
+                    .join("bin")
+                    .join("agy.cmd"),
+            );
+        }
+        if let Some(path_env) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path_env) {
+                candidates.push(dir.join("agy.exe"));
+                candidates.push(dir.join("agy.cmd"));
             }
         }
     }
 
-    None
+    #[cfg(not(windows))]
+    {
+        if let Some(home) = user_home_dir() {
+            candidates.push(home.join(".local").join("bin").join("agy"));
+        }
+        candidates.push(PathBuf::from("/opt/homebrew/bin/agy"));
+        candidates.push(PathBuf::from("/usr/local/bin/agy"));
+        candidates.push(PathBuf::from(
+            "/Applications/Antigravity.app/Contents/Resources/app/bin/agy",
+        ));
+        if let Some(path_env) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path_env) {
+                candidates.push(dir.join("agy"));
+            }
+        }
+    }
+
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+fn json_float(val: Option<&Value>) -> Option<f64> {
+    let v = val?;
+    let parsed = if let Some(n) = v.as_f64() {
+        Some(n)
+    } else if let Some(i) = v.as_i64() {
+        Some(i as f64)
+    } else if let Some(s) = v.as_str() {
+        s.trim().trim_end_matches('%').parse::<f64>().ok()
+    } else {
+        None
+    }?;
+    parsed.is_finite().then_some(parsed)
+}
+
+fn parse_cli_bucket_window_minutes(bucket: &Value, bucket_id: &str) -> Option<i64> {
+    let raw_window = bucket
+        .get("window")
+        .or_else(|| bucket.get("windowType"))
+        .or_else(|| bucket.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if raw_window == "5h" || raw_window.contains("five hour") || raw_window.contains("5-hour") {
+        return Some(300);
+    }
+    if raw_window == "weekly" || raw_window == "7d" || raw_window.contains("week") {
+        return Some(10_080);
+    }
+    if raw_window == "daily" || raw_window == "24h" || raw_window.contains("day") {
+        return Some(1_440);
+    }
+    if raw_window == "monthly" || raw_window == "30d" || raw_window.contains("month") {
+        return Some(43_200);
+    }
+    let lower_id = bucket_id.to_ascii_lowercase();
+    if lower_id.contains("5h") {
+        Some(300)
+    } else if lower_id.contains("weekly") || lower_id.contains("7d") {
+        Some(10_080)
+    } else if lower_id.contains("daily") || lower_id.contains("24h") {
+        Some(1_440)
+    } else if lower_id.contains("monthly") || lower_id.contains("30d") {
+        Some(43_200)
+    } else {
+        None
+    }
+}
+
+fn parse_cli_reset_time_ms(bucket: &Value) -> Option<i64> {
+    let raw = bucket
+        .get("reset_time")
+        .or_else(|| bucket.get("resetTime"))
+        .or_else(|| bucket.get("resets_at"))
+        .or_else(|| bucket.get("resetsAt"))?;
+    if let Some(s) = raw.as_str() {
+        if let Ok(dt) = DateTime::parse_from_rfc3339(s.trim()) {
+            return Some(dt.timestamp_millis());
+        }
+    }
+    parse_timestamp_ms(Some(raw))
+}
+
+fn push_cli_bucket_window(
+    out: &mut Vec<ObservedRateLimitWindow>,
+    bucket: &Value,
+    group_prefix: Option<&str>,
+    now_ms: i64,
+    plan_hint: &Option<String>,
+) {
+    let raw_id = bucket
+        .get("id")
+        .or_else(|| bucket.get("bucketId"))
+        .or_else(|| bucket.get("bucket_id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let window_name = match (raw_id, group_prefix) {
+        (Some(id), _) => id.to_string(),
+        (None, Some(prefix)) => {
+            let suffix = bucket
+                .get("window")
+                .and_then(|v| v.as_str())
+                .unwrap_or("quota");
+            format!("{prefix}-{suffix}")
+        }
+        (None, None) => return,
+    };
+
+    let used_percent = if let Some(rem_frac) = json_float(
+        bucket
+            .get("remaining_fraction")
+            .or_else(|| bucket.get("remainingFraction")),
+    ) {
+        ((1.0 - rem_frac.clamp(0.0, 1.0)) * 100.0).clamp(0.0, 100.0)
+    } else if let Some(used_frac) = json_float(
+        bucket
+            .get("used_fraction")
+            .or_else(|| bucket.get("usedFraction")),
+    ) {
+        (used_frac.clamp(0.0, 1.0) * 100.0).clamp(0.0, 100.0)
+    } else if let Some(used_pct) = json_float(
+        bucket
+            .get("used_percent")
+            .or_else(|| bucket.get("usedPercent")),
+    ) {
+        used_pct.clamp(0.0, 100.0)
+    } else if let Some(rem_pct) = json_float(
+        bucket
+            .get("remaining_percent")
+            .or_else(|| bucket.get("remainingPercent")),
+    ) {
+        (100.0 - rem_pct.clamp(0.0, 100.0)).clamp(0.0, 100.0)
+    } else {
+        return;
+    };
+
+    let window_minutes = parse_cli_bucket_window_minutes(bucket, &window_name);
+    let resets_at_ms = parse_cli_reset_time_ms(bucket);
+
+    out.push(ObservedRateLimitWindow {
+        provider_id: provider_ids::ANTIGRAVITY.to_string(),
+        window_name,
+        used_percent,
+        window_minutes,
+        resets_at_ms,
+        observed_at_ms: now_ms,
+        source: Some("official_cli".to_string()),
+        plan_hint: plan_hint.clone(),
+    });
+}
+
+fn infer_cli_group_prefix(group_name: Option<&str>) -> Option<&'static str> {
+    let lower = group_name?.to_ascii_lowercase();
+    if lower.contains("gemini") {
+        Some("gemini")
+    } else if lower.contains("claude") || lower.contains("gpt") {
+        Some("3p")
+    } else {
+        None
+    }
+}
+
+/// Parse the JSON output emitted by `agy -p "/usage" --output-format json`.
+/// Never infer Ultra tier from `groups[].description` because `Gemini 4 Carbon` appears in every user's static group listing.
+pub fn parse_antigravity_cli_usage_output(
+    raw: &str,
+    now_ms: i64,
+    fallback_plan_hint: Option<String>,
+) -> CollectorResult<(ProviderBalanceSnapshot, Vec<ObservedRateLimitWindow>)> {
+    let start = raw.find('{').ok_or_else(|| {
+        CollectorError::Compliance(
+            "agy CLI /usage 待返回有效 JSON（请确认已在本机登录 Antigravity CLI）".to_string(),
+        )
+    })?;
+    let end = raw.rfind('}').ok_or_else(|| {
+        CollectorError::Compliance("agy CLI /usage JSON 输出不完整".to_string())
+    })?;
+    if end < start {
+        return Err(CollectorError::Compliance(
+            "agy CLI /usage JSON 边界无效".to_string(),
+        ));
+    }
+
+    let root: Value = serde_json::from_str(&raw[start..=end]).map_err(|e| {
+        CollectorError::Compliance(format!("解析 agy CLI /usage JSON 失败: {e}"))
+    })?;
+
+    if let Some(status) = root.get("status").and_then(|v| v.as_str()) {
+        if !status.eq_ignore_ascii_case("SUCCESS") && !status.eq_ignore_ascii_case("OK") {
+            let detail = root
+                .pointer("/error/message")
+                .or_else(|| root.get("error"))
+                .or_else(|| root.get("message"))
+                .or_else(|| root.get("response"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("CLI 请求未成功");
+            return Err(CollectorError::Compliance(format!(
+                "agy CLI /usage 返回状态 {status}: {detail}"
+            )));
+        }
+    }
+
+    let data = root
+        .pointer("/command/data")
+        .or_else(|| root.get("data"))
+        .unwrap_or(&root);
+
+    let plan_hint = [
+        root.get("tier"),
+        root.get("plan_tier"),
+        root.get("planTier"),
+        root.get("subscription_tier"),
+        root.get("subscriptionTier"),
+        root.get("user_tier"),
+        root.get("userTier"),
+        data.get("tier"),
+        data.get("plan_tier"),
+        data.get("planTier"),
+        data.get("subscription_tier"),
+        data.get("subscriptionTier"),
+        data.get("user_tier"),
+        data.get("userTier"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|v| v.as_str())
+    .find_map(normalize_explicit_antigravity_tier)
+    .or(fallback_plan_hint);
+
+    let mut windows = Vec::new();
+    if let Some(groups) = data.get("groups").and_then(|v| v.as_array()) {
+        for group in groups {
+            let group_prefix =
+                infer_cli_group_prefix(group.get("name").and_then(|v| v.as_str()));
+            if let Some(buckets) = group.get("buckets").and_then(|v| v.as_array()) {
+                for bucket in buckets {
+                    push_cli_bucket_window(
+                        &mut windows,
+                        bucket,
+                        group_prefix,
+                        now_ms,
+                        &plan_hint,
+                    );
+                }
+            }
+        }
+    }
+    if windows.is_empty() {
+        if let Some(buckets) = data.get("buckets").and_then(|v| v.as_array()) {
+            for bucket in buckets {
+                push_cli_bucket_window(&mut windows, bucket, None, now_ms, &plan_hint);
+            }
+        }
+    }
+
+    if windows.is_empty() {
+        return Err(CollectorError::Compliance(
+            "请先在终端运行 agy 完成账号登录以获取配额读数".to_string(),
+        ));
+    }
+
+    let snapshot = ProviderBalanceSnapshot {
+        provider_id: provider_ids::ANTIGRAVITY.to_string(),
+        currency: "QUOTA".to_string(),
+        total_balance_micro: None,
+        granted_balance_micro: None,
+        topped_up_balance_micro: None,
+        daily_quota_used_micro: None,
+        daily_quota_limit_micro: None,
+        fetched_at_ms: now_ms,
+    };
+
+    Ok((snapshot, windows))
+}
+
+/// Non-interactively invoke the documented official Antigravity CLI (`agy -p "/usage" --output-format json`).
+pub async fn collect_antigravity_cli_usage(
+    now_ms: i64,
+) -> CollectorResult<(ProviderBalanceSnapshot, Vec<ObservedRateLimitWindow>)> {
+    let bin_path = resolve_agy_cli_binary().ok_or_else(|| {
+        CollectorError::Compliance(
+            "请先安装官方 agy CLI（默认路径 %LOCALAPPDATA%\\agy\\bin\\agy.exe）".to_string(),
+        )
+    })?;
+
+    let raw_output = tokio::task::spawn_blocking(move || run_agy_cli_blocking(&bin_path))
+        .await
+        .map_err(|e| CollectorError::Compliance(format!("执行 agy CLI 后台任务异常: {e}")))??;
+
+    let fallback_hint = detect_explicit_tier_from_local_settings();
+
+    match parse_antigravity_cli_usage_output(&raw_output.stdout, now_ms, fallback_hint) {
+        Ok(parsed) => Ok(parsed),
+        Err(err) if !raw_output.success => {
+            let stderr_snippet: String = raw_output
+                .stderr
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(" | ")
+                .chars()
+                .take(180)
+                .collect();
+            if stderr_snippet.is_empty() {
+                Err(err)
+            } else {
+                Err(CollectorError::Compliance(format!(
+                    "agy CLI /usage 退出失败 ({}): {stderr_snippet}",
+                    raw_output.status_desc
+                )))
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+struct CliProcessOutput {
+    success: bool,
+    status_desc: String,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_agy_cli_blocking(bin_path: &Path) -> CollectorResult<CliProcessOutput> {
+    let is_cmd_wrapper = bin_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
+
+    let mut cmd = if is_cmd_wrapper {
+        let mut c = std::process::Command::new("cmd.exe");
+        c.arg("/d")
+            .arg("/s")
+            .arg("/c")
+            .arg(bin_path)
+            .args(["-p", "/usage", "--output-format", "json"]);
+        c
+    } else {
+        let mut c = std::process::Command::new(bin_path);
+        c.args(["-p", "/usage", "--output-format", "json"]);
+        c
+    };
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW prevents flashing a console window during background desktop polling
+        cmd.creation_flags(0x0800_0000);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| CollectorError::Compliance(format!("启动 agy CLI 失败: {e}")))?;
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let (status, stdout_bytes, stderr_bytes) = std::thread::scope(|scope| {
+        let stdout_handle = scope.spawn(move || -> Vec<u8> {
+            let mut buf = Vec::new();
+            if let Some(mut reader) = stdout_pipe {
+                let _ = reader.read_to_end(&mut buf);
+            }
+            buf
+        });
+        let stderr_handle = scope.spawn(move || -> Vec<u8> {
+            let mut buf = Vec::new();
+            if let Some(mut reader) = stderr_pipe {
+                let _ = reader.read_to_end(&mut buf);
+            }
+            buf
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(25);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break Ok(st),
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break Err(CollectorError::Compliance(
+                            "调用官方 agy CLI /usage 超时（>25s），请确认网络连通及 CLI 登录状态"
+                                .to_string(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(CollectorError::Compliance(format!(
+                        "等待 agy CLI 退出失败: {e}"
+                    )));
+                }
+            }
+        };
+
+        let out_b = stdout_handle.join().unwrap_or_default();
+        let err_b = stderr_handle.join().unwrap_or_default();
+        (status, out_b, err_b)
+    });
+
+    let status = status?;
+    Ok(CliProcessOutput {
+        success: status.success(),
+        status_desc: status.to_string(),
+        stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+    })
 }
 
 fn extract_antigravity_rate_limits(
@@ -868,5 +1328,77 @@ mod tests {
             ctx.session_title.as_ref().map(|t| t.0.as_str()),
             Some("Build initial dark glass layout")
         );
+    }
+
+    #[test]
+    fn parses_live_agy_cli_usage_json_without_false_ultra_from_group_description() {
+        let sample = r#"{
+          "conversation_id": "",
+          "status": "SUCCESS",
+          "response": "Gemini Models\tWeekly Limit Remaining\t36%\t2026-11-22T14:36:11Z\n",
+          "duration_seconds": 0,
+          "num_turns": 0,
+          "usage": {"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0},
+          "command": {
+            "name": "usage",
+            "data": {
+              "description": "Within each group, models share a weekly limit and a 5-hour limit.",
+              "groups": [
+                {
+                  "name": "Gemini Models",
+                  "description": "Models within this group: Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen",
+                  "buckets": [
+                    {"id": "gemini-weekly", "name": "Weekly Limit Remaining", "window": "weekly", "remaining_fraction": 0.3614097535610199, "reset_time": "2026-11-22T14:36:11Z"},
+                    {"id": "gemini-5h", "name": "Five Hour Limit Remaining", "window": "5h", "remaining_fraction": 0.634879469871521, "reset_time": "2026-11-16T17:13:50Z"}
+                  ]
+                },
+                {
+                  "name": "Claude and GPT models",
+                  "description": "Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B",
+                  "buckets": [
+                    {"id": "3p-weekly", "name": "Weekly Limit Remaining", "window": "weekly", "remaining_fraction": 0.9954540729522705, "reset_time": "2026-11-22T16:34:57Z"},
+                    {"id": "3p-5h", "name": "Five Hour Limit Remaining", "window": "5h", "remaining_fraction": 1, "reset_time": "2026-11-16T20:57:37Z"}
+                  ]
+                }
+              ]
+            }
+          }
+        }"#;
+        let now_ms = 1_794_840_000_000i64;
+        let (snap, windows) =
+            parse_antigravity_cli_usage_output(sample, now_ms, None).expect("parse agy json");
+        assert_eq!(snap.provider_id, provider_ids::ANTIGRAVITY);
+        assert_eq!(snap.currency, "QUOTA");
+        assert_eq!(snap.fetched_at_ms, now_ms);
+        assert_eq!(windows.len(), 4);
+
+        // Critical: static "Gemini 4 Carbon" inside groups[0].description must NOT fabricate ultra plan_hint
+        assert!(windows.iter().all(|w| w.plan_hint.is_none()));
+        assert!(windows
+            .iter()
+            .all(|w| w.source.as_deref() == Some("official_cli")));
+
+        assert_eq!(windows[0].window_name, "gemini-weekly");
+        assert_eq!(windows[0].window_minutes, Some(10_080));
+        assert!((windows[0].used_percent - 63.8590246).abs() < 0.01);
+        assert!(windows[0].resets_at_ms.is_some());
+
+        assert_eq!(windows[1].window_name, "gemini-5h");
+        assert_eq!(windows[1].window_minutes, Some(300));
+        assert!((windows[1].used_percent - 36.512053).abs() < 0.01);
+
+        assert_eq!(windows[2].window_name, "3p-weekly");
+        assert!((windows[2].used_percent - 0.4545927).abs() < 0.01);
+
+        assert_eq!(windows[3].window_name, "3p-5h");
+        assert!((windows[3].used_percent - 0.0).abs() < 0.01);
+
+        let err = parse_antigravity_cli_usage_output(
+            r#"{"status":"ERROR","error":"Not signed in"}"#,
+            now_ms,
+            None,
+        )
+        .expect_err("error status must fail");
+        assert!(err.to_string().contains("Not signed in"));
     }
 }

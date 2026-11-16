@@ -465,13 +465,15 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
         cache_write_tokens: 0,
         reasoning_tokens: 0,
         estimated_cost_micro_usd: 0,
-        diagnostic: '浏览器预览模式暂未启用 Rust 声明式规则引擎',
+        diagnostic: '浏览器预览模式示例结果',
       } as T;
-    case 'refresh_provider_balance':
+    case 'refresh_provider_balance': {
+      const targetProvider = (args?.providerId as string | undefined) ?? 'kimi_code';
+      const isQuotaCli = targetProvider === 'antigravity';
       return {
         snapshot: {
-          provider_id: (args?.providerId as string | undefined) ?? 'kimi_code',
-          currency: 'CNY',
+          provider_id: targetProvider,
+          currency: isQuotaCli ? 'QUOTA' : 'CNY',
           total_balance_micro: null,
           granted_balance_micro: null,
           topped_up_balance_micro: null,
@@ -479,11 +481,14 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
           daily_quota_limit_micro: null,
           fetched_at_ms: now,
         },
-        rate_limits_updated: 0,
-        endpoint: 'preview://balance',
-        from_cache: true,
-        cooldown_remaining_secs: 60,
+        rate_limits_updated: isQuotaCli ? 4 : 0,
+        endpoint: isQuotaCli ? 'agy -p "/usage" --output-format json' : 'preview://balance',
+        from_cache: !isQuotaCli,
+        cooldown_remaining_secs: isQuotaCli ? 0 : 60,
       } as T;
+    }
+    case 'launch_provider_cli_login':
+      return '已在系统终端打开登录窗口' as T;
     case 'get_subscription_templates':
       return previewSubscriptionTemplates() as T;
     case 'get_speed_latency':
@@ -781,6 +786,9 @@ export const ipc = {
 
   refreshProviderBalance: (providerId: string): Promise<BalanceRefreshOutcome> =>
     callIpc('refresh_provider_balance', { providerId }),
+
+  launchProviderCliLogin: (providerId: string): Promise<string> =>
+    callIpc('launch_provider_cli_login', { providerId }),
 
   getPaygAccounts: (tzOffsetMinutes?: number): Promise<PaygAccountStatus[]> =>
     callIpc('get_payg_accounts', {

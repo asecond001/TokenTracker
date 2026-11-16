@@ -41,7 +41,7 @@ const ELEMENT_TOGGLES: ReadonlyArray<{
   { key: 'showCost', label: '等效费用' },
   { key: 'showSpeed', label: '生成速率' },
   { key: 'showSession', label: '活跃会话' },
-  { key: 'showSubscriptions', label: '订阅配额' },
+  { key: 'showSubscriptions', label: '配额窗口' },
 ];
 
 export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPageProps) {
@@ -594,7 +594,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
                 ))
               ) : (
                 <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
-                  15 分钟内暂无活跃会话
+                  等待活跃会话
                 </div>
               )}
             </div>
@@ -629,7 +629,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
                 ))
               ) : (
                 <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
-                  暂无官方实测配额窗口
+                  等待官方配额同步
                 </div>
               )}
             </div>

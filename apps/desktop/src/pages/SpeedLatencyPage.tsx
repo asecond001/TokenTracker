@@ -372,7 +372,7 @@ export function SpeedLatencyPage() {
         </div>
       ) : providers.length === 0 && models.length === 0 ? (
         <div className="py-12 text-center text-[12.5px]" style={{ color: 'var(--text-muted)' }}>
-          当前时间窗内暂无有效耗时样本（需单次输出 ≥ 12 tokens 且耗时 ≥ 500ms）
+          当前时间窗等待有效耗时样本
         </div>
       ) : (
         <>

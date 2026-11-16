@@ -281,13 +281,17 @@ async fn poll_configured_provider_apis(
     let mut any_rate_limits = false;
 
     for cfg in configs {
-        if !cfg.enabled || !cfg.has_credential {
+        if !cfg.enabled {
             continue;
         }
-        if !matches!(
-            cfg.provider_id.as_str(),
-            "kimi_code" | "minimax_code" | "qcode" | "deepseek_harness"
-        ) {
+        let is_cli_quota_provider = cfg.provider_id == "antigravity"
+            && tokentracker_collectors::providers::antigravity::resolve_agy_cli_binary().is_some();
+        let is_key_balance_provider = cfg.has_credential
+            && matches!(
+                cfg.provider_id.as_str(),
+                "kimi_code" | "minimax_code" | "qcode" | "deepseek_harness"
+            );
+        if !is_cli_quota_provider && !is_key_balance_provider {
             continue;
         }
         match tokentracker_collectors::refresh_provider_balance(storage, &cfg.provider_id, credentials)

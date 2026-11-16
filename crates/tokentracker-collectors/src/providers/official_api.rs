@@ -22,6 +22,7 @@ pub const DEFAULT_KIMI_CODING_USAGES_URL: &str = "https://api.kimi.com/coding/v1
 pub const DEFAULT_DEEPSEEK_BALANCE_URL: &str = "https://api.deepseek.com/user/balance";
 pub const DEFAULT_QCODE_USAGE_URL: &str = "https://api.qcode.cc/api/v1/usage";
 pub const DEFAULT_MINIMAX_REMAINS_URL: &str = "https://www.minimaxi.com/v1/token_plan/remains";
+pub const ANTIGRAVITY_CLI_ENDPOINT: &str = "agy -p \"/usage\" --output-format json";
 pub const BALANCE_COOLDOWN_MS: i64 = 60_000;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -157,6 +158,7 @@ fn candidate_endpoints_for_provider(
 
 fn default_endpoint_label(provider_id: &str, endpoints: &BalanceApiEndpoints) -> CollectorResult<String> {
     match provider_id {
+        provider_ids::ANTIGRAVITY => Ok(ANTIGRAVITY_CLI_ENDPOINT.to_string()),
         provider_ids::KIMI_CODE => Ok(endpoints.moonshot_url.clone()),
         provider_ids::DEEPSEEK_HARNESS => Ok(endpoints.deepseek_url.clone()),
         provider_ids::QCODE => Ok(endpoints.qcode_url.clone()),
@@ -333,6 +335,67 @@ pub async fn refresh_provider_balance_with_fetcher(
     .await
 }
 
+/// Testable Antigravity `agy` CLI quota polling entry point with 60-second cooldown & persistence.
+pub async fn refresh_antigravity_cli_quota_with_runner<F, Fut>(
+    storage: &Storage,
+    now_ms: i64,
+    bypass_cooldown: bool,
+    runner: F,
+) -> CollectorResult<BalanceRefreshOutcome>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = CollectorResult<(ProviderBalanceSnapshot, Vec<ObservedRateLimitWindow>)>>,
+{
+    if !bypass_cooldown {
+        if let Some(cached) = storage.get_provider_balance(provider_ids::ANTIGRAVITY)? {
+            let age_ms = now_ms.saturating_sub(cached.fetched_at_ms);
+            if (0..BALANCE_COOLDOWN_MS).contains(&age_ms) {
+                let remaining_ms = BALANCE_COOLDOWN_MS - age_ms;
+                let remaining_secs = (remaining_ms.max(1) as u64).div_ceil(1000);
+                return Ok(BalanceRefreshOutcome {
+                    snapshot: cached,
+                    rate_limits_updated: 0,
+                    endpoint: ANTIGRAVITY_CLI_ENDPOINT.to_string(),
+                    from_cache: true,
+                    cooldown_remaining_secs: remaining_secs,
+                });
+            }
+        }
+    }
+
+    match runner().await {
+        Ok((snapshot, rate_limits)) => {
+            let rate_limits_updated = rate_limits.len();
+            storage.replace_provider_source_rate_limits(
+                provider_ids::ANTIGRAVITY,
+                "official_cli",
+                &rate_limits,
+            )?;
+            storage.upsert_provider_balance(&snapshot)?;
+            let _ = storage.set_provider_sync_status(
+                provider_ids::ANTIGRAVITY,
+                Some(now_ms),
+                None,
+            );
+            Ok(BalanceRefreshOutcome {
+                snapshot,
+                rate_limits_updated,
+                endpoint: ANTIGRAVITY_CLI_ENDPOINT.to_string(),
+                from_cache: false,
+                cooldown_remaining_secs: 0,
+            })
+        }
+        Err(err) => {
+            let _ = storage.set_provider_sync_status(
+                provider_ids::ANTIGRAVITY,
+                None,
+                Some(&err.to_string()),
+            );
+            Err(err)
+        }
+    }
+}
+
 pub async fn refresh_provider_balance_with_fetcher_inner(
     storage: &Storage,
     provider_id: &str,
@@ -342,6 +405,13 @@ pub async fn refresh_provider_balance_with_fetcher_inner(
     now_ms: i64,
     bypass_cooldown: bool,
 ) -> CollectorResult<BalanceRefreshOutcome> {
+    if provider_id.trim().eq_ignore_ascii_case(provider_ids::ANTIGRAVITY) {
+        return refresh_antigravity_cli_quota_with_runner(storage, now_ms, bypass_cooldown, || {
+            crate::providers::antigravity::collect_antigravity_cli_usage(now_ms)
+        })
+        .await;
+    }
+
     let default_ep = default_endpoint_label(provider_id, endpoints)?;
 
     if !bypass_cooldown {
@@ -363,7 +433,7 @@ pub async fn refresh_provider_balance_with_fetcher_inner(
 
     let api_key = credentials
         .get_api_key(provider_id)?
-        .ok_or_else(|| CollectorError::Credential(format!("未配置 {provider_id} 官方 API Key")))?;
+        .ok_or_else(|| CollectorError::Credential(format!("请先录入 {provider_id} 官方 API Key")))?;
 
     let candidates = candidate_endpoints_for_provider(provider_id, &api_key, endpoints)?;
     let mut selected_endpoint = default_ep;

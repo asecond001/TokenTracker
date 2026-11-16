@@ -24,7 +24,7 @@ const ANALYTICS_NAV: Array<{ id: NavPage; label: string; icon: typeof LayoutDash
   { id: 'trends', label: '趋势分析', icon: Activity },
   { id: 'monthly', label: '月度统计', icon: CalendarDays },
   { id: 'models', label: '模型与价格', icon: Cpu },
-  { id: 'subscriptions', label: '订阅用量', icon: BarChart3 },
+  { id: 'subscriptions', label: '用量', icon: BarChart3 },
   { id: 'speed', label: '速度监测', icon: Gauge },
 ];
 
@@ -107,7 +107,7 @@ export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
                 </button>
               )}
               <span className="font-mono text-[10px] font-normal lowercase tabular-nums">
-                v0.2.6
+                v0.2.7
               </span>
             </div>
           </div>

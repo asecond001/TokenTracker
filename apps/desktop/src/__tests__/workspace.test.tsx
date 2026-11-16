@@ -704,7 +704,7 @@ describe('Overview & Trends v0.1.1 defaults and all-time preset', () => {
   });
 });
 
-describe('Subscriptions v0.1.1 zero-preset, templates, deletion & observed rate limits', () => {
+describe('Usage page unified account connection, observed rate limits & quota deletion', () => {
   beforeEach(() => {
     resetWorkspaceState();
   });
@@ -714,7 +714,7 @@ describe('Subscriptions v0.1.1 zero-preset, templates, deletion & observed rate 
     vi.restoreAllMocks();
   });
 
-  it('shows zero-preset empty state and unbound observed rate limit snapshots on fresh install', async () => {
+  it('shows clean positive empty state and renders authoritative observed rate limits without bind button', async () => {
     const observed: ObservedRateLimitWindow[] = [
       {
         provider_id: 'codex',
@@ -727,62 +727,66 @@ describe('Subscriptions v0.1.1 zero-preset, templates, deletion & observed rate 
     ];
     vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue([]);
     vi.spyOn(ipc, 'getObservedRateLimits').mockResolvedValue(observed);
-    vi.spyOn(ipc, 'getSubscriptionTemplates').mockResolvedValue(makeTemplates());
 
     renderWithQuery(<SubscriptionsPage />);
 
-    expect(await screen.findByText('0 项已配置')).toBeInTheDocument();
-    expect(screen.getByText('尚未添加个人订阅配置')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: '添加我的订阅' }).length).toBeGreaterThanOrEqual(
-      1
-    );
-
-    expect(
-      await screen.findByText('官方日志可观测限额快照')
-    ).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '用量' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '添加账户' })).toHaveLength(1);
+    expect(await screen.findByText('配额窗口')).toBeInTheDocument();
     expect(screen.getByText('官方实时限额')).toBeInTheDocument();
-    expect(screen.queryByText(/未设月费|未绑定月费套餐/)).not.toBeInTheDocument();
     expect(screen.getByText('5h 官方限额')).toBeInTheDocument();
     expect(screen.getByText('34.5%')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '绑定订阅' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '绑定订阅' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '添加我的订阅' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '添加按量计费' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '同步套餐目录' })).not.toBeInTheDocument();
   });
 
-  it('creates a user-configured plan from template with is_user_configured: true', async () => {
+  it('connects provider CLI account via unified Add Account login drawer', async () => {
+    const now = Date.now();
     vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue([]);
     vi.spyOn(ipc, 'getObservedRateLimits').mockResolvedValue([]);
-    const templatesSpy = vi
-      .spyOn(ipc, 'getSubscriptionTemplates')
-      .mockResolvedValue(makeTemplates());
-    const upsertSpy = vi.spyOn(ipc, 'upsertSubscriptionPlan').mockResolvedValue(undefined);
+    const refreshSpy = vi.spyOn(ipc, 'refreshProviderBalance').mockResolvedValue({
+      snapshot: {
+        provider_id: 'antigravity',
+        currency: 'QUOTA',
+        total_balance_micro: null,
+        granted_balance_micro: null,
+        topped_up_balance_micro: null,
+        daily_quota_used_micro: null,
+        daily_quota_limit_micro: null,
+        fetched_at_ms: now,
+      },
+      rate_limits_updated: 4,
+      endpoint: 'agy -p "/usage" --output-format json',
+      from_cache: false,
+      cooldown_remaining_secs: 0,
+    });
+    const loginSpy = vi
+      .spyOn(ipc, 'launchProviderCliLogin')
+      .mockResolvedValue('已在系统终端打开登录窗口，完成授权后点击同步即可');
 
     renderWithQuery(<SubscriptionsPage />);
 
-    expect(await screen.findByText('尚未添加个人订阅配置')).toBeInTheDocument();
-    const addButtons = screen.getAllByRole('button', { name: '添加我的订阅' });
-    fireEvent.click(addButtons[0]);
-    expect(await screen.findByText('添加我的订阅配置')).toBeInTheDocument();
-    expect(templatesSpy).toHaveBeenCalled();
+    expect(
+      await screen.findByText('接入提供商账号或官方 API 密钥以同步实时配额与余额')
+    ).toBeInTheDocument();
 
-    const tplMatches = await screen.findAllByText('Claude Max 5x ($100/mo)');
-    fireEvent.click(tplMatches[tplMatches.length - 1]);
-    const nameInput = screen.getByPlaceholderText('例如 Claude Max 5x 或 Google AI Ultra');
-    expect(nameInput).toHaveValue('Claude Max 5x ($100/mo)');
+    fireEvent.click(screen.getByRole('button', { name: '添加账户' }));
+    expect(await screen.findByRole('heading', { name: '添加账户' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '保存订阅配置' }));
-
+    fireEvent.click(screen.getByRole('button', { name: '启动终端登录' }));
     await waitFor(() => {
-      expect(upsertSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          provider_id: 'claude_code',
-          plan_name: 'Claude Max 5x ($100/mo)',
-          monthly_fee_micro_usd: 100_000_000,
-          is_user_configured: true,
-        })
-      );
+      expect(loginSpy).toHaveBeenCalledWith('antigravity');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '同步账户用量' }));
+    await waitFor(() => {
+      expect(refreshSpy).toHaveBeenCalledWith('antigravity');
     });
   });
 
-  it('deletes an existing subscription plan after inline confirmation and hides bound observed snapshots', async () => {
+  it('deletes an authoritative quota entry after inline confirmation and hides bound observed snapshots', async () => {
     const plan = makePlanStatus();
     const observed: ObservedRateLimitWindow[] = [
       {
@@ -796,17 +800,14 @@ describe('Subscriptions v0.1.1 zero-preset, templates, deletion & observed rate 
     ];
     vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue([plan]);
     vi.spyOn(ipc, 'getObservedRateLimits').mockResolvedValue(observed);
-    vi.spyOn(ipc, 'getSubscriptionTemplates').mockResolvedValue(makeTemplates());
     const deleteSpy = vi.spyOn(ipc, 'deleteSubscriptionPlan').mockResolvedValue(undefined);
 
     renderWithQuery(<SubscriptionsPage />);
 
-    expect(await screen.findByText('1 项已配置')).toBeInTheDocument();
+    expect(await screen.findByText('1 项数据源')).toBeInTheDocument();
     expect(screen.getByText('Claude Max 5x')).toBeInTheDocument();
-    // Bound provider (claude_code) should not appear as an unbound snapshot group
-    expect(
-      screen.queryByText('官方日志可观测限额快照')
-    ).not.toBeInTheDocument();
+    // Bound provider (claude_code) must not duplicate inside unbound observed rows
+    expect(screen.queryByText('官方实时限额')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '删除 Claude Max 5x' }));
     fireEvent.click(screen.getByRole('button', { name: '确认' }));
@@ -1206,17 +1207,19 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
     // Speed & Latency: visible even on empty state
     fireEvent.click(screen.getByRole('button', { name: '速度监测' }));
     expect(
-      await screen.findByText(/当前时间窗内暂无有效耗时样本/)
+      await screen.findByText(/当前时间窗等待有效耗时样本/)
     ).toBeInTheDocument();
     expect(screen.getByTestId('time-range-control')).toBeInTheDocument();
 
-    // Monthly, Subscriptions, DataSources, Preferences: absent
+    // Monthly, Usage, DataSources, Preferences: absent
     fireEvent.click(screen.getByRole('button', { name: '月度统计' }));
     expect(await screen.findByRole('heading', { name: '月度统计' })).toBeInTheDocument();
     expect(screen.queryByTestId('time-range-control')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '订阅用量' }));
-    expect(await screen.findByText('尚未添加个人订阅配置')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '用量' }));
+    expect(
+      await screen.findByText('接入提供商账号或官方 API 密钥以同步实时配额与余额')
+    ).toBeInTheDocument();
     expect(screen.queryByTestId('time-range-control')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '数据源与合规' }));
@@ -1956,21 +1959,19 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
     expect(screen.queryByText('各档位参考配额实时对照')).not.toBeInTheDocument();
     expect(screen.getByText('24.0%')).toBeInTheDocument();
 
-    // Open drawer from top button, apply template inside drawer & verify reactive USD -> CNY conversion
-    fireEvent.click(screen.getByRole('button', { name: '添加我的订阅' }));
-    expect(await screen.findByText('添加我的订阅配置')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Claude Max 5x/ }));
+    // Open unified Add Account drawer, switch to API mode & verify reactive USD -> CNY conversion
+    fireEvent.click(screen.getByRole('button', { name: '添加账户' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API 密钥接入' }));
 
-    const feeInput = screen.getByLabelText(/订阅月费/) as HTMLInputElement;
-    expect(feeInput.value).toBe('100');
-    expect(screen.queryByLabelText(/估算等效额度/)).not.toBeInTheDocument();
+    const prepaidInput = screen.getByLabelText(/预充起始余额/) as HTMLInputElement;
+    fireEvent.change(prepaidInput, { target: { value: '100' } });
 
     act(() => {
       useWorkspaceStore.getState().setCurrency('CNY');
     });
 
     await waitFor(() => {
-      expect((screen.getByLabelText(/订阅月费/) as HTMLInputElement).value).toBe('725');
+      expect((screen.getByLabelText(/预充起始余额/) as HTMLInputElement).value).toBe('725');
     });
   });
 
@@ -2009,7 +2010,7 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
     renderWithQuery(<DataSourcesPage />);
 
     expect(
-      await screen.findByText('Kimi Code 实时配额已同步至「订阅配额」')
+      await screen.findByText('Kimi Code 实时配额已同步至「用量」')
     ).toBeInTheDocument();
     expect(screen.getByText('周期配额: 18 / 100')).toBeInTheDocument();
     expect(screen.queryByText(/QUOTA 0\.00/)).not.toBeInTheDocument();
@@ -2463,8 +2464,8 @@ describe('v0.2.5 Pay-As-You-Go, Credits & Floating Toggle', () => {
     expect(screen.getByText('766.76 Credits')).toBeInTheDocument();
     expect(screen.queryByText('各档位参考配额实时对照')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '添加按量计费' }));
-    expect(await screen.findByText('添加按量计费账户')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '添加账户' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API 密钥接入' }));
     expect(document.querySelector('body > .drawer-backdrop-enter')).not.toBeNull();
 
     const keyInput = screen.getByLabelText(/官方 API Key/) as HTMLInputElement;
@@ -2472,16 +2473,16 @@ describe('v0.2.5 Pay-As-You-Go, Credits & Floating Toggle', () => {
     const budgetInput = screen.getByLabelText(/月度支出上限/) as HTMLInputElement;
     fireEvent.change(budgetInput, { target: { value: '80' } });
 
-    fireEvent.click(screen.getByRole('button', { name: '保存按量计费账户' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存账户' }));
 
     await waitFor(() => {
-      expect(setKeySpy).toHaveBeenCalledWith('deepseek_harness', 'sk-deepseek-test-123');
       expect(upsertPaygSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           provider_id: 'deepseek_harness',
           monthly_budget_micro_usd: 80_000_000,
         })
       );
+      expect(setKeySpy).toHaveBeenCalledWith('deepseek_harness', 'sk-deepseek-test-123');
     });
   });
 
@@ -2509,7 +2510,7 @@ describe('v0.2.5 Pay-As-You-Go, Credits & Floating Toggle', () => {
   });
 });
 
-describe('v0.2.6 AI Subscription Catalog & Factual Subscriptions (No Local Estimated Quotas)', () => {
+describe('v0.2.7 Unified 用量 Account Hub & Positive UI Copy', () => {
   beforeEach(() => {
     resetWorkspaceState();
   });
@@ -2519,91 +2520,47 @@ describe('v0.2.6 AI Subscription Catalog & Factual Subscriptions (No Local Estim
     vi.restoreAllMocks();
   });
 
-  it('renders factual spend & ROI without fake progress bars for non-API subscriptions and filters catalog templates', async () => {
+  it('omits windowless manual plans and exposes single 添加账户 entry point with login/API modes', async () => {
     const now = Date.now();
-    const ultraPlan: SubscriptionPlanStatus = {
+    const windowlessPlan: SubscriptionPlanStatus = {
       plan: {
-        plan_id: 'sub_antigravity_ultra',
-        provider_id: 'antigravity',
-        plan_name: 'Google AI Ultra',
+        plan_id: 'manual_cursor',
+        provider_id: 'cursor',
+        plan_name: 'Cursor Pro (Manual)',
         enabled: true,
-        monthly_fee_micro_usd: 200_000_000,
+        monthly_fee_micro_usd: 20_000_000,
         is_user_configured: true,
         auto_source: null,
         updated_at_ms: now,
         windows: [],
       },
       windows: [],
-      today_cost_micro_usd: 15_000_000,
-      week_cost_micro_usd: 82_000_000,
-      month_cost_micro_usd: 240_000_000,
-      month_tokens: 4_800_000,
+      today_cost_micro_usd: 5_000_000,
+      week_cost_micro_usd: 20_000_000,
+      month_cost_micro_usd: 50_000_000,
+      month_tokens: 1_000_000,
     };
 
-    const catalogTemplates: SubscriptionPlanTemplate[] = [
-      ...makeTemplates(),
-      {
-        template_id: 'cursor_pro',
-        provider_id: 'cursor',
-        plan_name: 'Cursor Pro',
-        monthly_fee_micro_usd: 20_000_000,
-        description: 'Cursor Pro 月度订阅（USD 20/月）',
-        windows: [],
-        live_windows: [],
-      },
-    ];
-
-    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(
-      makePreferences({ last_subscription_sync_at_ms: now - 30_000 })
-    );
-    vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue([ultraPlan]);
+    vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue([windowlessPlan]);
     vi.spyOn(ipc, 'getObservedRateLimits').mockResolvedValue([]);
-    vi.spyOn(ipc, 'getSubscriptionTemplates').mockResolvedValue(catalogTemplates);
     vi.spyOn(ipc, 'getRemoteSubscriptionSnapshots').mockResolvedValue([]);
     vi.spyOn(ipc, 'getPaygAccounts').mockResolvedValue([]);
     vi.spyOn(ipc, 'getProviderConfigs').mockResolvedValue([]);
-    const syncSpy = vi.spyOn(ipc, 'syncPricingAndRate').mockResolvedValue({
-      rate_updated: false,
-      usd_to_cny_rate: '7.25',
-      pricing_updated: false,
-      synced_models_count: 100,
-      recomputed_events_count: 0,
-      subscriptions_updated: true,
-      synced_plans_count: 40,
-      synced_at_ms: now,
-      rate_source: null,
-      pricing_source: null,
-      subscription_source: 'pages',
-      warning: null,
-    });
 
     renderWithQuery(<SubscriptionsPage />);
 
-    expect(await screen.findByText('Google AI Ultra')).toBeInTheDocument();
-    expect(screen.getByText('套餐目录 · 3 款')).toBeInTheDocument();
-    expect(screen.getByText('仅统计真实消耗 · 官方未公开配额接口')).toBeInTheDocument();
-    expect(screen.getByText('今日等效消耗')).toBeInTheDocument();
-    expect(screen.getByText('$15.00')).toBeInTheDocument();
-    expect(screen.getByText('$82.00')).toBeInTheDocument();
-    expect(screen.getByText('$240.00')).toBeInTheDocument();
-    expect(screen.getByText('120.0%')).toBeInTheDocument();
-    expect(screen.getByText('1.20x 月费')).toBeInTheDocument();
-    // Strictly zero estimated quota progress bars when no official window exists
+    expect(
+      await screen.findByText('接入提供商账号或官方 API 密钥以同步实时配额与余额')
+    ).toBeInTheDocument();
+    // Windowless manual plan must not be displayed
+    expect(screen.queryByText('Cursor Pro (Manual)')).not.toBeInTheDocument();
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '添加账户' })).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole('button', { name: '同步套餐目录' }));
-    await waitFor(() => {
-      expect(syncSpy).toHaveBeenCalledWith(true);
-    });
-    expect(await screen.findByText(/套餐目录已更新（共 40 款套餐/)).toBeInTheDocument();
-
-    // Open drawer and filter AI Subscription Catalog templates by search query
-    fireEvent.click(screen.getByRole('button', { name: '添加我的订阅' }));
-    const searchInput = await screen.findByLabelText('搜索套餐模板');
+    fireEvent.click(screen.getByRole('button', { name: '添加账户' }));
     expect(document.querySelector('body > .drawer-backdrop-enter')).not.toBeNull();
-    fireEvent.change(searchInput, { target: { value: 'Cursor' } });
-    expect(await screen.findByRole('button', { name: /Cursor Pro/ })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Claude Max 5x/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '提供商账号登录' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'API 密钥接入' })).toBeInTheDocument();
   });
 
   it('hides non-API plans without official windows from TrayPopupPage quota section', async () => {
@@ -2668,6 +2625,140 @@ describe('v0.2.6 AI Subscription Catalog & Factual Subscriptions (No Local Estim
     renderWithQuery(<TrayPopupPage />);
 
     expect(await screen.findByText('Codex · 5h 官方限额')).toBeInTheDocument();
-    expect(screen.queryByText('暂无官方实测订阅配额窗口')).not.toBeInTheDocument();
+    expect(screen.queryByText('等待官方配额同步')).not.toBeInTheDocument();
+  });
+
+  it('renders Antigravity official_cli pool windows and percentage readout in SubscriptionsPage', async () => {
+    const now = Date.now();
+    vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue([
+      {
+        plan: {
+          plan_id: 'auto_antigravity',
+          provider_id: 'antigravity',
+          plan_name: 'Google AI Ultra',
+          enabled: true,
+          monthly_fee_micro_usd: 199_990_000,
+          is_user_configured: true,
+          auto_source: 'official_cli',
+          updated_at_ms: now,
+          windows: [],
+        },
+        windows: [
+          {
+            window_id: 'gemini-5h',
+            label: 'Gemini 模型池 · 5h 限额',
+            duration_hours: 5,
+            rolling: true,
+            unit: 'tokens',
+            used_value: 37,
+            limit_value: 100,
+            used_percent: 36.5,
+            warning_percent: 80,
+            critical_percent: 95,
+            burn_rate_per_hour: 0,
+            projected_exhaustion_hours: null,
+            resets_at_ms: now + 3_600_000,
+            resets_in_seconds: 3600,
+            source: 'official_cli',
+            alert_level: 'normal',
+          },
+          {
+            window_id: '3p-weekly',
+            label: 'Claude / GPT 模型池 · 7d 周限额',
+            duration_hours: 168,
+            rolling: true,
+            unit: 'tokens',
+            used_value: 0,
+            limit_value: 100,
+            used_percent: 0.5,
+            warning_percent: 80,
+            critical_percent: 95,
+            burn_rate_per_hour: 0,
+            projected_exhaustion_hours: null,
+            resets_at_ms: now + 86_400_000,
+            resets_in_seconds: 86400,
+            source: 'official_cli',
+            alert_level: 'normal',
+          },
+        ],
+        today_cost_micro_usd: 2_000_000,
+        week_cost_micro_usd: 10_000_000,
+        month_cost_micro_usd: 40_000_000,
+        month_tokens: 500_000,
+      },
+    ]);
+    vi.spyOn(ipc, 'getObservedRateLimits').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getSubscriptionTemplates').mockResolvedValue([]);
+
+    renderWithQuery(<SubscriptionsPage />);
+
+    expect(await screen.findByText('Google AI Ultra')).toBeInTheDocument();
+    expect(screen.getByText('自动获取 · 官方 CLI')).toBeInTheDocument();
+    expect(screen.getByText('Gemini 模型池 · 5h 限额')).toBeInTheDocument();
+    expect(screen.getByText('Claude / GPT 模型池 · 7d 周限额')).toBeInTheDocument();
+    expect(screen.getAllByText('官方 CLI 实时').length).toBe(2);
+    expect(screen.getByText('剩余 63.5%')).toBeInTheDocument();
+    expect(screen.getByText('剩余 99.5%')).toBeInTheDocument();
+  });
+
+  it('renders Antigravity CLI quota refresh button and synced readout in DataSourcesPage without API key', async () => {
+    const now = Date.now();
+    const configs: ProviderConfig[] = [
+      {
+        provider_id: 'antigravity',
+        enabled: true,
+        collection_mode: 'local_log',
+        custom_log_paths: [],
+        has_credential: false,
+        last_sync_at_ms: now - 2_000,
+        last_error: null,
+        updated_at_ms: now,
+      },
+    ];
+
+    vi.spyOn(ipc, 'getProviderConfigs').mockResolvedValue(configs);
+    vi.spyOn(ipc, 'getIngestionCursors').mockResolvedValue([]);
+    vi.spyOn(ipc, 'listCustomProviderRules').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(makePreferences());
+    vi.spyOn(ipc, 'getProviderBalances').mockResolvedValue([
+      {
+        provider_id: 'antigravity',
+        currency: 'QUOTA',
+        total_balance_micro: null,
+        granted_balance_micro: null,
+        topped_up_balance_micro: null,
+        daily_quota_used_micro: null,
+        daily_quota_limit_micro: null,
+        fetched_at_ms: now,
+      },
+    ]);
+    const refreshSpy = vi.spyOn(ipc, 'refreshProviderBalance').mockResolvedValue({
+      snapshot: {
+        provider_id: 'antigravity',
+        currency: 'QUOTA',
+        total_balance_micro: null,
+        granted_balance_micro: null,
+        topped_up_balance_micro: null,
+        daily_quota_used_micro: null,
+        daily_quota_limit_micro: null,
+        fetched_at_ms: now,
+      },
+      rate_limits_updated: 4,
+      endpoint: 'agy -p "/usage" --output-format json',
+      from_cache: false,
+      cooldown_remaining_secs: 0,
+    });
+
+    renderWithQuery(<DataSourcesPage />);
+
+    expect(
+      await screen.findByText('Antigravity 官方 CLI 配额已同步至「用量」')
+    ).toBeInTheDocument();
+    const refreshBtn = screen.getByRole('button', { name: '刷新 CLI 配额' });
+    fireEvent.click(refreshBtn);
+
+    await waitFor(() => {
+      expect(refreshSpy).toHaveBeenCalledWith('antigravity');
+    });
   });
 });

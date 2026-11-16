@@ -814,6 +814,9 @@ pub async fn refresh_provider_balance(
     state: State<'_, AppState>,
     provider_id: String,
 ) -> Result<BalanceRefreshOutcome, IpcError> {
+    if provider_id.trim().eq_ignore_ascii_case("antigravity") {
+        let _ = state.storage.reset_auto_subscription_dismissal(&provider_id);
+    }
     let outcome = collect_provider_balance(&state.storage, &provider_id, state.credentials.as_ref())
         .await
         .map_err(IpcError::from)?;
@@ -829,6 +832,94 @@ pub async fn refresh_provider_balance(
         }
     }
     Ok(outcome)
+}
+
+#[tauri::command]
+pub fn launch_provider_cli_login(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<String, IpcError> {
+    let trimmed = provider_id.trim().to_ascii_lowercase();
+    let _ = state.storage.reset_auto_subscription_dismissal(&trimmed);
+
+    let (program, cli_args): (String, Vec<&'static str>) = match trimmed.as_str() {
+        "antigravity" => {
+            let bin = tokentracker_collectors::providers::antigravity::resolve_agy_cli_binary()
+                .map(|p| p.to_string_lossy().into_owned())
+                .ok_or_else(|| {
+                    IpcError::new(
+                        "CLI_LOGIN_UNAVAILABLE",
+                        "请先安装官方 agy CLI（%LOCALAPPDATA%\\agy\\bin\\agy.exe）",
+                    )
+                })?;
+            (bin, Vec::new())
+        }
+        "codex" => ("codex".to_string(), vec!["login"]),
+        "claude_code" => ("claude".to_string(), Vec::new()),
+        _ => {
+            return Err(IpcError::new(
+                "UNSUPPORTED_LOGIN",
+                "该提供商请使用 API 密钥方式接入",
+            ))
+        }
+    };
+
+    #[cfg(windows)]
+    {
+        let mut cmd = std::process::Command::new("cmd.exe");
+        cmd.arg("/c")
+            .arg("start")
+            .arg("TokenTracker Account Login")
+            .arg(&program);
+        for arg in &cli_args {
+            cmd.arg(arg);
+        }
+        cmd.spawn().map_err(|e| {
+            IpcError::new(
+                "CLI_LOGIN_SPAWN_ERROR",
+                format!("启动系统终端登录窗口失败: {e}"),
+            )
+        })?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let full_cmd = if cli_args.is_empty() {
+            format!("\"{}\"", program.replace('"', "\\\""))
+        } else {
+            format!("\"{}\" {}", program.replace('"', "\\\""), cli_args.join(" "))
+        };
+        let osa_script = format!(
+            "tell application \"Terminal\" to do script \"{}\"",
+            full_cmd.replace('"', "\\\"")
+        );
+        std::process::Command::new("osascript")
+            .args(["-e", &osa_script])
+            .spawn()
+            .map_err(|e| {
+                IpcError::new(
+                    "CLI_LOGIN_SPAWN_ERROR",
+                    format!("启动系统终端登录窗口失败: {e}"),
+                )
+            })?;
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut cmd = std::process::Command::new("x-terminal-emulator");
+        cmd.arg("-e").arg(&program);
+        for arg in &cli_args {
+            cmd.arg(arg);
+        }
+        cmd.spawn().map_err(|e| {
+            IpcError::new(
+                "CLI_LOGIN_SPAWN_ERROR",
+                format!("启动系统终端登录窗口失败: {e}"),
+            )
+        })?;
+    }
+
+    Ok("已在系统终端打开登录窗口，完成授权后点击同步即可".to_string())
 }
 
 #[tauri::command]

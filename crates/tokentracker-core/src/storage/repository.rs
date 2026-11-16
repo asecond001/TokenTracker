@@ -1875,6 +1875,60 @@ impl Storage {
         })
     }
 
+    /// Atomically replace all observed rate-limit windows for `(provider_id, source)` and refresh
+    /// any auto-discovered subscription record. Useful for CLI / API snapshots that report a
+    /// canonical active bucket list where vanished buckets should not linger.
+    pub fn replace_provider_source_rate_limits(
+        &self,
+        provider_id: &str,
+        source: &str,
+        rate_limits: &[ObservedRateLimitWindow],
+    ) -> CoreResult<()> {
+        let trimmed_provider = provider_id.trim();
+        let trimmed_source = source.trim();
+        if trimmed_provider.is_empty() || trimmed_source.is_empty() {
+            return Ok(());
+        }
+        let now_ms = Utc::now().timestamp_millis();
+        self.with_conn_mut(|conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
+                "DELETE FROM observed_rate_limits WHERE provider_id = ?1 AND source = ?2",
+                params![trimmed_provider, trimmed_source],
+            )?;
+            for obs in rate_limits {
+                tx.execute(
+                    r#"
+                    INSERT INTO observed_rate_limits
+                        (provider_id, window_name, used_percent, window_minutes, resets_at_ms, observed_at_ms, source, plan_hint)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                    ON CONFLICT(provider_id, window_name) DO UPDATE SET
+                        used_percent = excluded.used_percent,
+                        window_minutes = excluded.window_minutes,
+                        resets_at_ms = excluded.resets_at_ms,
+                        observed_at_ms = excluded.observed_at_ms,
+                        source = COALESCE(excluded.source, observed_rate_limits.source),
+                        plan_hint = COALESCE(excluded.plan_hint, observed_rate_limits.plan_hint)
+                    WHERE excluded.observed_at_ms >= observed_rate_limits.observed_at_ms
+                    "#,
+                    params![
+                        trimmed_provider,
+                        obs.window_name,
+                        obs.used_percent,
+                        obs.window_minutes,
+                        obs.resets_at_ms,
+                        obs.observed_at_ms,
+                        obs.source.as_deref().unwrap_or(trimmed_source),
+                        obs.plan_hint,
+                    ],
+                )?;
+            }
+            sync_auto_subscription_for_provider_conn(&tx, trimmed_provider, now_ms)?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     pub fn list_custom_provider_rules(&self) -> CoreResult<Vec<CustomProviderRule>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
@@ -2734,6 +2788,38 @@ fn infer_window_rule_from_observed(
     balance_currency: Option<&str>,
 ) -> SubscriptionWindowRule {
     let name = obs.window_name.to_ascii_lowercase();
+    if obs.source.as_deref() == Some("official_cli")
+        || crate::subscription::is_pool_qualified_window_name(&obs.window_name)
+    {
+        let duration_hours = obs
+            .window_minutes
+            .map(|m| (m / 60).max(1))
+            .unwrap_or_else(|| {
+                if name.contains("week") || name.contains("7d") {
+                    168
+                } else if name.contains("daily") || name.contains("24h") {
+                    24
+                } else if name.contains("month") || name.contains("30d") {
+                    720
+                } else {
+                    5
+                }
+            });
+        return SubscriptionWindowRule {
+            window_id: obs.window_name.clone(),
+            label: crate::subscription::format_authoritative_window_label(
+                &obs.window_name,
+                obs.window_minutes,
+            ),
+            duration_hours,
+            rolling: duration_hours <= 168,
+            unit: QuotaUnit::Tokens,
+            limit_value: 100,
+            warning_percent: 80,
+            critical_percent: 95,
+        };
+    }
+
     let (window_id, default_label, duration_hours, rolling) = match obs.window_minutes {
         Some(m) if (240..=360).contains(&m) => ("5h".to_string(), "5h 滚动窗口".to_string(), 5, true),
         Some(m) if (1_200..=1_680).contains(&m) => {
@@ -2881,6 +2967,11 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
             provider_ids::KIMI_CODE | provider_ids::MINIMAX_CODE | provider_ids::QCODE
         ) {
         "official_api".to_string()
+    } else if obs_rows
+        .iter()
+        .any(|o| o.source.as_deref() == Some("official_cli"))
+    {
+        "official_cli".to_string()
     } else if !obs_rows.is_empty()
         && obs_rows
             .iter()
@@ -2982,7 +3073,10 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
                 provider_ids::ANTIGRAVITY if hint_lower.contains("free") => {
                     tpl.template_id == "google_ai_free"
                 }
-                provider_ids::ANTIGRAVITY => tpl.template_id == "google_ai_pro",
+                provider_ids::ANTIGRAVITY if hint_lower.contains("pro") => {
+                    tpl.template_id == "google_ai_pro"
+                }
+                provider_ids::ANTIGRAVITY => false,
                 provider_ids::KIMI_CODE
                     if matches!(
                         hint_lower.as_str(),
@@ -3030,7 +3124,13 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
     // Only keep windows backed by actual authoritative observations (never fabricate unverified
     // local_estimation windows for Antigravity or unreturned monthly windows).
     let mut windows: Vec<SubscriptionWindowRule> = rules_by_id.into_values().collect();
-    windows.sort_by_key(|w| w.duration_hours);
+    windows.sort_by(|a, b| {
+        let a_3p = a.window_id.to_ascii_lowercase().starts_with("3p-");
+        let b_3p = b.window_id.to_ascii_lowercase().starts_with("3p-");
+        a_3p.cmp(&b_3p)
+            .then_with(|| a.duration_hours.cmp(&b.duration_hours))
+            .then_with(|| a.window_id.cmp(&b.window_id))
+    });
     if windows.is_empty() && trimmed != provider_ids::ANTIGRAVITY {
         return Ok(());
     }
@@ -3120,7 +3220,7 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
                 )
             } else if hint_lower.contains("free") {
                 ("Google AI Free / Antigravity".to_string(), 0)
-            } else {
+            } else if hint_lower.contains("pro") {
                 (
                     preferred_tpl
                         .map(|t| t.plan_name.clone())
@@ -3129,6 +3229,8 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
                         .map(|t| t.monthly_fee_micro_usd)
                         .unwrap_or(19_990_000),
                 )
+            } else {
+                ("Antigravity 官方配额".to_string(), 0)
             }
         }
         provider_ids::KIMI_CODE => {
@@ -3695,7 +3797,7 @@ mod tests {
             )
             .expect("untouched preset");
 
-            // Customized v0.1.0 preset (fee altered) -> must be preserved with is_user_configured = 1
+            // Customized v0.1.0 manual preset (fee altered) -> preserved at v2, then purged at v11 with all manual plans
             conn.execute(
                 "INSERT INTO subscription_plans (plan_id, provider_id, plan_name, enabled, monthly_fee_micro_usd, windows_json, updated_at_ms) VALUES ('codex_plus', 'codex', 'ChatGPT Plus / Codex ($20/mo)', 1, 25000000, ?1, ?2)",
                 params![default_windows, seed_ts + 200],
@@ -3722,9 +3824,10 @@ mod tests {
 
         let storage = Storage::open_file(&db_path).expect("migrate v1 -> v2");
         let plans = storage.list_subscription_plans().expect("plans");
-        assert_eq!(plans.len(), 1);
-        assert_eq!(plans[0].plan_id, "codex_plus");
-        assert!(plans[0].is_user_configured);
+        assert!(
+            plans.is_empty(),
+            "v1 -> current schema migration must purge untouched v0.1.0 presets at v2 and manual plans at v11"
+        );
 
         let prefs = storage.get_preferences().expect("prefs");
         assert_eq!(prefs.bg_mode, "none");
@@ -4742,7 +4845,7 @@ mod tests {
                     "#,
                     params![now_ms],
                 )?;
-                conn.execute("DELETE FROM schema_migrations WHERE version = 10", [])?;
+                conn.execute("DELETE FROM schema_migrations WHERE version >= 10", [])?;
                 Ok(())
             })
             .expect("inject pre-v10 data");
@@ -4808,5 +4911,161 @@ mod tests {
                 .last_subscription_sync_at_ms,
             Some(now_ms + 2_000)
         );
+    }
+
+    #[test]
+    fn antigravity_official_cli_rate_limits_auto_seed_and_upgrade_with_carbon_usage() {
+        let storage = Storage::open_in_memory().expect("in-memory");
+        let dev = storage.local_device().expect("device").device_id;
+        let now_ms = 1_794_840_000_000i64;
+
+        let cli_windows = vec![
+            ObservedRateLimitWindow {
+                provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                window_name: "gemini-5h".to_string(),
+                used_percent: 36.5,
+                window_minutes: Some(300),
+                resets_at_ms: Some(now_ms + 3_600_000),
+                observed_at_ms: now_ms,
+                source: Some("official_cli".to_string()),
+                plan_hint: None,
+            },
+            ObservedRateLimitWindow {
+                provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                window_name: "gemini-weekly".to_string(),
+                used_percent: 63.9,
+                window_minutes: Some(10_080),
+                resets_at_ms: Some(now_ms + 86_400_000),
+                observed_at_ms: now_ms,
+                source: Some("official_cli".to_string()),
+                plan_hint: None,
+            },
+            ObservedRateLimitWindow {
+                provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                window_name: "3p-5h".to_string(),
+                used_percent: 0.0,
+                window_minutes: Some(300),
+                resets_at_ms: Some(now_ms + 7_200_000),
+                observed_at_ms: now_ms,
+                source: Some("official_cli".to_string()),
+                plan_hint: None,
+            },
+            ObservedRateLimitWindow {
+                provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                window_name: "3p-weekly".to_string(),
+                used_percent: 0.45,
+                window_minutes: Some(10_080),
+                resets_at_ms: Some(now_ms + 90_000_000),
+                observed_at_ms: now_ms,
+                source: Some("official_cli".to_string()),
+                plan_hint: None,
+            },
+        ];
+
+        storage
+            .replace_provider_source_rate_limits(
+                provider_ids::ANTIGRAVITY,
+                "official_cli",
+                &cli_windows,
+            )
+            .expect("replace official_cli windows");
+
+        let subs = storage.query_subscriptions(now_ms).expect("subs");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].plan.plan_id, "auto_antigravity");
+        assert_eq!(subs[0].plan.auto_source.as_deref(), Some("official_cli"));
+        // Must not falsely assume Pro tier when no tier hint is present
+        assert_eq!(subs[0].plan.plan_name, "Antigravity 官方配额");
+        assert_eq!(subs[0].plan.monthly_fee_micro_usd, 0);
+        assert_eq!(subs[0].windows.len(), 4);
+        assert_eq!(subs[0].windows[0].window_id, "gemini-5h");
+        assert_eq!(subs[0].windows[0].source, "official_cli");
+        assert_eq!(subs[0].windows[3].window_id, "3p-weekly");
+
+        // Record Carbon model usage and verify next CLI sync promotes auto plan to Google AI Ultra
+        storage
+            .ingest_events_with_cursor(
+                &[NormalizedUsageEvent {
+                    event_id: "agy-carbon-1".to_string(),
+                    device_id: dev,
+                    provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                    session_id: "s-carbon".to_string(),
+                    project_label: "TokenTracker".to_string(),
+                    model_id: "Gemini 4 Carbon (High)".to_string(),
+                    timestamp_ms: now_ms,
+                    input_tokens: 1_000,
+                    output_tokens: 500,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    reasoning_tokens: 0,
+                    observable_only: false,
+                    duration_ms: Some(1_000),
+                    ttft_ms: None,
+                    output_tps: Some(50.0),
+                    estimated_cost_micro_usd: 0,
+                    cache_saved_micro_usd: 0,
+                }],
+                None,
+                &[],
+            )
+            .expect("ingest carbon event");
+
+        storage
+            .replace_provider_source_rate_limits(
+                provider_ids::ANTIGRAVITY,
+                "official_cli",
+                &cli_windows[..2],
+            )
+            .expect("replace with 2 buckets");
+        let updated_subs = storage.query_subscriptions(now_ms).expect("updated subs");
+        assert_eq!(updated_subs[0].plan.plan_name, "Google AI Ultra");
+        // Previously removed 3p buckets must no longer linger after replace_provider_source_rate_limits
+        assert_eq!(updated_subs[0].windows.len(), 2);
+    }
+
+    #[test]
+    fn v11_migration_purges_manual_subscriptions_and_keeps_authoritative_auto_plans() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("v10_to_v11.sqlite");
+        let now_ms = 1_795_100_000_000i64;
+
+        let storage = Storage::open_file(&db_path).expect("seed base db");
+        storage
+            .upsert_subscription_plan(&SubscriptionPlan {
+                plan_id: "manual_claude_max".to_string(),
+                provider_id: provider_ids::CLAUDE_CODE.to_string(),
+                plan_name: "Claude Max 5x".to_string(),
+                enabled: true,
+                monthly_fee_micro_usd: 100_000_000,
+                windows: Vec::new(),
+                is_user_configured: true,
+                auto_source: None,
+                updated_at_ms: now_ms,
+            })
+            .expect("insert manual plan");
+        storage
+            .upsert_observed_rate_limits(&[ObservedRateLimitWindow {
+                provider_id: provider_ids::KIMI_CODE.to_string(),
+                window_name: "5h".to_string(),
+                used_percent: 20.0,
+                window_minutes: Some(300),
+                resets_at_ms: Some(now_ms + 3_600_000),
+                observed_at_ms: now_ms,
+                source: Some("official_api".to_string()),
+                plan_hint: Some("LEVEL_MAX".to_string()),
+            }])
+            .expect("seed auto kimi plan");
+        storage
+            .with_conn(|conn| {
+                conn.execute("DELETE FROM schema_migrations WHERE version = 11", [])?;
+                Ok(())
+            })
+            .expect("rewind to v10");
+        drop(storage);
+
+        let migrated = Storage::open_file(&db_path).expect("run v11 migration");
+        let subs = migrated.query_subscriptions(now_ms).expect("query subs");
+        assert!(!subs.iter().any(|s| s.plan.plan_id == "manual_claude_max"));
+        assert!(subs.iter().any(|s| s.plan.plan_id == "auto_kimi_code"));
     }
 }

@@ -386,7 +386,7 @@ export function OverviewPage() {
               </>
             ) : (
               <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                今日暂无用量占比数据
+                等待今日用量写入
               </div>
             )}
           </div>
@@ -418,7 +418,7 @@ export function OverviewPage() {
             ))}
             {(data?.top_model_shares ?? []).length === 0 && (
               <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                暂无模型分布记录
+                等待模型调用记录
               </div>
             )}
           </div>
@@ -553,7 +553,7 @@ export function OverviewPage() {
                 color: 'var(--text-muted)',
               }}
             >
-              过去 15 分钟内暂无本地或远端活跃会话；运行受支持的 AI 编程工具后将在此实时显示。
+              等待活跃会话
             </div>
           )}
         </div>
@@ -786,14 +786,14 @@ export function OverviewPage() {
             className="h-[240px] flex flex-col items-center justify-center text-[12.5px] gap-2"
             style={{ color: 'var(--text-muted)' }}
           >
-            <span>当前时间窗暂无可观测用量流水</span>
+            <span>当前时间窗等待用量数据</span>
             <button
               type="button"
               onClick={() => setActivePage('sources')}
               className="btn-interactive px-2.5 py-1 rounded-lg text-[12px] underline cursor-pointer"
               style={{ color: 'var(--accent-primary)' }}
             >
-              前往数据源与合规检查路径或触发扫描
+              前往数据源与合规
             </button>
           </div>
         ) : (
@@ -821,7 +821,7 @@ export function OverviewPage() {
                 <th className="py-2 px-3 text-right">今日用量 / 费用</th>
                 <th className="py-2 px-3 text-right">本月用量 / 费用</th>
                 <th className="py-2 px-3 text-right">缓存命中率</th>
-                <th className="py-2 px-3 w-[220px]">主订阅窗口 / 限额</th>
+                <th className="py-2 px-3 w-[220px]">配额窗口</th>
                 <th className="py-2 pl-3 text-right">最近活跃</th>
               </tr>
             </thead>
@@ -857,7 +857,7 @@ export function OverviewPage() {
                             backgroundColor: 'var(--bg-hover)',
                             color: 'var(--text-secondary)',
                           }}
-                          title="本地公开日志未包含 Token 计数字段的纯可观测步数"
+                          title="基于本地公开日志记录的可观测响应步数"
                         >
                           +{row.observable_steps} 步追踪
                         </span>
@@ -892,11 +892,11 @@ export function OverviewPage() {
                       </div>
                     ) : configuredProviderIds.has(row.provider_id) ? (
                       <span className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                        无官方限额（按真实消耗统计）
+                        按实测消耗统计
                       </span>
                     ) : (
                       <span className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                        未配置订阅规则
+                        按实测消耗统计
                       </span>
                     )}
                   </td>

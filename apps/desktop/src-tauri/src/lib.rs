@@ -89,6 +89,7 @@ pub fn run() {
             commands::test_custom_provider_sample_line,
             commands::get_provider_balances,
             commands::refresh_provider_balance,
+            commands::launch_provider_cli_login,
             commands::get_payg_accounts,
             commands::upsert_payg_account,
             commands::delete_payg_account,

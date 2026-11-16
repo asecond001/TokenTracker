@@ -235,7 +235,7 @@ export function ModelsPricingPage() {
         Math.max(0, Math.round((Number.parseFloat(s) || 0) * 1_000_000));
       const trimmedPattern = form.model_pattern.trim();
       if (!trimmedPattern) {
-        throw new Error('模型匹配规则名称不能为空');
+        throw new Error('请输入模型匹配规则名称');
       }
       const trimmedRate = rateInput.trim();
       if (trimmedRate) {
@@ -420,14 +420,21 @@ export function ModelsPricingPage() {
         className="flex flex-wrap items-center justify-between gap-4 pb-5"
         style={{ borderBottom: '1px solid var(--border-subtle)' }}
       >
-        <div>
+        <div className="flex flex-wrap items-center gap-2.5">
           <h1 className="text-[16px] font-semibold tracking-tight">模型开销统计</h1>
-          <p className="text-[12px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+          <span
+            className="px-2 py-0.5 text-[11px] rounded-md tabular-nums"
+            style={{
+              backgroundColor: 'var(--bg-elevated)',
+              border: '1px solid var(--border-hairline)',
+              color: 'var(--text-secondary)',
+            }}
+          >
             {isExchangeRateAuto ? '自动汇率' : '锁定汇率'} 1 USD ={' '}
             {prefs?.usd_to_cny_rate ?? usdToCnyRate} CNY · 已同步公开模型单价{' '}
             {syncedPublicModelsCount} 款
             {latestSyncMs ? ` · 更新于 ${formatRelativeTime(latestSyncMs)}` : ''}
-          </p>
+          </span>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -509,7 +516,7 @@ export function ModelsPricingPage() {
           </div>
         ) : (data?.rows.length ?? 0) === 0 ? (
           <div className="py-12 text-center text-[12.5px]" style={{ color: 'var(--text-muted)' }}>
-            当前时间范围暂无模型调用数据
+            当前时间范围等待模型调用数据
           </div>
         ) : (
           <div className="overflow-x-auto">

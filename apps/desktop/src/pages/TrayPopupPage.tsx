@@ -238,7 +238,7 @@ export function TrayPopupPage() {
           })}
           {(summary?.active_sessions ?? []).length === 0 && (
             <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-              15 分钟内暂无活跃或近期会话
+              等待活跃会话
             </div>
           )}
         </div>
@@ -249,7 +249,7 @@ export function TrayPopupPage() {
             className="text-[10.5px] font-semibold uppercase tracking-wider"
             style={{ color: 'var(--text-muted)' }}
           >
-            订阅窗口配额
+            配额窗口
           </div>
           {(() => {
             const officialSubs = (summary?.subscriptions ?? [])
@@ -258,7 +258,7 @@ export function TrayPopupPage() {
             if (officialSubs.length === 0) {
               return (
                 <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                  暂无官方实测订阅配额窗口
+                  等待官方配额同步
                 </div>
               );
             }

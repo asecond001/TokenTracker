@@ -38,11 +38,11 @@ const DEFAULT_PATH_HINTS: Record<string, string> = {
   claude_code: '~/.claude/projects/ 与 ~/.claude/stats-cache.json',
   codex: '~/.codex/sessions/**/rollout-*.jsonl',
   antigravity: '%APPDATA% / ~/.gemini/antigravity/brain/*/transcript.jsonl',
-  kimi_code: '~/.kimi/（sessions / usage JSON / JSONL）',
-  workbuddy: '~/.workbuddy/ 或 %APPDATA%/Workbuddy/（自动按 routed_model 归因）',
-  deepseek_harness: '~/.dsh/ 或 ~/.deepseek-harness/（精确区分 Prefix Cache 命中与未命中）',
-  qcode: '~/.qcode/（本地兼容网关日志 + 官方用量 API）',
-  minimax_code: '~/.minimax/（CLI 会话日志 + Token Plan 配额接口）',
+  kimi_code: '~/.kimi/',
+  workbuddy: '~/.workbuddy/ 或 %APPDATA%/Workbuddy/',
+  deepseek_harness: '~/.dsh/ 或 ~/.deepseek-harness/',
+  qcode: '~/.qcode/',
+  minimax_code: '~/.minimax/',
 };
 
 const BALANCE_API_LABELS: Record<string, { label: string; placeholder: string }> = {
@@ -229,7 +229,7 @@ export function DataSourcesPage() {
   const saveApiKeyMutation = useMutation({
     mutationFn: async ({ providerId, apiKey }: { providerId: string; apiKey: string }) => {
       if (!apiKey.trim()) {
-        throw new Error('API Key / Admin Key 不能为空');
+        throw new Error('请输入有效的 API Key / Admin Key');
       }
       await ipc.setProviderApiKey(providerId, apiKey.trim());
     },
@@ -600,11 +600,6 @@ export function DataSourcesPage() {
                     <code className="ml-1 text-[11px] select-text">
                       {DEFAULT_PATH_HINTS[cfg.provider_id] ?? '标准用户数据目录'}
                     </code>
-                    {cfg.provider_id === 'antigravity' && (
-                      <span className="ml-2" style={{ color: 'var(--accent-emerald)' }}>
-                        · 自动跳过大体积 transcript_full.jsonl
-                      </span>
-                    )}
                   </div>
 
                   {cfg.custom_log_paths.length > 0 && (
@@ -712,7 +707,7 @@ export function DataSourcesPage() {
                       >
                         {cfg.has_credential
                           ? '已托管于 Windows 凭据管理器'
-                          : '未配置密钥'}
+                          : '可录入密钥'}
                       </span>
                     </div>
 
@@ -832,7 +827,7 @@ export function DataSourcesPage() {
                             <span>
                               官方接口:{' '}
                               <strong style={{ color: 'var(--text-primary)' }}>
-                                Kimi Code 实时配额已同步至「订阅配额」
+                                Kimi Code 实时配额已同步至「用量」
                               </strong>
                             </span>
                             {balanceSnap.daily_quota_limit_micro !== null && (
@@ -900,6 +895,69 @@ export function DataSourcesPage() {
                   </div>
                 )}
 
+                {cfg.provider_id === 'antigravity' && (
+                  <div
+                    className="pl-4.5 pt-2 flex flex-wrap items-center justify-between gap-3 text-[11.5px]"
+                    style={{ borderTop: '1px dashed var(--border-subtle)' }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <RefreshCw className="w-3.5 h-3.5" style={{ color: 'var(--text-muted)' }} />
+                      <span style={{ color: 'var(--text-secondary)' }}>
+                        Antigravity 官方 CLI 配额
+                      </span>
+                      <span
+                        className="px-1.5 py-0.5 rounded-md text-[10.5px]"
+                        style={{
+                          backgroundColor: 'var(--bg-hover)',
+                          border: '1px solid var(--border-hairline)',
+                          color: 'var(--accent-emerald)',
+                        }}
+                      >
+                        agy CLI 授权
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => refreshBalanceMutation.mutate(cfg.provider_id)}
+                      disabled={refreshBalanceMutation.isPending}
+                      className="btn-primary inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
+                      style={{
+                        backgroundColor: 'var(--accent-primary)',
+                        color: '#ffffff',
+                      }}
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>刷新 CLI 配额</span>
+                    </button>
+
+                    {balanceSnap && (
+                      <div
+                        className="w-full px-2.5 py-1.5 rounded-lg text-[11px] tabular-nums flex flex-wrap items-center gap-4"
+                        style={{
+                          backgroundColor: 'var(--bg-elevated)',
+                          border: '1px solid var(--border-hairline)',
+                          color: 'var(--text-secondary)',
+                        }}
+                      >
+                        <span>
+                          官方 CLI:{' '}
+                          <strong style={{ color: 'var(--text-primary)' }}>
+                            Antigravity 官方 CLI 配额已同步至「用量」
+                          </strong>
+                        </span>
+                        <span style={{ color: 'var(--text-muted)' }}>
+                          更新于 {formatRelativeTime(balanceSnap.fetched_at_ms)}
+                        </span>
+                        {balanceOutcome?.from_cache && (
+                          <span style={{ color: 'var(--accent-amber)' }}>
+                            60s 冷却缓存 · 剩余 {balanceOutcome.cooldown_remaining_secs}s
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {cfg.last_error && (
                   <div className="pl-4.5 text-[11.5px]" style={{ color: 'var(--accent-rose)' }}>
                     最近采集告警：{cfg.last_error}
@@ -934,7 +992,7 @@ export function DataSourcesPage() {
               >
                 {bootstrap?.otlp_running
                   ? `运行中 · 127.0.0.1:${bootstrap.otlp_port}`
-                  : '未启动'}
+                  : '待机'}
               </span>
             </div>
           </div>
@@ -1056,7 +1114,7 @@ export function DataSourcesPage() {
                 color: 'var(--text-muted)',
               }}
             >
-              尚未配置自定义规则。下方可直接配置日志目录、字段路径并试跑单行脱敏 JSONL 样本。
+              支持添加自定义声明式日志规则
             </div>
           ) : (
             customRules.map((rule) => {
@@ -1096,7 +1154,7 @@ export function DataSourcesPage() {
                       className="text-[11px] font-mono truncate"
                       style={{ color: 'var(--text-muted)' }}
                     >
-                      目录: {rule.log_roots.length > 0 ? rule.log_roots.join(' ; ') : '未指定目录'} ·
+                      目录: {rule.log_roots.length > 0 ? rule.log_roots.join(' ; ') : '待指定目录'} ·
                       后缀: {rule.mapping_spec.file_extensions.join(', ') || 'jsonl'}
                     </div>
                   </div>
@@ -1266,7 +1324,7 @@ export function DataSourcesPage() {
 
             <label className="space-y-1">
               <span className="block text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                自定义归属模型提供商 ID (可选，留空自动加 custom_ 前缀)
+                自定义归属模型提供商 ID (可选)
               </span>
               <input
                 type="text"
@@ -1336,7 +1394,7 @@ export function DataSourcesPage() {
           <div className="space-y-2 pt-1">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                脱敏单行 JSONL 样本本地校验（纯内存试跑，不写入数据库）
+                单行 JSONL 样本校验
               </span>
               <div className="flex items-center gap-2">
                 <button
@@ -1399,7 +1457,7 @@ export function DataSourcesPage() {
                 }}
               >
                 <span className="font-semibold">
-                  {sampleTestResult.matched ? '匹配成功' : '未匹配'}
+                  {sampleTestResult.matched ? '匹配成功' : '需调整规则'}
                 </span>
                 <span>模型提供商: {sampleTestResult.provider_id}</span>
                 <span>模型: {sampleTestResult.model_id ?? '—'}</span>
@@ -1459,8 +1517,7 @@ export function DataSourcesPage() {
                     className="py-8 text-center text-[12px]"
                     style={{ color: 'var(--text-muted)' }}
                   >
-                    暂无已跟踪的日志文件，点击上方「立即增量扫描」或等待 Claude Code / Codex /
-                    Antigravity 会话日志写入
+                    等待日志文件扫描记录
                   </td>
                 </tr>
               ) : (

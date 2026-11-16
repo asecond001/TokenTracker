@@ -88,7 +88,7 @@ const FLOATING_ELEMENT_TOGGLES: ReadonlyArray<{
   { key: 'showCost', label: '等效费用' },
   { key: 'showSpeed', label: '生成速率' },
   { key: 'showSession', label: '活跃会话' },
-  { key: 'showSubscriptions', label: '订阅配额' },
+  { key: 'showSubscriptions', label: '配额窗口' },
 ];
 
 function normalizeThemeMode(raw: string | undefined | null): ThemeMode {
@@ -469,7 +469,7 @@ export function PreferencesPage({
         prefs ??
         bootstrap?.preferences;
       if (!base) {
-        throw new Error('偏好配置尚未加载完成');
+        throw new Error('请稍候重试保存偏好设置');
       }
 
       const rateNum = Number.parseFloat(rateDraft);
@@ -714,7 +714,7 @@ export function PreferencesPage({
       setSyncPassphraseInput('');
       queryClient.setQueryData<SyncStatusView>(['sync-status'], status);
       await queryClient.invalidateQueries({ queryKey: ['sync-status'] });
-      setNotice({ text: '同步凭据已写入系统安全凭据库（未触碰 SQLite 明文）', kind: 'success' });
+      setNotice({ text: '同步凭据已安全写入系统凭据库', kind: 'success' });
     },
     onError: (err: unknown) => {
       setNotice({
@@ -786,7 +786,7 @@ export function PreferencesPage({
               color: 'var(--accent-tonal-text)',
             }}
           >
-            v0.2.6
+            v0.2.7
           </span>
         </div>
 
@@ -964,7 +964,7 @@ export function PreferencesPage({
                     className="text-[12px] truncate"
                     style={{ color: 'var(--text-primary)' }}
                   >
-                    {bgImagePath ? `当前壁纸：${bgImagePath}` : '尚未选择本地壁纸'}
+                    {bgImagePath ? `当前壁纸：${bgImagePath}` : '可选择本地壁纸图片'}
                   </div>
                 </div>
 
@@ -1395,6 +1395,23 @@ export function PreferencesPage({
                   <span>{updater.status === 'checking' ? '检查中…' : '检查更新'}</span>
                 </button>
               )}
+
+              {(updater.status === 'error' ||
+                updater.status === 'up_to_date' ||
+                updater.availableUpdate ||
+                updater.lastCheckedAtMs) && (
+                <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+                  {updater.status === 'error' && updater.errorMessage
+                    ? `检查更新受限：${updater.errorMessage}`
+                    : updater.status === 'up_to_date'
+                      ? '当前已是最新版本'
+                      : updater.availableUpdate
+                        ? `检测到新版本 v${updater.availableUpdate.version}`
+                        : updater.lastCheckedAtMs
+                          ? `上次检查于 ${formatRelativeTime(updater.lastCheckedAtMs)}`
+                          : null}
+                </span>
+              )}
             </div>
 
             {(updater.status === 'downloading' || updater.status === 'installing') && (
@@ -1406,18 +1423,6 @@ export function PreferencesPage({
                 />
               </div>
             )}
-
-            <div className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-              {updater.status === 'error' && updater.errorMessage
-                ? `检查更新受限：${updater.errorMessage}`
-                : updater.status === 'up_to_date'
-                  ? '当前已是最新版本'
-                  : updater.availableUpdate
-                    ? `检测到新版本 v${updater.availableUpdate.version}`
-                    : updater.lastCheckedAtMs
-                      ? `上次检查于 ${formatRelativeTime(updater.lastCheckedAtMs)}`
-                      : '尚未检查更新'}
-            </div>
           </div>
         </div>
 
@@ -1599,7 +1604,7 @@ export function PreferencesPage({
                         : 'var(--text-muted)',
                     }}
                   >
-                    {syncStatus?.has_bearer_token ? 'Bearer 已配置' : 'Bearer 未配置'}
+                    {syncStatus?.has_bearer_token ? 'Bearer 已就绪' : '待录入 Bearer'}
                   </span>
                 </div>
                 <input
@@ -1627,7 +1632,7 @@ export function PreferencesPage({
                         : 'var(--text-muted)',
                     }}
                   >
-                    {syncStatus?.has_e2ee_passphrase ? 'E2EE 口令已配置' : 'E2EE 口令未配置'}
+                    {syncStatus?.has_e2ee_passphrase ? 'E2EE 口令已就绪' : '待录入口令'}
                   </span>
                 </div>
                 <input
@@ -1694,7 +1699,7 @@ export function PreferencesPage({
                   最近同步:{' '}
                   {syncStatus?.last_sync_at_ms
                     ? formatRelativeTime(syncStatus.last_sync_at_ms)
-                    : '尚未同步'}
+                    : '待首次同步'}
                 </span>
               </div>
 

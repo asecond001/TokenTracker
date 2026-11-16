@@ -9,7 +9,7 @@ use crate::error::CoreResult;
 use crate::pricing::default_pricing_catalog;
 use crate::storage::repository::{rebuild_rollup_from_events, DAY_MS, HOUR_MS};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 10;
+pub const CURRENT_SCHEMA_VERSION: i64 = 11;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -224,6 +224,10 @@ pub fn run_migrations(conn: &mut Connection) -> CoreResult<()> {
 
     if current_version < 10 {
         migrate_v9_to_v10(conn, now_ms)?;
+    }
+
+    if current_version < 11 {
+        migrate_v10_to_v11(conn, now_ms)?;
     }
 
     seed_defaults(conn, now_ms)?;
@@ -914,6 +918,27 @@ fn migrate_v9_to_v10(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     tx.execute(
         "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
         params![10i64, now_ms],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v10_to_v11(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+
+    // Manual subscription entries and windowless local-estimation placeholders are removed once
+    // unified account-only quota/balance views supersede manual plan configuration.
+    tx.execute_batch(
+        r#"
+        DELETE FROM subscription_plans
+        WHERE (auto_source IS NULL AND plan_id NOT LIKE 'auto_%')
+           OR (auto_source = 'local_log' AND TRIM(windows_json) = '[]');
+        "#,
+    )?;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![11i64, now_ms],
     )?;
     tx.commit()?;
     Ok(())

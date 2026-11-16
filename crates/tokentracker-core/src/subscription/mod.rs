@@ -449,6 +449,84 @@ pub fn subscription_plan_templates() -> Vec<SubscriptionPlanTemplate> {
     ]
 }
 
+/// Format an authoritative window label from an observed bucket identifier and optional window minutes.
+pub fn format_authoritative_window_label(window_name: &str, window_minutes: Option<i64>) -> String {
+    let trimmed = window_name.trim();
+    if trimmed.contains(" · ") {
+        return trimmed.to_string();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let dur_label = match window_minutes {
+        Some(m) if (240..=360).contains(&m) => "5h 限额".to_string(),
+        Some(m) if (1_200..=1_680).contains(&m) => "24h 日限额".to_string(),
+        Some(m) if (9_600..=10_560).contains(&m) => "7d 周限额".to_string(),
+        Some(m) if m >= 40_000 => "30d 月限额".to_string(),
+        Some(m) => format!("{}h 限额", (m / 60).max(1)),
+        None if lower.contains("5h") || lower.contains("primary") => "5h 限额".to_string(),
+        None if lower.contains("week") || lower.contains("7d") || lower.contains("secondary") => {
+            "7d 周限额".to_string()
+        }
+        None if lower.contains("daily") || lower.contains("24h") || lower.contains("day") => {
+            "24h 日限额".to_string()
+        }
+        None if lower.contains("30d") || lower.contains("month") => "30d 月限额".to_string(),
+        None => "官方限额".to_string(),
+    };
+
+    if lower.starts_with("gemini-") || lower.contains("gemini") {
+        format!("Gemini 模型池 · {dur_label}")
+    } else if lower.starts_with("3p-")
+        || lower.contains("claude")
+        || lower.contains("gpt")
+        || lower.contains("third")
+    {
+        format!("Claude / GPT 模型池 · {dur_label}")
+    } else {
+        dur_label
+    }
+}
+
+pub(crate) fn is_pool_qualified_window_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    lower.starts_with("gemini-")
+        || lower.starts_with("3p-")
+        || name.contains(" · ")
+        || lower.contains("::")
+}
+
+fn generic_bucket_matches(window_id: &str, observed_name: &str) -> bool {
+    let name = observed_name.to_ascii_lowercase();
+    let wid = window_id.to_ascii_lowercase();
+    if wid == "5h" && (name.contains("primary") || name.contains("5h")) {
+        return true;
+    }
+    if (wid == "7d" || wid == "weekly")
+        && (name.contains("secondary") || name.contains("7d") || name.contains("week"))
+    {
+        return true;
+    }
+    if (wid == "24h" || wid == "1d" || wid == "daily")
+        && (name.contains("24h") || name.contains("daily") || name.contains("day"))
+    {
+        return true;
+    }
+    if (wid == "30d" || wid == "monthly") && (name.contains("30d") || name.contains("month")) {
+        return true;
+    }
+    false
+}
+
+fn observed_snapshot_is_fresh(
+    obs: &ObservedRateLimitWindow,
+    fallback_hours: i64,
+    now_ms: i64,
+) -> bool {
+    match obs.resets_at_ms {
+        Some(reset_ms) => reset_ms > now_ms,
+        None => now_ms.saturating_sub(obs.observed_at_ms) < fallback_hours.max(1) * HOUR_MS,
+    }
+}
+
 fn match_observed_snapshot<'a>(
     provider_id: &str,
     rule: &SubscriptionWindowRule,
@@ -465,13 +543,17 @@ fn match_observed_snapshot<'a>(
             if obs.source.as_deref() == Some("local_log_hint") || obs.window_name == "tier_hint" {
                 return false;
             }
-            // Only apply snapshots whose reset deadline has not expired yet,
-            // or that were observed within the window duration when reset time is omitted.
-            let fresh = match obs.resets_at_ms {
-                Some(reset_ms) => reset_ms > now_ms,
-                None => now_ms.saturating_sub(obs.observed_at_ms) < rule.duration_hours * HOUR_MS,
-            };
-            if !fresh {
+            if !observed_snapshot_is_fresh(obs, rule.duration_hours, now_ms) {
+                return false;
+            }
+
+            if obs.window_name.eq_ignore_ascii_case(&rule.window_id) {
+                return true;
+            }
+
+            if is_pool_qualified_window_name(&obs.window_name)
+                || is_pool_qualified_window_name(&rule.window_id)
+            {
                 return false;
             }
 
@@ -481,27 +563,7 @@ fn match_observed_snapshot<'a>(
                 }
             }
 
-            let name = obs.window_name.to_ascii_lowercase();
-            let wid = rule.window_id.to_ascii_lowercase();
-            if wid == "5h" && (name.contains("primary") || name.contains("5h")) {
-                return true;
-            }
-            if (wid == "7d" || wid == "weekly")
-                && (name.contains("secondary") || name.contains("7d") || name.contains("week"))
-            {
-                return true;
-            }
-            if (wid == "24h" || wid == "1d" || wid == "daily")
-                && (name.contains("24h") || name.contains("daily") || name.contains("day"))
-            {
-                return true;
-            }
-            if (wid == "30d" || wid == "monthly")
-                && (name.contains("30d") || name.contains("month"))
-            {
-                return true;
-            }
-            false
+            generic_bucket_matches(&rule.window_id, &obs.window_name)
         })
         .max_by(|a, b| {
             a.observed_at_ms.cmp(&b.observed_at_ms).then_with(|| {
@@ -510,6 +572,108 @@ fn match_observed_snapshot<'a>(
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
         })
+}
+
+fn append_unmatched_authoritative_windows(
+    provider_id: &str,
+    windows: &mut Vec<SubscriptionWindowStatus>,
+    samples: &[WindowUsageSample],
+    observed_snapshots: &[ObservedRateLimitWindow],
+    now_ms: i64,
+) {
+    let mut best_by_name: std::collections::BTreeMap<String, &ObservedRateLimitWindow> =
+        std::collections::BTreeMap::new();
+    for obs in observed_snapshots {
+        if !obs.provider_id.eq_ignore_ascii_case(provider_id) {
+            continue;
+        }
+        if obs.source.as_deref() == Some("local_log_hint") || obs.window_name == "tier_hint" {
+            continue;
+        }
+        let fallback_hours = obs
+            .window_minutes
+            .map(|m| (m / 60).max(1))
+            .unwrap_or_else(|| {
+                let lower = obs.window_name.to_ascii_lowercase();
+                if lower.contains("week") || lower.contains("7d") {
+                    168
+                } else {
+                    5
+                }
+            });
+        if !observed_snapshot_is_fresh(obs, fallback_hours, now_ms) {
+            continue;
+        }
+        let key = obs.window_name.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        let pool_qualified = is_pool_qualified_window_name(&obs.window_name);
+        let already_matched = windows.iter().any(|w| {
+            w.window_id.eq_ignore_ascii_case(&obs.window_name)
+                || (!pool_qualified
+                    && !is_pool_qualified_window_name(&w.window_id)
+                    && (obs.window_minutes == Some(w.duration_hours * 60)
+                        || generic_bucket_matches(&w.window_id, &obs.window_name)))
+        });
+        if already_matched {
+            continue;
+        }
+        match best_by_name.get(&key) {
+            Some(existing) if existing.observed_at_ms >= obs.observed_at_ms => {}
+            _ => {
+                best_by_name.insert(key, obs);
+            }
+        }
+    }
+
+    for obs in best_by_name.into_values() {
+        let lower = obs.window_name.to_ascii_lowercase();
+        let duration_hours = obs
+            .window_minutes
+            .map(|m| (m / 60).max(1))
+            .unwrap_or_else(|| {
+                if lower.contains("week") || lower.contains("7d") {
+                    168
+                } else if lower.contains("daily") || lower.contains("24h") {
+                    24
+                } else if lower.contains("month") || lower.contains("30d") {
+                    720
+                } else {
+                    5
+                }
+            });
+        let rule = SubscriptionWindowRule {
+            window_id: obs.window_name.clone(),
+            label: format_authoritative_window_label(&obs.window_name, obs.window_minutes),
+            duration_hours,
+            rolling: duration_hours <= 168,
+            unit: QuotaUnit::Tokens,
+            limit_value: 100,
+            warning_percent: 80,
+            critical_percent: 95,
+        };
+        windows.push(evaluate_window(
+            provider_id,
+            &rule,
+            samples,
+            std::slice::from_ref(obs),
+            now_ms,
+        ));
+    }
+
+    if windows
+        .iter()
+        .any(|w| is_pool_qualified_window_name(&w.window_id))
+    {
+        windows.sort_by(|a, b| {
+            let a_3p = a.window_id.to_ascii_lowercase().starts_with("3p-");
+            let b_3p = b.window_id.to_ascii_lowercase().starts_with("3p-");
+            a_3p.cmp(&b_3p)
+                .then_with(|| a.duration_hours.cmp(&b.duration_hours))
+                .then_with(|| a.window_id.cmp(&b.window_id))
+        });
+    }
 }
 
 /// Evaluate all reference templates against current live authoritative snapshots.
@@ -542,7 +706,7 @@ pub fn evaluate_subscription_templates_from_list(
                 .get(&tpl.provider_id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            tpl.live_windows = tpl
+            let mut live_windows: Vec<SubscriptionWindowStatus> = tpl
                 .windows
                 .iter()
                 .map(|rule| {
@@ -550,26 +714,41 @@ pub fn evaluate_subscription_templates_from_list(
                 })
                 .filter(|w| w.source != "local_estimation")
                 .collect();
+            append_unmatched_authoritative_windows(
+                &tpl.provider_id,
+                &mut live_windows,
+                samples,
+                observed_snapshots,
+                now_ms,
+            );
+            tpl.live_windows = live_windows;
             tpl
         })
         .collect()
 }
 
 /// Evaluate a subscription plan. Only windows backed by fresh authoritative snapshots
-/// (`official_api` or `official_log_snapshot`) are emitted; plans without an official quota
-/// source report an empty `windows` vector and track factual spend + ROI instead.
+/// (`official_api`, `official_cli`, or `official_log_snapshot`) are emitted; plans without
+/// an official quota source report an empty `windows` vector and track factual spend + ROI instead.
 pub fn evaluate_subscription_plan(
     plan: &SubscriptionPlan,
     samples: &[WindowUsageSample],
     observed_snapshots: &[ObservedRateLimitWindow],
     now_ms: i64,
 ) -> SubscriptionPlanStatus {
-    let windows = plan
+    let mut windows: Vec<SubscriptionWindowStatus> = plan
         .windows
         .iter()
         .map(|rule| evaluate_window(&plan.provider_id, rule, samples, observed_snapshots, now_ms))
         .filter(|w| w.source != "local_estimation")
         .collect();
+    append_unmatched_authoritative_windows(
+        &plan.provider_id,
+        &mut windows,
+        samples,
+        observed_snapshots,
+        now_ms,
+    );
 
     SubscriptionPlanStatus {
         plan: plan.clone(),
@@ -775,6 +954,7 @@ pub fn evaluate_window(
         used_value = ((used_percent / 100.0) * safe_limit as f64).round() as i64;
         source = match obs.source.as_deref() {
             Some("official_api") => "official_api".to_string(),
+            Some("official_cli") => "official_cli".to_string(),
             _ => "official_log_snapshot".to_string(),
         };
     }
@@ -1030,5 +1210,93 @@ mod tests {
             .expect("google_ai_ultra");
         assert_eq!(ultra.plan_name, "Google AI Ultra");
         assert_eq!(ultra.description, "Google AI Ultra flagship");
+    }
+
+    #[test]
+    fn antigravity_official_cli_pool_windows_attach_without_collapsing() {
+        let ultra = plan_from_template("google_ai_ultra");
+        let now_ms = 1_760_000_000_000i64;
+        let obs = vec![
+            ObservedRateLimitWindow {
+                provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                window_name: "gemini-weekly".to_string(),
+                used_percent: 63.86,
+                window_minutes: Some(10_080),
+                resets_at_ms: Some(now_ms + 86_400_000),
+                observed_at_ms: now_ms - 5_000,
+                source: Some("official_cli".to_string()),
+                plan_hint: None,
+            },
+            ObservedRateLimitWindow {
+                provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                window_name: "gemini-5h".to_string(),
+                used_percent: 36.51,
+                window_minutes: Some(300),
+                resets_at_ms: Some(now_ms + 3_600_000),
+                observed_at_ms: now_ms - 5_000,
+                source: Some("official_cli".to_string()),
+                plan_hint: None,
+            },
+            ObservedRateLimitWindow {
+                provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                window_name: "3p-weekly".to_string(),
+                used_percent: 0.45,
+                window_minutes: Some(10_080),
+                resets_at_ms: Some(now_ms + 90_000_000),
+                observed_at_ms: now_ms - 5_000,
+                source: Some("official_cli".to_string()),
+                plan_hint: None,
+            },
+            ObservedRateLimitWindow {
+                provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                window_name: "3p-5h".to_string(),
+                used_percent: 0.0,
+                window_minutes: Some(300),
+                resets_at_ms: Some(now_ms + 7_200_000),
+                observed_at_ms: now_ms - 5_000,
+                source: Some("official_cli".to_string()),
+                plan_hint: None,
+            },
+            // Expired official_cli bucket must be ignored
+            ObservedRateLimitWindow {
+                provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                window_name: "gemini-expired".to_string(),
+                used_percent: 99.0,
+                window_minutes: Some(300),
+                resets_at_ms: Some(now_ms - 1_000),
+                observed_at_ms: now_ms - 60_000,
+                source: Some("official_cli".to_string()),
+                plan_hint: None,
+            },
+        ];
+
+        let status = evaluate_subscription_plan(&ultra, &[], &obs, now_ms);
+        assert_eq!(status.windows.len(), 4);
+        assert_eq!(status.windows[0].window_id, "gemini-5h");
+        assert_eq!(status.windows[0].label, "Gemini 模型池 · 5h 限额");
+        assert_eq!(status.windows[0].source, "official_cli");
+        assert_eq!(status.windows[0].resets_in_seconds, 3600);
+        assert_eq!(status.windows[1].window_id, "gemini-weekly");
+        assert_eq!(status.windows[1].label, "Gemini 模型池 · 7d 周限额");
+        assert_eq!(status.windows[2].window_id, "3p-5h");
+        assert_eq!(status.windows[2].label, "Claude / GPT 模型池 · 5h 限额");
+        assert_eq!(status.windows[3].window_id, "3p-weekly");
+        assert_eq!(status.windows[3].label, "Claude / GPT 模型池 · 7d 周限额");
+
+        let evaluated_templates = evaluate_subscription_templates_from_list(
+            vec![SubscriptionPlanTemplate {
+                template_id: "google_ai_ultra".to_string(),
+                provider_id: provider_ids::ANTIGRAVITY.to_string(),
+                plan_name: "Google AI Ultra".to_string(),
+                monthly_fee_micro_usd: 199_990_000,
+                windows: Vec::new(),
+                description: "Catalog plan with empty rules".to_string(),
+                live_windows: Vec::new(),
+            }],
+            &HashMap::new(),
+            &obs,
+            now_ms,
+        );
+        assert_eq!(evaluated_templates[0].live_windows.len(), 4);
     }
 }

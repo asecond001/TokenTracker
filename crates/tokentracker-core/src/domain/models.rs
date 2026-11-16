@@ -310,7 +310,7 @@ pub struct SubscriptionWindowStatus {
     pub projected_exhaustion_hours: Option<f64>,
     pub resets_at_ms: Option<i64>,
     pub resets_in_seconds: i64,
-    /// `"official_api"`, `"official_log_snapshot"`, or `"local_estimation"`.
+    /// `"official_api"`, `"official_cli"`, `"official_log_snapshot"`, or `"local_estimation"`.
     pub source: String,
     /// `"normal"` | `"warning"` | `"critical"` | `"exhausted"`.
     pub alert_level: String,

@@ -1850,3 +1850,73 @@ fn incremental_tailing_past_large_gap_preserves_codex_model_switches_without_gpt
     assert_eq!(report.rows[0].model_id, "gpt-5.4");
 }
 
+#[tokio::test]
+async fn antigravity_cli_quota_refresh_persists_pools_and_honors_cooldown() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokentracker_collectors::providers::antigravity::parse_antigravity_cli_usage_output;
+    use tokentracker_collectors::providers::official_api::{
+        refresh_antigravity_cli_quota_with_runner, ANTIGRAVITY_CLI_ENDPOINT,
+    };
+
+    let storage = Storage::open_in_memory().expect("db");
+    let now_ms = 1_794_840_000_000i64;
+    let calls = AtomicUsize::new(0);
+
+    let first = refresh_antigravity_cli_quota_with_runner(&storage, now_ms, false, || {
+        calls.fetch_add(1, Ordering::SeqCst);
+        async move {
+            let sample = r#"{
+              "status": "SUCCESS",
+              "command": {
+                "name": "usage",
+                "data": {
+                  "groups": [
+                    {
+                      "name": "Gemini Models",
+                      "buckets": [
+                        {"id": "gemini-5h", "window": "5h", "remaining_fraction": 0.635, "reset_time": "2026-11-16T17:13:50Z"},
+                        {"id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.361, "reset_time": "2026-11-22T14:36:11Z"}
+                      ]
+                    },
+                    {
+                      "name": "Claude and GPT models",
+                      "buckets": [
+                        {"id": "3p-5h", "window": "5h", "remaining_fraction": 1.0, "reset_time": "2026-11-16T20:57:37Z"},
+                        {"id": "3p-weekly", "window": "weekly", "remaining_fraction": 0.995, "reset_time": "2026-11-22T16:34:57Z"}
+                      ]
+                    }
+                  ]
+                }
+              }
+            }"#;
+            parse_antigravity_cli_usage_output(sample, now_ms, Some("ultra".to_string()))
+        }
+    })
+    .await
+    .expect("first refresh succeeds");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(!first.from_cache);
+    assert_eq!(first.rate_limits_updated, 4);
+    assert_eq!(first.endpoint, ANTIGRAVITY_CLI_ENDPOINT);
+    assert_eq!(first.snapshot.currency, "QUOTA");
+
+    let subs = storage.query_subscriptions(now_ms).expect("subs");
+    assert_eq!(subs.len(), 1);
+    assert_eq!(subs[0].plan.plan_name, "Google AI Ultra");
+    assert_eq!(subs[0].plan.auto_source.as_deref(), Some("official_cli"));
+    assert_eq!(subs[0].windows.len(), 4);
+    assert_eq!(subs[0].windows[0].source, "official_cli");
+
+    // Second call 10 seconds later returns 60s cooldown cache without spawning CLI again
+    let cached = refresh_antigravity_cli_quota_with_runner(&storage, now_ms + 10_000, false, || {
+        calls.fetch_add(1, Ordering::SeqCst);
+        async { unreachable!("must use cooldown cache") }
+    })
+    .await
+    .expect("cooldown cache hit");
+    assert!(cached.from_cache);
+    assert_eq!(cached.cooldown_remaining_secs, 50);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+

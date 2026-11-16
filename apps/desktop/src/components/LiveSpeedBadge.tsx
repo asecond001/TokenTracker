@@ -128,7 +128,7 @@ export function LiveSpeedBadge({
           .join(' | ')
       : breakdown.primaryTps !== null
         ? `实时生成速率: ${formatTps(breakdown.primaryTps)}`
-        : '暂无实时生成速率样本';
+        : '实时生成速率待采样';
 
   const hasDetails = breakdown.items.length > 0 || breakdown.primaryTps !== null;
 

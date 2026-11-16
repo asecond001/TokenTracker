@@ -90,7 +90,7 @@ export function formatCountdown(seconds: number): string {
 }
 
 export function formatRelativeTime(tsMs: number | null): string {
-  if (!tsMs) return '尚未采集';
+  if (!tsMs) return '待同步';
   const diffSec = Math.max(0, Math.floor((Date.now() - tsMs) / 1000));
   if (diffSec < 60) return `${diffSec}s 前`;
   if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m 前`;
@@ -207,8 +207,11 @@ export function resolveSubscriptionTierLabel(
   if (plan.auto_source === 'official_api') {
     return '官方同步档位';
   }
+  if (plan.auto_source === 'official_cli') {
+    return '官方 CLI 同步';
+  }
   if (plan.auto_source === 'local_log') {
     return '日志探测档位';
   }
-  return hasOfficialWindows ? '官方配额窗口监测' : '按月费与真实消耗监测';
+  return hasOfficialWindows ? '官方配额窗口监测' : '实测消耗统计';
 }

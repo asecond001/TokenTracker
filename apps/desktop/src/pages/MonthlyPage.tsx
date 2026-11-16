@@ -498,7 +498,7 @@ export function MonthlyPage() {
         <h2 className="text-[13.5px] font-semibold mb-3">按日账单明细</h2>
         {(data?.daily_ledger.length ?? 0) === 0 ? (
           <div className="py-10 text-center text-[12.5px]" style={{ color: 'var(--text-muted)' }}>
-            {year} 年 {month} 月暂无用量记录
+            {year} 年 {month} 月等待用量记录
           </div>
         ) : (
           <div className="overflow-x-auto">

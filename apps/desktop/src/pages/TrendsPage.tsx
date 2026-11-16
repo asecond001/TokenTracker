@@ -314,7 +314,7 @@ export function TrendsPage() {
           </div>
         ) : (data?.buckets.length ?? 0) === 0 ? (
           <div className="h-[260px] flex items-center justify-center" style={{ color: 'var(--text-muted)' }}>
-            选定区间内暂无事件数据
+            当前区间等待事件数据
           </div>
         ) : (
           <EChartBox option={chartOption} height={290} />
