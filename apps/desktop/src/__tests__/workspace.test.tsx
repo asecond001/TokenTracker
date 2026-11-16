@@ -2,17 +2,20 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../App';
+import { TimeRangeControl } from '../components/TimeRangeControl';
 import { TitleBar } from '../components/TitleBar';
 import { WorkspaceBackdrop } from '../components/WorkspaceBackdrop';
 import {
   TOKEN_TYPE_COLORS,
   convertMicroUsd,
+  formatBucketInTz,
   formatCost,
   formatCountdown,
   formatPercent,
   formatTokens,
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
+import { QrCodeSvg, encodeQrMatrix, gfMul, rsComputeRemainder } from '../lib/qrcode';
 import { DataSourcesPage } from '../pages/DataSourcesPage';
 import { FloatingMonitorPage } from '../pages/FloatingMonitorPage';
 import { ModelsPricingPage } from '../pages/ModelsPricingPage';
@@ -23,7 +26,7 @@ import { SpeedLatencyPage } from '../pages/SpeedLatencyPage';
 import { SubscriptionsPage } from '../pages/SubscriptionsPage';
 import { TrayPopupPage } from '../pages/TrayPopupPage';
 import { TrendsPage } from '../pages/TrendsPage';
-import { useWorkspaceStore } from '../stores/workspaceStore';
+import { computeTimeRange, useWorkspaceStore } from '../stores/workspaceStore';
 import type {
   AppPreferences,
   BalanceRefreshOutcome,
@@ -40,6 +43,7 @@ import type {
   SpeedLatencyReport,
   SubscriptionPlanStatus,
   SubscriptionPlanTemplate,
+  SyncPairingBundle,
   SyncStatusView,
   TraySummary,
   TrendsReport,
@@ -173,6 +177,23 @@ function makeOverviewReport(overrides: Partial<OverviewReport> = {}): OverviewRe
     total_cost_micro_usd: 6_450_000,
     today_tokens: 150_000,
     today_cost_micro_usd: 2_500_000,
+    today_requests: 12,
+    today_cache_hit_ratio: 0.62,
+    today_cache_saved_micro_usd: 450_000,
+    today_tokens_delta_pct: 14.5,
+    today_cost_delta_pct: 9.8,
+    today_hourly_pulse: [
+      {
+        bucket_start_ms: bucketTs,
+        input_tokens: 40_000,
+        output_tokens: 20_000,
+        cache_read_tokens: 80_000,
+        cache_write_tokens: 10_000,
+        reasoning_tokens: 0,
+        cost_micro_usd: 2_500_000,
+        requests: 12,
+      },
+    ],
     cache_hit_ratio: 0.64,
     avg_output_tps: 74.2,
     peak_output_tps: 142.0,
@@ -280,8 +301,20 @@ function makeTrendsReport(overrides: Partial<TrendsReport> = {}): TrendsReport {
         total_tokens: 310_000,
         total_cost_micro_usd: 4_800_000,
         points: [
-          { bucket_start_ms: b1, tokens: 140_000, cost_micro_usd: 2_100_000, requests: 11 },
-          { bucket_start_ms: b2, tokens: 170_000, cost_micro_usd: 2_700_000, requests: 14 },
+          {
+            bucket_start_ms: b1,
+            tokens: 140_000,
+            cost_micro_usd: 2_100_000,
+            requests: 11,
+            cache_hit_ratio: 0.58,
+          },
+          {
+            bucket_start_ms: b2,
+            tokens: 170_000,
+            cost_micro_usd: 2_700_000,
+            requests: 14,
+            cache_hit_ratio: 0.68,
+          },
         ],
       },
       {
@@ -290,8 +323,20 @@ function makeTrendsReport(overrides: Partial<TrendsReport> = {}): TrendsReport {
         total_tokens: 180_000,
         total_cost_micro_usd: 2_100_000,
         points: [
-          { bucket_start_ms: b1, tokens: 80_000, cost_micro_usd: 900_000, requests: 6 },
-          { bucket_start_ms: b2, tokens: 100_000, cost_micro_usd: 1_200_000, requests: 8 },
+          {
+            bucket_start_ms: b1,
+            tokens: 80_000,
+            cost_micro_usd: 900_000,
+            requests: 6,
+            cache_hit_ratio: 0.42,
+          },
+          {
+            bucket_start_ms: b2,
+            tokens: 100_000,
+            cost_micro_usd: 1_200_000,
+            requests: 8,
+            cache_hit_ratio: 0.51,
+          },
         ],
       },
     ],
@@ -304,6 +349,8 @@ function makeTrendsReport(overrides: Partial<TrendsReport> = {}): TrendsReport {
         delta_pct: 55.0,
         current_cost_micro_usd: 4_800_000,
         previous_cost_micro_usd: 3_000_000,
+        cost_delta_pct: 60.0,
+        cache_hit_ratio: 0.64,
         requests: 25,
       },
       {
@@ -314,6 +361,8 @@ function makeTrendsReport(overrides: Partial<TrendsReport> = {}): TrendsReport {
         delta_pct: 20.0,
         current_cost_micro_usd: 2_100_000,
         previous_cost_micro_usd: 1_700_000,
+        cost_delta_pct: 23.5,
+        cache_hit_ratio: 0.47,
         requests: 14,
       },
     ],
@@ -331,6 +380,34 @@ function makeMonthlyReport(overrides: Partial<MonthlyReport> = {}): MonthlyRepor
     month_total_tokens: 1_850_000,
     month_total_requests: 142,
     month_cache_saved_micro_usd: 12_400_000,
+    provider_shares: [
+      {
+        key: 'claude_code',
+        label: 'Claude Code',
+        tokens: 1_250_000,
+        token_share_percent: 67.6,
+        cost_micro_usd: 21_000_000,
+        cost_share_percent: 70.0,
+      },
+      {
+        key: 'codex',
+        label: 'Codex',
+        tokens: 600_000,
+        token_share_percent: 32.4,
+        cost_micro_usd: 9_000_000,
+        cost_share_percent: 30.0,
+      },
+    ],
+    model_shares: [
+      {
+        key: 'claude-opus-4-6',
+        label: 'claude-opus-4-6',
+        tokens: 1_250_000,
+        token_share_percent: 67.6,
+        cost_micro_usd: 21_000_000,
+        cost_share_percent: 70.0,
+      },
+    ],
     daily_ledger: [
       {
         date: '2026-11-15',
@@ -585,8 +662,8 @@ describe('Workspace store & UI shell navigation', () => {
     renderWithQuery(<App />);
 
     expect(screen.getByText('TokenTracker')).toBeInTheDocument();
-    expect(await screen.findByText(/API 等效成本/)).toBeInTheDocument();
-    expect(screen.getByText('Token 构成趋势')).toBeInTheDocument();
+    expect(await screen.findByText(/今日 API 等效费用/)).toBeInTheDocument();
+    expect(screen.getByText('今日 24h 分时活跃度')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '数据源与合规' }));
     expect(await screen.findByRole('heading', { name: '数据源与合规' })).toBeInTheDocument();
@@ -602,7 +679,7 @@ describe('Workspace store & UI shell navigation', () => {
   });
 });
 
-describe('Overview & Trends v0.1.1 defaults and all-time preset', () => {
+describe('Overview & Trends defaults, Today Live Pulse, and all-time preset', () => {
   beforeEach(() => {
     resetWorkspaceState();
   });
@@ -612,41 +689,31 @@ describe('Overview & Trends v0.1.1 defaults and all-time preset', () => {
     vi.restoreAllMocks();
   });
 
-  it('defaults Overview to Provider dimension and hides deltas under All time preset', async () => {
+  it('queries strictly today bounds on OverviewPage regardless of global timePreset and renders intraday pulse', async () => {
     const overviewSpy = vi
       .spyOn(ipc, 'getOverview')
       .mockResolvedValue(makeOverviewReport());
 
     renderWithQuery(<OverviewPage />);
 
-    const providerBtn = await screen.findByRole('button', { name: '按模型提供商' });
-    const tokenTypeBtn = screen.getByRole('button', { name: '按 Token 类型' });
-    expect(providerBtn).toHaveAttribute('data-active', 'true');
-    expect(tokenTypeBtn).toHaveAttribute('data-active', 'false');
+    expect(await screen.findByText('今日实时概览')).toBeInTheDocument();
+    expect(screen.queryByTestId('time-range-control')).not.toBeInTheDocument();
 
     const chart = await screen.findByTestId('echart-stub');
-    expect(chart).toHaveAttribute('data-series-names', 'Claude Code,Codex');
-    expect(screen.getByText('+12.5%')).toBeInTheDocument();
+    expect(chart).toHaveAttribute('data-series-names', 'Input,Output,Cache Read,Cache Write');
+    expect(screen.getByText('较昨日 +9.8%')).toBeInTheDocument();
+    expect(screen.getByText('较昨日 +14.5%')).toBeInTheDocument();
 
-    // Switching to Token Type changes series rendered
-    fireEvent.click(tokenTypeBtn);
-    expect(tokenTypeBtn).toHaveAttribute('data-active', 'true');
-    expect(screen.getByTestId('echart-stub')).toHaveAttribute(
-      'data-series-names',
-      'Input,Output,Cache Read,Cache Write'
-    );
-
-    // Switching timePreset to 'all' sends all_time: true and hides DeltaBadge items
+    // Even if global timePreset becomes 'all', OverviewPage continues querying only today's bounds
     act(() => {
       useWorkspaceStore.getState().setTimePreset('all');
     });
-    await waitFor(() => {
-      expect(overviewSpy).toHaveBeenLastCalledWith(
-        expect.objectContaining({ all_time: true, start_ms: 0 })
-      );
-    });
-    expect(screen.queryByText('+12.5%')).not.toBeInTheDocument();
-    expect(screen.queryByText('+18.4%')).not.toBeInTheDocument();
+    expect(overviewSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ all_time: false })
+    );
+    expect(overviewSpy).not.toHaveBeenCalledWith(
+      expect.objectContaining({ all_time: true })
+    );
   });
 
   it('defaults Trends to Auto granularity & Provider dimension and hides previous-period deltas for All preset', async () => {
@@ -675,9 +742,11 @@ describe('Overview & Trends v0.1.1 defaults and all-time preset', () => {
     );
     expect(screen.getByText('区间增量变化对比')).toBeInTheDocument();
     expect(screen.getByText('上一周期 Token')).toBeInTheDocument();
-    expect(screen.getByText('环比变化')).toBeInTheDocument();
+    expect(screen.getByText('Token 环比')).toBeInTheDocument();
+    expect(screen.getByText('费用环比')).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '缓存命中率' })).toBeInTheDocument();
 
-    // Select '全部' via App's TitleBar & navigate to Trends to verify full flow
+    // Navigate to TrendsPage, select '全部', and verify all-time period deltas hide cleanly
     cleanup();
     trendsSpy.mockResolvedValue(makeTrendsReport({ effective_granularity: 'weekly' }));
     const prefs = makePreferences();
@@ -687,8 +756,8 @@ describe('Overview & Trends v0.1.1 defaults and all-time preset', () => {
     vi.spyOn(ipc, 'getOverview').mockResolvedValue(makeOverviewReport());
 
     renderWithQuery(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '趋势分析' }));
     fireEvent.click(await screen.findByRole('button', { name: '全部' }));
-    fireEvent.click(screen.getByRole('button', { name: '趋势分析' }));
 
     await waitFor(() => {
       expect(trendsSpy).toHaveBeenLastCalledWith(
@@ -700,7 +769,9 @@ describe('Overview & Trends v0.1.1 defaults and all-time preset', () => {
     expect(await screen.findByText('自动: 周')).toBeInTheDocument();
     expect(screen.getByText('全周期累计分布汇总')).toBeInTheDocument();
     expect(screen.queryByText('上一周期 Token')).not.toBeInTheDocument();
-    expect(screen.queryByText('环比变化')).not.toBeInTheDocument();
+    expect(screen.queryByText('Token 环比')).not.toBeInTheDocument();
+    expect(screen.queryByText('费用环比')).not.toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '缓存命中率' })).toBeInTheDocument();
   });
 });
 
@@ -1191,14 +1262,15 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
 
     renderWithQuery(<App />);
 
-    // Overview (default active page): TimeRangeControl visible
-    expect(await screen.findByTestId('time-range-control')).toBeInTheDocument();
-    fireEvent.click(within(screen.getByTestId('time-range-control')).getByRole('button', { name: '30 天' }));
-    expect(useWorkspaceStore.getState().timePreset).toBe('30d');
+    // Overview (default active page): Today-only live pulse, no TimeRangeControl
+    expect(await screen.findByText('今日实时概览')).toBeInTheDocument();
+    expect(screen.queryByTestId('time-range-control')).not.toBeInTheDocument();
 
     // Trends: visible
     fireEvent.click(screen.getByRole('button', { name: '趋势分析' }));
     expect(await screen.findByTestId('time-range-control')).toBeInTheDocument();
+    fireEvent.click(within(screen.getByTestId('time-range-control')).getByRole('button', { name: '30 天' }));
+    expect(useWorkspaceStore.getState().timePreset).toBe('30d');
 
     // Models & Pricing: visible
     fireEvent.click(screen.getByRole('button', { name: '模型与价格' }));
@@ -1284,61 +1356,52 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
     });
   });
 
-  it('uses segmented non-overlapping bars by default, unstacked flow lines on toggle, filters zero-token series, and decouples TokenType colors', async () => {
-    vi.spyOn(ipc, 'getOverview').mockResolvedValue(
-      makeOverviewReport({
-        provider_series: [
-          ...makeOverviewReport().provider_series,
+  it('filters zero-token series and decouples TokenType colors & bar/line modes in TrendsPage & OverviewPage pulse', async () => {
+    vi.spyOn(ipc, 'getOverview').mockResolvedValue(makeOverviewReport());
+    renderWithQuery(<OverviewPage />);
+    const pulseChart = await screen.findByTestId('echart-stub');
+    const pulseOption = JSON.parse(
+      pulseChart.getAttribute('data-option-json') || '{}'
+    ) as EChartMockOption;
+    expect(pulseOption.series?.[0]?.itemStyle?.color).toBe(TOKEN_TYPE_COLORS.input);
+    expect(pulseOption.series?.[0]?.itemStyle?.color).toBe('#3b82f6');
+    cleanup();
+
+    vi.spyOn(ipc, 'getTrends').mockResolvedValue(
+      makeTrendsReport({
+        series: [
+          ...makeTrendsReport().series,
           {
-            key: 'antigravity',
-            label: 'Antigravity',
+            key: 'codex',
+            label: 'Codex',
             total_tokens: 0,
             total_cost_micro_usd: 0,
             points: [
-              {
-                bucket_start_ms: 1_770_000_000_000,
-                tokens: 0,
-                cost_micro_usd: 0,
-                requests: 0,
-              },
+              { bucket_start_ms: 1_769_904_000_000, tokens: 0, cost_micro_usd: 0, requests: 0 },
+              { bucket_start_ms: 1_769_990_400_000, tokens: 0, cost_micro_usd: 0, requests: 0 },
             ],
           },
         ],
       })
     );
 
-    renderWithQuery(<OverviewPage />);
-
+    renderWithQuery(<TrendsPage />);
     const chart = await screen.findByTestId('echart-stub');
-    expect(chart).toHaveAttribute('data-series-names', 'Claude Code,Codex');
-    const darkOption = JSON.parse(chart.getAttribute('data-option-json') || '{}') as EChartMockOption;
-    for (const s of darkOption.series ?? []) {
+    expect(chart).toHaveAttribute('data-series-names', 'Claude Code,Antigravity');
+
+    const barOption = JSON.parse(chart.getAttribute('data-option-json') || '{}') as EChartMockOption;
+    for (const s of barOption.series ?? []) {
       expect(s.type).toBe('bar');
-      expect(s.stack).toBe('tokens');
-      expect(s.itemStyle?.borderWidth).toBe(1.5);
-      expect(s.itemStyle?.borderColor).toBe('#0c0d10');
+      expect(s.stack).toBe('total');
     }
 
-    // Switch to light mode -> canvas separator updates; switch to Token Type -> decoupled #3b82f6 Input color
-    act(() => {
-      useWorkspaceStore.getState().setTheme('light');
-    });
-    fireEvent.click(screen.getByRole('button', { name: '按 Token 类型' }));
-    const tokenTypeOption = JSON.parse(
-      screen.getByTestId('echart-stub').getAttribute('data-option-json') || '{}'
-    ) as EChartMockOption;
-    expect(tokenTypeOption.series?.[0]?.itemStyle?.color).toBe(TOKEN_TYPE_COLORS.input);
-    expect(tokenTypeOption.series?.[0]?.itemStyle?.color).toBe('#3b82f6');
-    expect(tokenTypeOption.series?.[0]?.itemStyle?.borderColor).toBe('#ffffff');
-
-    // Switch to unstacked flow line mode so series never cross-blend via stacked splines
-    fireEvent.click(screen.getByRole('button', { name: '流向曲线' }));
+    fireEvent.click(screen.getByRole('button', { name: '折线' }));
     const lineOption = JSON.parse(
       screen.getByTestId('echart-stub').getAttribute('data-option-json') || '{}'
     ) as EChartMockOption;
     expect(lineOption.series?.[0]?.type).toBe('line');
     expect(lineOption.series?.[0]?.stack).toBeUndefined();
-    expect(lineOption.series?.[0]?.lineStyle?.width).toBe(1.75);
+    expect(lineOption.series?.[0]?.lineStyle?.width).toBe(2);
   });
 
   it('supports manual catalog/rate sync and exchange_rate_auto toggling across ModelsPricingPage and PreferencesPage', async () => {
@@ -1717,28 +1780,41 @@ describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sy
       .spyOn(ipc, 'getSyncStatus')
       .mockImplementation(async () => currentSyncStatus);
 
-    const updateSyncSpy = vi
-      .spyOn(ipc, 'updateSyncConfig')
-      .mockImplementation(async (enabled, workerUrl, e2eeEnabled) => {
+    const saveSetupSpy = vi
+      .spyOn(ipc, 'saveCloudSyncSetup')
+      .mockImplementation(async (enabled, workerUrl, bearerToken, e2eeEnabled, e2eePassphrase) => {
         currentSyncStatus = {
           ...currentSyncStatus,
           enabled,
           worker_url: workerUrl,
           e2ee_enabled: e2eeEnabled,
           e2ee_kdf_salt_hex: e2eeEnabled ? 'aabbccddeeff00112233445566778899' : null,
+          has_bearer_token: Boolean(bearerToken) || currentSyncStatus.has_bearer_token,
+          has_e2ee_passphrase: Boolean(e2eePassphrase) || currentSyncStatus.has_e2ee_passphrase,
+          sse_connected: Boolean(bearerToken || currentSyncStatus.has_bearer_token) && enabled,
         };
         return currentSyncStatus;
       });
-    const setCredsSpy = vi
-      .spyOn(ipc, 'setSyncCredentials')
-      .mockImplementation(async (token, pass) => {
-        currentSyncStatus = {
-          ...currentSyncStatus,
-          has_bearer_token: Boolean(token) || currentSyncStatus.has_bearer_token,
-          has_e2ee_passphrase: Boolean(pass) || currentSyncStatus.has_e2ee_passphrase,
-          sse_connected: Boolean(token) && currentSyncStatus.enabled,
+    const pairingBundleSpy = vi
+      .spyOn(ipc, 'getSyncPairingBundle')
+      .mockImplementation(async (includePassphrase) => {
+        const uri = includePassphrase
+          ? 'tokentracker://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=tok-secret-123&e2ee=1&key=e2ee-pass-999'
+          : 'tokentracker://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=tok-secret-123&e2ee=1';
+        const bundle: SyncPairingBundle = {
+          pairing_uri: uri,
+          pairing_json: JSON.stringify({
+            v: 1,
+            url: 'https://sync.example.workers.dev',
+            token: 'tok-secret-123',
+            e2ee: true,
+            ...(includePassphrase ? { key: 'e2ee-pass-999' } : {}),
+          }),
+          worker_url: 'https://sync.example.workers.dev',
+          e2ee_enabled: true,
+          includes_passphrase: includePassphrase,
         };
-        return currentSyncStatus;
+        return bundle;
       });
     const triggerSyncSpy = vi.spyOn(ipc, 'triggerCloudSyncNow').mockResolvedValue({
       pushed_hourly_deltas: 2,
@@ -1758,34 +1834,36 @@ describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sy
     });
     expect(await screen.findByText(/30s 前/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByLabelText('启用 Cloudflare Worker 云端同步'));
-    fireEvent.click(screen.getByLabelText(/启用端到端加密/));
+    fireEvent.click(screen.getByLabelText('启用云端同步'));
+    fireEvent.click(screen.getByLabelText(/端到端加密/));
     fireEvent.change(screen.getByLabelText('Worker 服务地址'), {
       target: { value: 'https://sync.example.workers.dev' },
     });
-    fireEvent.click(screen.getByRole('button', { name: '保存同步配置' }));
-
-    await waitFor(() => {
-      expect(updateSyncSpy).toHaveBeenCalledWith(
-        true,
-        'https://sync.example.workers.dev',
-        true
-      );
-    });
-    expect(await screen.findByText('aabbccddeeff00112233445566778899')).toBeInTheDocument();
-
     const tokenInput = screen.getByLabelText('Sync Bearer Token') as HTMLInputElement;
     const passInput = screen.getByLabelText('E2EE 同步口令') as HTMLInputElement;
     fireEvent.change(tokenInput, { target: { value: 'tok-secret-123' } });
     fireEvent.change(passInput, { target: { value: 'e2ee-pass-999' } });
-    fireEvent.click(screen.getByRole('button', { name: '保存同步凭据' }));
+    fireEvent.click(screen.getByRole('button', { name: '一键配置并连接' }));
 
     await waitFor(() => {
-      expect(setCredsSpy).toHaveBeenCalledWith('tok-secret-123', 'e2ee-pass-999');
+      expect(saveSetupSpy).toHaveBeenCalledWith(
+        true,
+        'https://sync.example.workers.dev',
+        'tok-secret-123',
+        true,
+        'e2ee-pass-999'
+      );
+    });
+    await waitFor(() => {
+      expect(pairingBundleSpy).toHaveBeenCalledWith(false);
     });
     expect(tokenInput.value).toBe('');
     expect(passInput.value).toBe('');
     expect(await screen.findByText('SSE 实时已连接')).toBeInTheDocument();
+    expect(await screen.findByTestId('sync-pairing-qr')).toBeInTheDocument();
+    expect(screen.getByLabelText('移动端配对链接')).toHaveValue(
+      'tokentracker://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=tok-secret-123&e2ee=1'
+    );
 
     fireEvent.click(screen.getByRole('button', { name: '立即同步' }));
     await waitFor(() => {
@@ -1818,7 +1896,7 @@ describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sy
     expect(await screen.findByText('跨设备同步配额快照（只读）')).toBeInTheDocument();
     expect(screen.getByText('MacBookPro')).toBeInTheDocument();
     expect(screen.getByText('只读远端快照')).toBeInTheDocument();
-    expect(screen.getByText('42.5%')).toBeInTheDocument();
+    expect(screen.getByText('已用 42.5%')).toBeInTheDocument();
   });
 });
 
@@ -1861,9 +1939,11 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
 
     renderWithQuery(<OverviewPage />);
 
-    expect(await screen.findByText('今日模型提供商占比')).toBeInTheDocument();
-    expect(screen.getByText('今日 Top 3 模型消耗占比')).toBeInTheDocument();
-    expect(screen.getByText('今日实时用量')).toBeInTheDocument();
+    expect(await screen.findByRole('columnheader', { name: 'Token 占比' })).toBeInTheDocument();
+    expect(screen.getByText('今日 Token 占比')).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'API 等效费用' })).toBeInTheDocument();
+    expect(screen.getByText('今日主力模型 Top 3')).toBeInTheDocument();
+    expect(screen.getByText('今日实时概览')).toBeInTheDocument();
   });
 
   it('renders auto-discovered official API plans, live reference tiers, and converts open drawer currency reactively', async () => {
@@ -2697,8 +2777,10 @@ describe('v0.2.7 Unified 用量 Account Hub & Positive UI Copy', () => {
     expect(screen.getByText('Gemini 模型池 · 5h 限额')).toBeInTheDocument();
     expect(screen.getByText('Claude / GPT 模型池 · 7d 周限额')).toBeInTheDocument();
     expect(screen.getAllByText('官方 CLI 实时').length).toBe(2);
-    expect(screen.getByText('剩余 63.5%')).toBeInTheDocument();
-    expect(screen.getByText('剩余 99.5%')).toBeInTheDocument();
+    expect(screen.getByText('已用 36.5%')).toBeInTheDocument();
+    expect(screen.getByText('已用 0.5%')).toBeInTheDocument();
+    expect(screen.getByText(/剩余 63\.5%/)).toBeInTheDocument();
+    expect(screen.getByText(/剩余 99\.5%/)).toBeInTheDocument();
   });
 
   it('renders Antigravity CLI quota refresh button and synced readout in DataSourcesPage without API key', async () => {
@@ -2760,5 +2842,206 @@ describe('v0.2.7 Unified 用量 Account Hub & Positive UI Copy', () => {
     await waitFor(() => {
       expect(refreshSpy).toHaveBeenCalledWith('antigravity');
     });
+  });
+});
+
+describe('v0.3.0 Analytics Differentiation, Sync Pairing QR, TZ & UX Fixes', () => {
+  beforeEach(() => {
+    resetWorkspaceState();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it('encodes QR matrices with GF(256) RS parity, finder patterns, and SVG path for pairing URIs', () => {
+    expect(gfMul(0x57, 0x83)).toBe(0x31);
+    const rs = rsComputeRemainder(new Uint8Array([0x10, 0x20, 0x0c, 0x56]), 7);
+    expect(rs).toHaveLength(7);
+
+    const uri =
+      'tokentracker://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=tok-123&e2ee=1';
+    const matrix = encodeQrMatrix(uri);
+    expect(matrix.version).toBeGreaterThanOrEqual(4);
+    expect(matrix.size).toBe(17 + 4 * matrix.version);
+    // Top-left 7x7 finder pattern outer border & center 3x3
+    for (let i = 0; i < 7; i += 1) {
+      expect(matrix.modules[0][i]).toBe(true);
+      expect(matrix.modules[6][i]).toBe(true);
+      expect(matrix.modules[i][0]).toBe(true);
+      expect(matrix.modules[i][6]).toBe(true);
+    }
+    expect(matrix.modules[3][3]).toBe(true);
+    expect(matrix.modules[1][1]).toBe(false);
+
+    render(<QrCodeSvg value={uri} size={140} />);
+    const svg = screen.getByTestId('sync-pairing-qr');
+    expect(svg.tagName.toLowerCase()).toBe('svg');
+    expect(svg.getAttribute('data-qr-version')).toBe(String(matrix.version));
+    const pathEl = svg.querySelector('path');
+    expect(pathEl?.getAttribute('d')).toMatch(/^M0 0/);
+  });
+
+  it('aligns computeTimeRange 7d to exact 7 local calendar days and formats buckets in explicit tzOffsetMinutes', () => {
+    const fixedNow = new Date(2026, 10, 17, 15, 22, 10, 500); // Nov 17 15:22:10 local
+    const range7d = computeTimeRange('7d', undefined, fixedNow);
+    const expectedStart = new Date(2026, 10, 11, 0, 0, 0, 0).getTime();
+    const expectedEnd = new Date(2026, 10, 17, 23, 59, 59, 999).getTime();
+    expect(range7d.start_ms).toBe(expectedStart);
+    expect(range7d.end_ms).toBe(expectedEnd);
+    expect(Math.round((range7d.end_ms - range7d.start_ms + 1) / 86_400_000)).toBe(7);
+
+    // Custom reversed dates swap cleanly to chronological local bounds
+    const reversedCustom = computeTimeRange(
+      'custom',
+      { start: '2026-11-17', end: '2026-11-12' },
+      fixedNow
+    );
+    expect(reversedCustom.start_ms).toBe(new Date(2026, 10, 12, 0, 0, 0, 0).getTime());
+    expect(reversedCustom.end_ms).toBe(new Date(2026, 10, 17, 23, 59, 59, 999).getTime());
+
+    // Bucket UTC+8 vs UTC formatting
+    const utcMidnight = Date.UTC(2026, 10, 16, 16, 0, 0); // 2026-11-17 00:00 in UTC+8 (+480)
+    expect(formatBucketInTz(utcMidnight, 'daily', 480)).toBe('2026-11-17');
+    expect(formatBucketInTz(utcMidnight, 'hour_only', 480)).toBe('00:00');
+    expect(formatBucketInTz(utcMidnight, 'daily', 0)).toBe('2026-11-16');
+  });
+
+  it('defers custom date changes in TimeRangeControl until 确定 is clicked and keeps action buttons non-wrapping', () => {
+    render(<TimeRangeControl />);
+
+    expect(useWorkspaceStore.getState().timePreset).toBe('7d');
+    const initialStart = useWorkspaceStore.getState().customStartDate;
+    const initialEnd = useWorkspaceStore.getState().customEndDate;
+
+    fireEvent.click(screen.getByRole('button', { name: '自定义' }));
+    expect(screen.getByRole('dialog', { name: '自定义日期范围' })).toBeInTheDocument();
+
+    const startInput = screen.getByLabelText('开始日期');
+    const endInput = screen.getByLabelText('结束日期');
+    fireEvent.change(startInput, { target: { value: '2026-11-01' } });
+    fireEvent.change(endInput, { target: { value: '2026-11-05' } });
+
+    // Store must remain unchanged while editing drafts
+    expect(useWorkspaceStore.getState().timePreset).toBe('7d');
+    expect(useWorkspaceStore.getState().customStartDate).toBe(initialStart);
+    expect(useWorkspaceStore.getState().customEndDate).toBe(initialEnd);
+
+    // 取消 discards drafts
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(screen.queryByRole('dialog', { name: '自定义日期范围' })).not.toBeInTheDocument();
+    expect(useWorkspaceStore.getState().timePreset).toBe('7d');
+
+    // Reopen, edit drafts, confirm commits custom dates cleanly with whitespace-nowrap button
+    fireEvent.click(screen.getByRole('button', { name: '自定义' }));
+    fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2026-11-01' } });
+    fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2026-11-05' } });
+    const confirmBtn = screen.getByRole('button', { name: '确定' });
+    expect(confirmBtn.className).toContain('whitespace-nowrap');
+    fireEvent.click(confirmBtn);
+
+    expect(useWorkspaceStore.getState().timePreset).toBe('custom');
+    expect(useWorkspaceStore.getState().customStartDate).toBe('2026-11-01');
+    expect(useWorkspaceStore.getState().customEndDate).toBe('2026-11-05');
+  });
+
+  it('collapses floating window element toggles and opacity slider when floating_window_enabled is false', async () => {
+    const prefs = makePreferences({ floating_window_enabled: false });
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(prefs);
+    vi.spyOn(ipc, 'getBootstrapState').mockResolvedValue(makeBootstrap(prefs));
+    vi.spyOn(ipc, 'updatePreferences').mockImplementation(async (next) => next);
+
+    renderWithQuery(<PreferencesPage />);
+
+    const toggle = (await screen.findByLabelText('显示桌面实时悬浮窗')) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    expect(screen.queryByRole('button', { name: 'Token 用量' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('悬浮窗不透明度')).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(await screen.findByRole('button', { name: 'Token 用量' })).toBeInTheDocument();
+    expect(screen.getByLabelText('悬浮窗不透明度')).toBeInTheDocument();
+  });
+
+  it('supports specialized analytics modes in TrendsPage, MonthlyPage, ModelsPricingPage & SpeedLatencyPage', async () => {
+    vi.spyOn(ipc, 'getTrends').mockResolvedValue(makeTrendsReport());
+    renderWithQuery(<TrendsPage />);
+
+    expect(await screen.findByTestId('trends-date-span')).toBeInTheDocument();
+    expect(screen.getByText('区间总 Token')).toBeInTheDocument();
+
+    // Switch metric to 缓存命中率 -> multi-series line % chart and disables 按 Token 类型
+    fireEvent.click(screen.getByRole('button', { name: '缓存命中率' }));
+    expect(screen.getByRole('button', { name: '按 Token 类型' })).toBeDisabled();
+    const cacheOpt = JSON.parse(
+      screen.getByTestId('echart-stub').getAttribute('data-option-json') || '{}'
+    ) as EChartMockOption;
+    expect(cacheOpt.series?.[0]?.type).toBe('line');
+    expect(cacheOpt.series?.[0]?.data).toEqual([58, 68]);
+
+    cleanup();
+    vi.spyOn(ipc, 'getMonthly').mockResolvedValue(makeMonthlyReport());
+    renderWithQuery(<MonthlyPage />);
+    expect(await screen.findByRole('columnheader', { name: '缓存节省 (USD)' })).toBeInTheDocument();
+    expect(screen.getByText('当月账单构成')).toBeInTheDocument();
+    expect(screen.getByText('提供商账单占比')).toBeInTheDocument();
+    expect(screen.getByText('主力模型账单 Top 5')).toBeInTheDocument();
+
+    cleanup();
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(makePreferences());
+    vi.spyOn(ipc, 'getModelsPricing').mockResolvedValue({
+      rows: [
+        {
+          model_id: 'claude-opus-4-6',
+          provider_id: 'claude_code',
+          requests: 20,
+          observable_steps: 45,
+          input_tokens: 100_000,
+          output_tokens: 30_000,
+          cache_read_tokens: 300_000,
+          cache_write_tokens: 20_000,
+          reasoning_tokens: 0,
+          total_tokens: 450_000,
+          cache_saved_micro_usd: 3_500_000,
+          estimated_cost_micro_usd: 6_000_000,
+          cost_share_ratio: 1,
+          avg_output_tps: 76.5,
+          effective_pricing: null,
+        },
+      ],
+      total_cost_micro_usd: 6_000_000,
+      total_cache_saved_micro_usd: 3_500_000,
+      catalog: [
+        {
+          model_pattern: 'claude-opus-4-6',
+          provider_id: 'claude_code',
+          input_per_m_micro_usd: 15_000_000,
+          output_per_m_micro_usd: 75_000_000,
+          cache_read_per_m_micro_usd: 1_500_000,
+          cache_write_per_m_micro_usd: 18_750_000,
+          reasoning_per_m_micro_usd: 75_000_000,
+          is_user_override: false,
+          effective_from: '2026-11-01',
+        },
+      ],
+    });
+    renderWithQuery(<ModelsPricingPage />);
+    expect(await screen.findByTestId('models-efficiency-chart')).toBeInTheDocument();
+    expect(screen.getByText('76.5 tok/s')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '单价目录' }));
+    expect(await screen.findByLabelText('搜索单价目录')).toBeInTheDocument();
+    expect(screen.getByText('共 1 条单价规则')).toBeInTheDocument();
+
+    cleanup();
+    vi.spyOn(ipc, 'getSpeedLatency').mockResolvedValue(makeSpeedLatencyReport());
+    renderWithQuery(<SpeedLatencyPage />);
+    expect(await screen.findByText('全局加权均值')).toBeInTheDocument();
+    expect(screen.getByText('最快模型 P95')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '响应耗时与首字延迟 (ms)' }));
+    const latOpt = JSON.parse(
+      screen.getByTestId('echart-stub').getAttribute('data-option-json') || '{}'
+    ) as EChartMockOption;
+    expect(latOpt.series?.map((s) => s.name)).toEqual(['平均首字延迟', '平均总耗时']);
   });
 });

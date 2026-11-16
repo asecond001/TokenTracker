@@ -64,7 +64,7 @@ public struct SettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("桌面端一键配对")
                 .font(.subheadline.weight(.semibold))
-            Text("在桌面端「系统与云同步」生成配对串，可通过相机扫码或剪贴板直接导入 Worker URL 与 Bearer Token（密钥将写入 iOS Keychain）。")
+            Text("扫码或粘贴桌面端生成的配对链接即可自动完成接入。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -376,6 +376,9 @@ public struct SettingsView: View {
             workerURL = payload.url
             bearerToken = payload.token
             e2eeEnabled = payload.e2ee
+            if let key = payload.key, !key.isEmpty {
+                e2eePassphrase = key
+            }
             statusBanner = payload.e2ee && e2eePassphrase.isEmpty
                 ? "已导入配对配置；请在下方填写 E2EE 口令后点击保存"
                 : "配对导入成功"

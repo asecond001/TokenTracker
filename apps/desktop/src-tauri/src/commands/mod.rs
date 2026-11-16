@@ -9,11 +9,11 @@ use tokentracker_collectors::providers::official_api::{
     reconcile_official_usage_api, OfficialApiReconcileResult,
 };
 use tokentracker_collectors::{
-    clear_sync_credentials as clear_sync_creds,
-    refresh_provider_balance as collect_provider_balance,
+    build_sync_pairing_uri, clear_sync_credentials as clear_sync_creds, has_sync_credentials,
+    normalize_worker_url, refresh_provider_balance as collect_provider_balance,
     refresh_provider_balance_force as collect_provider_balance_force,
     set_sync_credentials as set_sync_creds, BalanceRefreshOutcome, ScanReport, SyncRunReport,
-    SyncStatusView,
+    SyncStatusView, SYNC_BEARER_TOKEN_KEY, SYNC_E2EE_PASSPHRASE_KEY,
 };
 use tokentracker_core::analytics::{
     export_monthly_csv, export_monthly_json, AnalyticsFilter, ModelStatsReport, MonthlyQuery,
@@ -967,6 +967,157 @@ pub fn update_sync_config(
         .map_err(IpcError::from)?;
     state.sync_client.reconfigure();
     state.sync_client.status_view().map_err(IpcError::from)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncPairingBundle {
+    pub pairing_uri: String,
+    pub pairing_json: String,
+    pub worker_url: String,
+    pub e2ee_enabled: bool,
+    pub includes_passphrase: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SyncPairingJsonPayload<'a> {
+    v: u32,
+    url: &'a str,
+    token: &'a str,
+    e2ee: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<&'a str>,
+}
+
+#[tauri::command]
+pub fn save_cloud_sync_setup(
+    state: State<'_, AppState>,
+    enabled: bool,
+    worker_url: Option<String>,
+    bearer_token: Option<String>,
+    e2ee_enabled: bool,
+    e2ee_passphrase: Option<String>,
+) -> Result<SyncStatusView, IpcError> {
+    let normalized_url = match worker_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => Some(normalize_worker_url(Some(raw)).map_err(IpcError::from)?),
+        None => {
+            if enabled {
+                return Err(IpcError::new(
+                    "VALIDATION_ERROR",
+                    "请填写 Worker 服务地址",
+                ));
+            }
+            None
+        }
+    };
+
+    set_sync_creds(
+        state.credentials.as_ref(),
+        bearer_token.as_deref(),
+        e2ee_passphrase.as_deref(),
+    )
+    .map_err(IpcError::from)?;
+
+    let (has_bearer, has_passphrase) =
+        has_sync_credentials(state.credentials.as_ref()).map_err(IpcError::from)?;
+    if enabled && !has_bearer {
+        return Err(IpcError::new(
+            "VALIDATION_ERROR",
+            "请填写或生成访问令牌 (SYNC_TOKEN)",
+        ));
+    }
+    if enabled && e2ee_enabled && !has_passphrase {
+        return Err(IpcError::new(
+            "VALIDATION_ERROR",
+            "开启端到端加密时请填写或生成加密口令",
+        ));
+    }
+
+    let current = state
+        .storage
+        .get_sync_config_state()
+        .map_err(IpcError::from)?;
+    let salt = if e2ee_enabled
+        && current
+            .e2ee_kdf_salt_hex
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+    {
+        Some(generate_kdf_salt_hex().map_err(IpcError::from)?)
+    } else {
+        None
+    };
+
+    state
+        .storage
+        .update_sync_config_state(
+            enabled,
+            normalized_url.as_deref(),
+            e2ee_enabled,
+            salt.as_deref(),
+        )
+        .map_err(IpcError::from)?;
+    state.sync_client.reconfigure();
+    state.sync_client.status_view().map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub fn get_sync_pairing_bundle(
+    state: State<'_, AppState>,
+    include_passphrase: bool,
+) -> Result<SyncPairingBundle, IpcError> {
+    let cfg = state
+        .storage
+        .get_sync_config_state()
+        .map_err(IpcError::from)?;
+    let worker_url = normalize_worker_url(cfg.worker_url.as_deref()).map_err(|_| {
+        IpcError::new("VALIDATION_ERROR", "请先填写并保存 Worker 服务地址")
+    })?;
+    let bearer_token = state
+        .credentials
+        .get_api_key(SYNC_BEARER_TOKEN_KEY)
+        .map_err(IpcError::from)?
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| IpcError::new("VALIDATION_ERROR", "请先填写或生成访问令牌 (SYNC_TOKEN)"))?;
+
+    let passphrase = if cfg.e2ee_enabled && include_passphrase {
+        state
+            .credentials
+            .get_api_key(SYNC_E2EE_PASSPHRASE_KEY)
+            .map_err(IpcError::from)?
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+
+    let includes_passphrase = passphrase.is_some();
+    let pairing_uri = build_sync_pairing_uri(
+        &worker_url,
+        &bearer_token,
+        cfg.e2ee_enabled,
+        passphrase.as_deref(),
+    )
+    .map_err(IpcError::from)?;
+
+    let pairing_json = serde_json::to_string(&SyncPairingJsonPayload {
+        v: 1,
+        url: &worker_url,
+        token: &bearer_token,
+        e2ee: cfg.e2ee_enabled,
+        key: passphrase.as_deref(),
+    })
+    .map_err(|e| IpcError::new("SERIALIZATION_ERROR", e.to_string()))?;
+
+    Ok(SyncPairingBundle {
+        pairing_uri,
+        pairing_json,
+        worker_url,
+        e2ee_enabled: cfg.e2ee_enabled,
+        includes_passphrase,
+    })
 }
 
 #[tauri::command]

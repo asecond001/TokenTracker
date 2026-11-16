@@ -64,34 +64,159 @@ export function syncDocumentAndNativeTheme(mode: ThemeMode): ResolvedTheme {
   return resolved;
 }
 
+function parseLocalYmd(ymd: string): { year: number; month: number; day: number } | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd.trim());
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const probe = new Date(year, month - 1, day);
+  if (
+    Number.isNaN(probe.getTime()) ||
+    probe.getFullYear() !== year ||
+    probe.getMonth() !== month - 1 ||
+    probe.getDate() !== day
+  ) {
+    return null;
+  }
+  return { year, month, day };
+}
+
+function localDayStartMs(year: number, month: number, day: number): number {
+  return new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
+}
+
+function localDayEndMs(year: number, month: number, day: number): number {
+  return new Date(year, month - 1, day, 23, 59, 59, 999).getTime();
+}
+
+function formatYmdParts(year: number, month: number, day: number): string {
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+export function getPresetDateInputs(
+  preset: TimePreset,
+  customRange?: CustomTimeRange,
+  now: Date = new Date()
+): { start: string; end: string } {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const todayStr = toDateInputString(today);
+  switch (preset) {
+    case 'today':
+      return { start: todayStr, end: todayStr };
+    case '7d': {
+      const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6);
+      return { start: toDateInputString(start), end: todayStr };
+    }
+    case '30d': {
+      const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 29);
+      return { start: toDateInputString(start), end: todayStr };
+    }
+    case 'month': {
+      const start = new Date(today.getFullYear(), today.getMonth(), 1);
+      return { start: toDateInputString(start), end: todayStr };
+    }
+    case 'all': {
+      const fallbackStart = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6);
+      return {
+        start: customRange?.start || toDateInputString(fallbackStart),
+        end: customRange?.end || todayStr,
+      };
+    }
+    case 'custom': {
+      const parsedStart = customRange?.start ? parseLocalYmd(customRange.start) : null;
+      const parsedEnd = customRange?.end ? parseLocalYmd(customRange.end) : null;
+      if (parsedStart && parsedEnd) {
+        const sMs = localDayStartMs(parsedStart.year, parsedStart.month, parsedStart.day);
+        const eMs = localDayStartMs(parsedEnd.year, parsedEnd.month, parsedEnd.day);
+        const sStr = formatYmdParts(parsedStart.year, parsedStart.month, parsedStart.day);
+        const eStr = formatYmdParts(parsedEnd.year, parsedEnd.month, parsedEnd.day);
+        return sMs <= eMs ? { start: sStr, end: eStr } : { start: eStr, end: sStr };
+      }
+      const fallbackStart = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6);
+      return { start: toDateInputString(fallbackStart), end: todayStr };
+    }
+  }
+}
+
+export function formatResolvedDateSpan(
+  preset: TimePreset,
+  customRange?: CustomTimeRange,
+  now: Date = new Date()
+): string {
+  if (preset === 'all') {
+    return '全量历史';
+  }
+  const { start, end } = getPresetDateInputs(preset, customRange, now);
+  return start === end ? start : `${start} ~ ${end}`;
+}
+
 export function computeTimeRange(
   preset: TimePreset,
-  customRange?: CustomTimeRange
+  customRange?: CustomTimeRange,
+  now: Date = new Date()
 ): ComputedTimeRange {
-  const now = new Date();
   const endMs = now.getTime();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const todayEndMs = localDayEndMs(now.getFullYear(), now.getMonth() + 1, now.getDate());
 
   switch (preset) {
     case 'today': {
-      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-      return { start_ms: d.getTime(), end_ms: endMs, all_time: false };
+      return { start_ms: todayStart.getTime(), end_ms: endMs, all_time: false };
     }
-    case '7d':
-      return { start_ms: endMs - 7 * 86_400_000, end_ms: endMs, all_time: false };
-    case '30d':
-      return { start_ms: endMs - 30 * 86_400_000, end_ms: endMs, all_time: false };
+    case '7d': {
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6, 0, 0, 0, 0);
+      return { start_ms: start.getTime(), end_ms: todayEndMs, all_time: false };
+    }
+    case '30d': {
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29, 0, 0, 0, 0);
+      return { start_ms: start.getTime(), end_ms: todayEndMs, all_time: false };
+    }
     case 'month': {
-      const d = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-      return { start_ms: d.getTime(), end_ms: endMs, all_time: false };
+      const start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+      return { start_ms: start.getTime(), end_ms: todayEndMs, all_time: false };
     }
     case 'all':
       return { start_ms: 0, end_ms: endMs, all_time: true };
     case 'custom': {
-      const s = customRange?.start ? new Date(`${customRange.start}T00:00:00`) : new Date(NaN);
-      const e = customRange?.end ? new Date(`${customRange.end}T23:59:59.999`) : new Date(NaN);
-      const startMs = Number.isNaN(s.getTime()) ? endMs - 7 * 86_400_000 : s.getTime();
-      const resolvedEndMs = Number.isNaN(e.getTime()) ? endMs : e.getTime();
-      return { start_ms: startMs, end_ms: resolvedEndMs, all_time: false };
+      const parsedStart = customRange?.start ? parseLocalYmd(customRange.start) : null;
+      const parsedEnd = customRange?.end ? parseLocalYmd(customRange.end) : null;
+      if (parsedStart && parsedEnd) {
+        const sMs = localDayStartMs(parsedStart.year, parsedStart.month, parsedStart.day);
+        const eMs = localDayStartMs(parsedEnd.year, parsedEnd.month, parsedEnd.day);
+        if (sMs <= eMs) {
+          return {
+            start_ms: sMs,
+            end_ms: localDayEndMs(parsedEnd.year, parsedEnd.month, parsedEnd.day),
+            all_time: false,
+          };
+        }
+        return {
+          start_ms: eMs,
+          end_ms: localDayEndMs(parsedStart.year, parsedStart.month, parsedStart.day),
+          all_time: false,
+        };
+      }
+      const fallbackStart = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() - 6,
+        0,
+        0,
+        0,
+        0
+      );
+      return {
+        start_ms: parsedStart
+          ? localDayStartMs(parsedStart.year, parsedStart.month, parsedStart.day)
+          : fallbackStart.getTime(),
+        end_ms: parsedEnd
+          ? localDayEndMs(parsedEnd.year, parsedEnd.month, parsedEnd.day)
+          : todayEndMs,
+        all_time: false,
+      };
     }
   }
 }
@@ -128,7 +253,7 @@ function toDateInputString(d: Date): string {
 }
 
 const nowDate = new Date();
-const weekAgo = new Date(nowDate.getTime() - 6 * 86_400_000);
+const weekAgo = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - 6, 0, 0, 0, 0);
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   activePage: 'overview',

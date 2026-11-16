@@ -255,7 +255,7 @@ pub fn has_sync_credentials(credentials: &dyn CredentialManager) -> CollectorRes
     ))
 }
 
-fn normalize_worker_url(raw: Option<&str>) -> CollectorResult<String> {
+pub fn normalize_worker_url(raw: Option<&str>) -> CollectorResult<String> {
     let trimmed = raw
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -271,6 +271,37 @@ fn normalize_worker_url(raw: Option<&str>) -> CollectorResult<String> {
         ));
     }
     Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+/// Build a compact `tokentracker://pair?...` deep-link URI for mobile QR/clipboard onboarding.
+pub fn build_sync_pairing_uri(
+    worker_url: &str,
+    bearer_token: &str,
+    e2ee_enabled: bool,
+    e2ee_passphrase: Option<&str>,
+) -> CollectorResult<String> {
+    let clean_url = normalize_worker_url(Some(worker_url))?;
+    let clean_token = bearer_token.trim();
+    if clean_token.is_empty() {
+        return Err(CollectorError::Compliance(
+            "Cloud sync Bearer token is required to build pairing URI".to_string(),
+        ));
+    }
+    let mut uri = reqwest::Url::parse("tokentracker://pair")
+        .map_err(|e| CollectorError::Compliance(format!("Failed to initialize pairing URI: {e}")))?;
+    {
+        let mut qp = uri.query_pairs_mut();
+        qp.append_pair("v", "1");
+        qp.append_pair("url", &clean_url);
+        qp.append_pair("token", clean_token);
+        qp.append_pair("e2ee", if e2ee_enabled { "1" } else { "0" });
+        if e2ee_enabled {
+            if let Some(pass) = e2ee_passphrase.map(str::trim).filter(|s| !s.is_empty()) {
+                qp.append_pair("key", pass);
+            }
+        }
+    }
+    Ok(uri.to_string())
 }
 
 fn extract_http_error_message(body_text: &str) -> String {
@@ -936,4 +967,45 @@ pub fn read_sync_status_view(
         last_sync_error: cfg.last_sync_error,
         updated_at_ms: cfg.updated_at_ms,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_encoded_pairing_uri_with_optional_e2ee_passphrase() {
+        let uri = build_sync_pairing_uri(
+            "https://sync.example.workers.dev/",
+            "tok+abc/123=",
+            true,
+            Some("pass word&1"),
+        )
+        .expect("pairing uri");
+        assert!(uri.starts_with("tokentracker://pair?"));
+        let parsed = reqwest::Url::parse(&uri).expect("valid uri");
+        let pairs: std::collections::HashMap<String, String> =
+            parsed.query_pairs().into_owned().collect();
+        assert_eq!(pairs.get("v").map(String::as_str), Some("1"));
+        assert_eq!(
+            pairs.get("url").map(String::as_str),
+            Some("https://sync.example.workers.dev")
+        );
+        assert_eq!(pairs.get("token").map(String::as_str), Some("tok+abc/123="));
+        assert_eq!(pairs.get("e2ee").map(String::as_str), Some("1"));
+        assert_eq!(pairs.get("key").map(String::as_str), Some("pass word&1"));
+
+        let no_key_uri = build_sync_pairing_uri(
+            "https://sync.example.workers.dev",
+            "tok",
+            false,
+            Some("ignored-when-plaintext"),
+        )
+        .expect("plaintext uri");
+        let parsed_plain = reqwest::Url::parse(&no_key_uri).expect("valid plain uri");
+        let plain_pairs: std::collections::HashMap<String, String> =
+            parsed_plain.query_pairs().into_owned().collect();
+        assert_eq!(plain_pairs.get("e2ee").map(String::as_str), Some("0"));
+        assert!(!plain_pairs.contains_key("key"));
+    }
 }

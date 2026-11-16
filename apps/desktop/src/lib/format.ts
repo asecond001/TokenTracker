@@ -215,3 +215,27 @@ export function resolveSubscriptionTierLabel(
   }
   return hasOfficialWindows ? '官方配额窗口监测' : '实测消耗统计';
 }
+
+export function formatBucketInTz(
+  tsMs: number,
+  granularity: string,
+  tzOffsetMinutes: number
+): string {
+  const shifted = new Date(tsMs + tzOffsetMinutes * 60_000);
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  const yyyy = shifted.getUTCFullYear();
+  const mm = pad2(shifted.getUTCMonth() + 1);
+  const dd = pad2(shifted.getUTCDate());
+  const hh = pad2(shifted.getUTCHours());
+  const min = pad2(shifted.getUTCMinutes());
+  if (granularity === 'hour_only') {
+    return `${hh}:${min}`;
+  }
+  if (granularity === 'fifteen_minutes' || granularity === 'hourly') {
+    return `${mm}-${dd} ${hh}:${min}`;
+  }
+  if (granularity === 'weekly') {
+    return `${yyyy}-${mm}-${dd} 周`;
+  }
+  return `${yyyy}-${mm}-${dd}`;
+}

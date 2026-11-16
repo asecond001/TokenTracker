@@ -330,12 +330,13 @@ public final class AppStore {
     public func applyPairingPayload(_ raw: String, passphrase: String?) async -> Result<DesktopPairingPayload, Error> {
         do {
             let parsed = try DesktopPairingPayload.parse(raw)
+            let resolvedPass = parsed.key ?? (passphrase ?? "")
             let ok = await saveSyncSettings(
                 enabled: true,
                 workerURL: parsed.url,
                 bearerToken: parsed.token,
                 e2eeEnabled: parsed.e2ee,
-                e2eePassphrase: passphrase ?? ""
+                e2eePassphrase: resolvedPass
             )
             if ok {
                 return .success(parsed)

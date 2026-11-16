@@ -272,7 +272,7 @@ export function TrayPopupPage() {
                       {providerDisplayName(sub.plan.provider_id)} · {win.label}
                     </span>
                     <span style={{ color: 'var(--text-secondary)' }}>
-                      {win.used_percent.toFixed(1)}% · {formatCountdown(win.resets_in_seconds)}
+                      已用 {win.used_percent.toFixed(1)}% · {formatCountdown(win.resets_in_seconds)}
                     </span>
                   </div>
                   <InlineProgressBar

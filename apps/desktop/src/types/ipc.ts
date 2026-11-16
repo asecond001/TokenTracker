@@ -167,6 +167,12 @@ export interface OverviewReport {
   total_cost_micro_usd: number;
   today_tokens: number;
   today_cost_micro_usd: number;
+  today_requests?: number;
+  today_cache_hit_ratio?: number;
+  today_cache_saved_micro_usd?: number;
+  today_tokens_delta_pct?: number | null;
+  today_cost_delta_pct?: number | null;
+  today_hourly_pulse?: TimeBucketPoint[];
   cache_hit_ratio: number;
   avg_output_tps: number;
   peak_output_tps: number;
@@ -198,6 +204,7 @@ export interface TrendPoint {
   tokens: number;
   cost_micro_usd: number;
   requests: number;
+  cache_hit_ratio?: number;
 }
 
 export interface TrendSeries {
@@ -216,6 +223,8 @@ export interface TrendComparisonRow {
   delta_pct: number | null;
   current_cost_micro_usd: number;
   previous_cost_micro_usd: number;
+  cost_delta_pct?: number | null;
+  cache_hit_ratio?: number;
   requests: number;
 }
 
@@ -266,6 +275,8 @@ export interface MonthlyReport {
   month_total_tokens: number;
   month_total_requests: number;
   month_cache_saved_micro_usd: number;
+  provider_shares?: UsageShareItem[];
+  model_shares?: UsageShareItem[];
   daily_ledger: MonthlyDailyLedgerRow[];
   heatmap_365d: HeatmapDayCell[];
 }
@@ -597,6 +608,14 @@ export interface SyncStatusView {
   last_sync_at_ms: number | null;
   last_sync_error: string | null;
   updated_at_ms: number;
+}
+
+export interface SyncPairingBundle {
+  pairing_uri: string;
+  pairing_json: string;
+  worker_url: string;
+  e2ee_enabled: boolean;
+  includes_passphrase: boolean;
 }
 
 export interface SyncRunReport {

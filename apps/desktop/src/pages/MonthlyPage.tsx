@@ -13,8 +13,15 @@ import type { EChartsOption } from 'echarts';
 import { ChevronDown, ChevronLeft, ChevronRight, Download } from 'lucide-react';
 import { AnimatedNumber } from '../components/AnimatedNumber';
 import { EChartBox } from '../components/EChartBox';
+import { InlineProgressBar } from '../components/InlineProgressBar';
 import { useChartTheme } from '../lib/chartTheme';
-import { formatCost, formatExactInt, formatTokens } from '../lib/format';
+import {
+  formatCost,
+  formatExactInt,
+  formatTokens,
+  providerAccentColor,
+  providerDisplayName,
+} from '../lib/format';
 import { ipc, isTauriRuntime } from '../lib/ipc';
 import { useWorkspaceStore } from '../stores/workspaceStore';
 import type { HeatmapDayCell, MonthlyDailyLedgerRow } from '../types/ipc';
@@ -270,6 +277,14 @@ export function MonthlyPage() {
           </span>
         ),
       }),
+      colHelper.accessor('cache_saved_micro_usd', {
+        header: `缓存节省 (${currency})`,
+        cell: (info) => (
+          <span className="tabular-nums" style={{ color: 'var(--accent-emerald)' }}>
+            {formatCost(info.getValue(), currency, usdToCnyRate)}
+          </span>
+        ),
+      }),
       colHelper.accessor('cost_micro_usd', {
         header: `折算费用 (${currency})`,
         cell: (info) => (
@@ -297,6 +312,35 @@ export function MonthlyPage() {
   const maxVal = Math.max(1, apiVal, subFee);
   const apiBarWidth = (apiVal / maxVal) * 100;
   const feeBarWidth = (subFee / maxVal) * 100;
+
+  const isOngoingCurrentMonth = year === now.getFullYear() && month === now.getMonth() + 1;
+  const daysInSelectedMonth = new Date(year, month, 0).getDate();
+  const elapsedDays = isOngoingCurrentMonth ? Math.max(1, now.getDate()) : daysInSelectedMonth;
+  const dailyAvgCostMicro = Math.round(apiVal / elapsedDays);
+  const projectedMonthCostMicro = isOngoingCurrentMonth
+    ? Math.round((apiVal / elapsedDays) * daysInSelectedMonth)
+    : apiVal;
+  const dailyAvgTokens = Math.round((data?.month_total_tokens ?? 0) / elapsedDays);
+  const monthCacheSaved = data?.month_cache_saved_micro_usd ?? 0;
+  const cacheSaveRatio =
+    apiVal + monthCacheSaved > 0
+      ? (monthCacheSaved / (apiVal + monthCacheSaved)) * 100
+      : 0;
+
+  const sortedProviderShares = useMemo(
+    () =>
+      [...(data?.provider_shares ?? [])].sort(
+        (a, b) => b.cost_micro_usd - a.cost_micro_usd || b.tokens - a.tokens
+      ),
+    [data]
+  );
+  const sortedModelShares = useMemo(
+    () =>
+      [...(data?.model_shares ?? [])]
+        .sort((a, b) => b.cost_micro_usd - a.cost_micro_usd || b.tokens - a.tokens)
+        .slice(0, 5),
+    [data]
+  );
 
   return (
     <div className="space-y-7">
@@ -380,10 +424,10 @@ export function MonthlyPage() {
 
       {/* Objective Top 4-Metric Strip (Zero-Assumption: No Subscription Fee / ROI Prominence Here) */}
       <section
-        className="grid grid-cols-4 pb-6"
+        className="grid grid-cols-2 lg:grid-cols-4 gap-y-4 pb-6"
         style={{ borderBottom: '1px solid var(--border-hairline)' }}
       >
-        <div className="pr-5">
+        <div className="lg:pr-5">
           <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
             当月按量 API 等效价值 ({currency})
           </div>
@@ -394,10 +438,16 @@ export function MonthlyPage() {
               <AnimatedNumber value={apiVal} formatter={costFormatter} />
             )}
           </div>
+          <div className="mt-1 text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+            日均 {formatCost(dailyAvgCostMicro, currency, usdToCnyRate)}
+            {isOngoingCurrentMonth
+              ? ` · 月末预计 ${formatCost(projectedMonthCostMicro, currency, usdToCnyRate)}`
+              : ''}
+          </div>
         </div>
 
         <div
-          className="px-5"
+          className="lg:px-5"
           style={{ borderLeft: '1px solid var(--border-hairline)' }}
         >
           <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
@@ -410,10 +460,13 @@ export function MonthlyPage() {
               <AnimatedNumber value={data?.month_total_tokens ?? 0} formatter={formatTokens} />
             )}
           </div>
+          <div className="mt-1 text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+            日均 {formatTokens(dailyAvgTokens)}
+          </div>
         </div>
 
         <div
-          className="px-5"
+          className="lg:px-5"
           style={{ borderLeft: '1px solid var(--border-hairline)' }}
         >
           <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
@@ -427,15 +480,18 @@ export function MonthlyPage() {
               '…'
             ) : (
               <AnimatedNumber
-                value={data?.month_cache_saved_micro_usd ?? 0}
+                value={monthCacheSaved}
                 formatter={costFormatter}
               />
             )}
           </div>
+          <div className="mt-1 text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+            缓存减免比例 {cacheSaveRatio.toFixed(1)}%
+          </div>
         </div>
 
         <div
-          className="pl-5"
+          className="lg:pl-5"
           style={{ borderLeft: '1px solid var(--border-hairline)' }}
         >
           <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
@@ -453,6 +509,112 @@ export function MonthlyPage() {
           </div>
           <div className="mt-1 text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
             {data?.daily_ledger.length ?? 0} 个活跃记账日
+          </div>
+        </div>
+      </section>
+
+      {/* Monthly Cost Composition: Provider & Top 5 Models */}
+      <section
+        className="pb-6"
+        style={{ borderBottom: '1px solid var(--border-hairline)' }}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-[13.5px] font-semibold">当月账单构成</h2>
+          <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+            按 {currency} API 等效费用占比排序
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Provider Cost Share */}
+          <div className="space-y-2.5">
+            <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+              提供商账单占比
+            </div>
+            {sortedProviderShares.length > 0 ? (
+              <div className="space-y-2">
+                {sortedProviderShares.map((share) => {
+                  const pct =
+                    apiVal > 0
+                      ? (share.cost_micro_usd / apiVal) * 100
+                      : share.token_share_percent;
+                  return (
+                    <div key={share.key} className="space-y-1 text-[11.5px] tabular-nums">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="inline-flex items-center gap-1.5 min-w-0">
+                          <span
+                            className="inline-block w-2 h-2 rounded-full shrink-0"
+                            style={{ backgroundColor: providerAccentColor(share.key) }}
+                          />
+                          <span className="truncate font-medium">
+                            {providerDisplayName(share.key)}
+                          </span>
+                        </span>
+                        <span className="shrink-0" style={{ color: 'var(--text-secondary)' }}>
+                          {pct.toFixed(1)}% ·{' '}
+                          <strong style={{ color: 'var(--text-primary)' }}>
+                            {formatCost(share.cost_micro_usd, currency, usdToCnyRate)}
+                          </strong>
+                        </span>
+                      </div>
+                      <InlineProgressBar
+                        percent={pct}
+                        accentColor={providerAccentColor(share.key)}
+                        heightPx={4}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+                等待本月提供商账单数据
+              </div>
+            )}
+          </div>
+
+          {/* Model Top 5 Cost Share */}
+          <div
+            className="space-y-2.5 lg:pl-6 lg:border-l"
+            style={{ borderColor: 'var(--border-hairline)' }}
+          >
+            <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+              主力模型账单 Top 5
+            </div>
+            {sortedModelShares.length > 0 ? (
+              <div className="space-y-2">
+                {sortedModelShares.map((share) => {
+                  const pct =
+                    apiVal > 0
+                      ? (share.cost_micro_usd / apiVal) * 100
+                      : share.token_share_percent;
+                  return (
+                    <div key={share.key} className="space-y-1 text-[11.5px] tabular-nums">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono truncate" style={{ color: 'var(--text-primary)' }}>
+                          {share.label}
+                        </span>
+                        <span className="shrink-0" style={{ color: 'var(--text-secondary)' }}>
+                          {pct.toFixed(1)}% ·{' '}
+                          <strong style={{ color: 'var(--text-primary)' }}>
+                            {formatCost(share.cost_micro_usd, currency, usdToCnyRate)}
+                          </strong>
+                        </span>
+                      </div>
+                      <InlineProgressBar
+                        percent={pct}
+                        accentColor="var(--accent-sky)"
+                        heightPx={4}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+                等待本月模型账单数据
+              </div>
+            )}
           </div>
         </div>
       </section>

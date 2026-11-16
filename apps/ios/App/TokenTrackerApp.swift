@@ -13,6 +13,12 @@ struct TokenTrackerApp: App {
                     store.registerBackgroundTasks()
                     await store.bootstrapAndSeedIfNeeded()
                 }
+                .onOpenURL { url in
+                    Task {
+                        store.selectedTab = .settings
+                        _ = await store.applyPairingPayload(url.absoluteString, passphrase: nil)
+                    }
+                }
         }
         .onChange(of: scenePhase) { _, newPhase in
             store.handleScenePhase(newPhase)

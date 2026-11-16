@@ -25,6 +25,7 @@ import { computeTimeRange, useWorkspaceStore } from '../stores/workspaceStore';
 import type { AnalyticsFilter, ModelSpeedStats } from '../types/ipc';
 
 type SpeedGroupMode = 'model' | 'provider';
+type SpeedChartMetric = 'tps' | 'latency';
 
 interface SpeedChartItem {
   label: string;
@@ -73,31 +74,68 @@ export function SpeedLatencyPage() {
   } = useWorkspaceStore();
   const chartTheme = useChartTheme();
   const [groupMode, setGroupMode] = useState<SpeedGroupMode>('model');
+  const [chartMetric, setChartMetric] = useState<SpeedChartMetric>('tps');
   const [sorting, setSorting] = useState<SortingState>([{ id: 'sample_count', desc: true }]);
 
-  const filter = useMemo<AnalyticsFilter>(() => {
-    const range = computeTimeRange(timePreset, {
-      start: customStartDate,
-      end: customEndDate,
-    });
-    return {
-      start_ms: range.start_ms,
-      end_ms: range.end_ms,
-      provider_id: providerFilter === 'all' ? null : providerFilter,
-      device_id: deviceFilter === 'all' ? null : deviceFilter,
-      tz_offset_minutes: tzOffsetMinutes,
-      all_time: range.all_time,
-    };
-  }, [timePreset, customStartDate, customEndDate, providerFilter, deviceFilter, tzOffsetMinutes]);
-
   const { data, isLoading } = useQuery({
-    queryKey: ['speed_latency', filter],
-    queryFn: () => ipc.getSpeedLatency(filter),
+    queryKey: [
+      'speed_latency',
+      timePreset,
+      customStartDate,
+      customEndDate,
+      providerFilter,
+      deviceFilter,
+      tzOffsetMinutes,
+    ],
+    queryFn: () => {
+      const range = computeTimeRange(timePreset, {
+        start: customStartDate,
+        end: customEndDate,
+      });
+      const filter: AnalyticsFilter = {
+        start_ms: range.start_ms,
+        end_ms: range.end_ms,
+        provider_id: providerFilter === 'all' ? null : providerFilter,
+        device_id: deviceFilter === 'all' ? null : deviceFilter,
+        tz_offset_minutes: tzOffsetMinutes,
+        all_time: range.all_time,
+      };
+      return ipc.getSpeedLatency(filter);
+    },
     refetchInterval: 15_000,
   });
 
   const providers = data?.providers ?? [];
   const models = data?.models ?? [];
+
+  const summaryStats = useMemo(() => {
+    const sourceRows = providers.length > 0 ? providers : models;
+    let totalSamples = 0;
+    let weightedTpsSum = 0;
+    let weightedDurationSum = 0;
+    let ttftSamples = 0;
+    let weightedTtftSum = 0;
+    for (const row of sourceRows) {
+      totalSamples += row.sample_count;
+      weightedTpsSum += row.mean_tps * row.sample_count;
+      weightedDurationSum += row.avg_duration_ms * row.sample_count;
+      if (row.avg_ttft_ms !== null) {
+        ttftSamples += row.sample_count;
+        weightedTtftSum += row.avg_ttft_ms * row.sample_count;
+      }
+    }
+    const fastestModel =
+      models.length > 0
+        ? [...models].sort((a, b) => b.p95_tps - a.p95_tps)[0]
+        : null;
+    return {
+      totalSamples,
+      weightedMeanTps: totalSamples > 0 ? weightedTpsSum / totalSamples : 0,
+      weightedDurationMs: totalSamples > 0 ? weightedDurationSum / totalSamples : 0,
+      weightedTtftMs: ttftSamples > 0 ? weightedTtftSum / ttftSamples : null,
+      fastestModel,
+    };
+  }, [providers, models]);
 
   const groupedModelsForChart = useMemo<ModelSpeedStats[]>(() => {
     if (models.length === 0) return [];
@@ -145,6 +183,95 @@ export function SpeedLatencyPage() {
   }, [groupMode, providers, groupedModelsForChart]);
 
   const speedComparisonOption = useMemo<EChartsOption>(() => {
+    if (chartMetric === 'latency') {
+      return {
+        backgroundColor: 'transparent',
+        animationDuration: 280,
+        animationDurationUpdate: 260,
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { type: 'shadow' },
+          backgroundColor: chartTheme.tooltipBg,
+          borderColor: chartTheme.tooltipBorder,
+          textStyle: { color: chartTheme.tooltipText, fontSize: 12 },
+          formatter: (params: unknown) => {
+            const list = Array.isArray(params)
+              ? (params as Array<{ dataIndex?: number }>)
+              : [];
+            const idx = list[0]?.dataIndex;
+            if (idx === undefined) return '';
+            const item = chartItems[idx];
+            if (!item) return '';
+            return [
+              `<b>${escapeHtml(item.label)}</b>`,
+              `平均总耗时: <b>${formatDurationMs(item.avgDurationMs)}</b>`,
+              `平均首字延迟: <b>${formatDurationMs(item.avgTtftMs)}</b>`,
+              `样本数: ${formatExactInt(item.sampleCount)}`,
+            ].join('<br/>');
+          },
+        },
+        legend: {
+          top: 0,
+          right: 0,
+          textStyle: { color: chartTheme.textSecondary, fontSize: 11 },
+          itemWidth: 10,
+          itemHeight: 6,
+        },
+        grid: { top: 34, right: 24, bottom: 26, left: 16, containLabel: true },
+        xAxis: {
+          type: 'value',
+          name: 'ms',
+          nameTextStyle: { color: chartTheme.textMuted, fontSize: 11 },
+          splitLine: { lineStyle: { color: chartTheme.splitLineColor, type: 'dashed' } },
+          axisLabel: {
+            color: chartTheme.textMuted,
+            fontSize: 11,
+            formatter: (val: number) => formatDurationMs(val),
+          },
+        },
+        yAxis: {
+          type: 'category',
+          inverse: true,
+          data: chartItems.map((item) => item.label),
+          axisLine: { lineStyle: { color: chartTheme.axisLineColor } },
+          axisTick: { show: false },
+          axisLabel: {
+            color: chartTheme.textSecondary,
+            fontSize: 11,
+            width: 220,
+            overflow: 'truncate',
+          },
+        },
+        series: [
+          {
+            id: `latency-ttft-${groupMode}`,
+            name: '平均首字延迟',
+            type: 'bar',
+            barWidth: 7,
+            barGap: '28%',
+            universalTransition: true,
+            itemStyle: {
+              color: '#0ea5e9',
+              borderRadius: [0, 3, 3, 0],
+            },
+            data: chartItems.map((item) => Math.round(item.avgTtftMs ?? 0)),
+          },
+          {
+            id: `latency-duration-${groupMode}`,
+            name: '平均总耗时',
+            type: 'bar',
+            barWidth: 7,
+            universalTransition: true,
+            itemStyle: {
+              color: '#f59e0b',
+              borderRadius: [0, 3, 3, 0],
+            },
+            data: chartItems.map((item) => Math.round(item.avgDurationMs)),
+          },
+        ],
+      };
+    }
+
     return {
       backgroundColor: 'transparent',
       animationDuration: 280,
@@ -264,7 +391,7 @@ export function SpeedLatencyPage() {
         },
       ],
     };
-  }, [chartItems, chartTheme, groupMode]);
+  }, [chartItems, chartTheme, groupMode, chartMetric]);
 
   const columns = useMemo(
     () => [
@@ -376,6 +503,68 @@ export function SpeedLatencyPage() {
         </div>
       ) : (
         <>
+          {/* Module 0: 4-Metric Global Speed & Latency Summary Strip */}
+          <section className="surface-tonal-band px-5 py-4 grid grid-cols-2 lg:grid-cols-4 gap-y-3">
+            <div className="lg:pr-5">
+              <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                全局加权均值
+              </div>
+              <div className="mt-1 text-[22px] font-semibold tracking-tight tabular-nums">
+                <AnimatedNumber value={summaryStats.weightedMeanTps} formatter={formatTps} />
+              </div>
+              <div className="mt-0.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                按有效样本数加权
+              </div>
+            </div>
+
+            <div className="lg:px-5" style={{ borderLeft: '1px solid var(--border-hairline)' }}>
+              <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                最快模型 P95
+              </div>
+              <div
+                className="mt-1 text-[22px] font-semibold tracking-tight tabular-nums"
+                style={{ color: 'var(--accent-sky)' }}
+              >
+                {summaryStats.fastestModel
+                  ? formatTps(summaryStats.fastestModel.p95_tps)
+                  : '—'}
+              </div>
+              <div className="mt-0.5 text-[11px] truncate" style={{ color: 'var(--text-muted)' }}>
+                {summaryStats.fastestModel ? summaryStats.fastestModel.model_id : '等待模型样本'}
+              </div>
+            </div>
+
+            <div className="lg:px-5" style={{ borderLeft: '1px solid var(--border-hairline)' }}>
+              <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                全局平均首字延迟
+              </div>
+              <div className="mt-1 text-[22px] font-semibold tracking-tight tabular-nums">
+                {formatDurationMs(summaryStats.weightedTtftMs)}
+              </div>
+              <div
+                className="mt-0.5 text-[11px] tabular-nums"
+                style={{ color: 'var(--text-muted)' }}
+              >
+                平均总耗时 {formatDurationMs(summaryStats.weightedDurationMs)}
+              </div>
+            </div>
+
+            <div className="lg:pl-5" style={{ borderLeft: '1px solid var(--border-hairline)' }}>
+              <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                有效测速样本
+              </div>
+              <div className="mt-1 text-[22px] font-semibold tracking-tight tabular-nums">
+                {formatExactInt(summaryStats.totalSamples)}
+              </div>
+              <div
+                className="mt-0.5 text-[11px] tabular-nums"
+                style={{ color: 'var(--text-muted)' }}
+              >
+                {models.length} 组模型 · {providers.length} 个源
+              </div>
+            </div>
+          </section>
+
           {/* Module 1: Provider Speed & Latency Overview Strip */}
           <section
             className="pb-6"
@@ -462,7 +651,7 @@ export function SpeedLatencyPage() {
                 <h2 className="text-[13.5px] font-semibold">模型 × 模型提供商速率对比</h2>
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2.5">
                 {/* Provider Color Legend */}
                 <div className="hidden sm:flex items-center gap-2.5 text-[11px]">
                   {providers.map((p) => (
@@ -478,6 +667,39 @@ export function SpeedLatencyPage() {
                       {providerDisplayName(p.provider_id)}
                     </span>
                   ))}
+                </div>
+
+                {/* Chart Metric Switch */}
+                <div
+                  className="seg-group"
+                  style={{
+                    backgroundColor: 'var(--bg-sidebar)',
+                    borderColor: 'var(--border-hairline)',
+                  }}
+                >
+                  {(
+                    [
+                      { id: 'tps', label: '吞吐速率 (tok/s)' },
+                      { id: 'latency', label: '响应耗时与首字延迟 (ms)' },
+                    ] as const
+                  ).map((option) => {
+                    const active = chartMetric === option.id;
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        data-active={active}
+                        onClick={() => setChartMetric(option.id)}
+                        className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer whitespace-nowrap"
+                        style={{
+                          color: active ? 'var(--accent-tonal-text)' : 'var(--text-secondary)',
+                          fontWeight: active ? 500 : 400,
+                        }}
+                      >
+                        {option.label}
+                      </button>
+                    );
+                  })}
                 </div>
 
                 {/* Group Mode Segmented Switch */}

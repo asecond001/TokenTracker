@@ -9,14 +9,20 @@ import {
   useReactTable,
   type SortingState,
 } from '@tanstack/react-table';
-import { RefreshCw, SlidersHorizontal, X } from 'lucide-react';
+import type { EChartsOption } from 'echarts';
+import { RefreshCw, Search, SlidersHorizontal, X } from 'lucide-react';
+import { EChartBox } from '../components/EChartBox';
 import { InlineProgressBar } from '../components/InlineProgressBar';
 import { TimeRangeControl } from '../components/TimeRangeControl';
+import { useChartTheme } from '../lib/chartTheme';
 import {
+  TOKEN_TYPE_COLORS,
   formatCost,
   formatExactInt,
+  formatPercent,
   formatRelativeTime,
   formatTokens,
+  formatTps,
   providerDisplayName,
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
@@ -34,6 +40,14 @@ interface PricingFormState {
   cache_write_usd_per_m: string;
   reasoning_usd_per_m: string;
   recompute_history: boolean;
+}
+
+type ModelsSubView = 'efficiency' | 'catalog';
+type EfficiencyChartMode = 'token_mix' | 'cost_saved';
+
+function modelCacheHitRatio(row: ModelStatRow): number {
+  const denom = row.input_tokens + row.cache_read_tokens + row.cache_write_tokens;
+  return denom > 0 ? row.cache_read_tokens / denom : 0;
 }
 
 const DEFAULT_PRICING_FORM: PricingFormState = {
@@ -64,12 +78,18 @@ export function ModelsPricingPage() {
   const [sorting, setSorting] = useState<SortingState>([
     { id: 'estimated_cost_micro_usd', desc: true },
   ]);
+  const [subView, setSubView] = useState<ModelsSubView>('efficiency');
+  const [efficiencyChartMode, setEfficiencyChartMode] =
+    useState<EfficiencyChartMode>('token_mix');
+  const [catalogSearch, setCatalogSearch] = useState('');
+  const [catalogProvider, setCatalogProvider] = useState<string>('all');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [rateInput, setRateInput] = useState(usdToCnyRate);
   const [form, setForm] = useState<PricingFormState>(DEFAULT_PRICING_FORM);
   const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(
     null
   );
+  const chartTheme = useChartTheme();
 
   const filter = useMemo(
     () => getFilter(),
@@ -361,6 +381,21 @@ export function ModelsPricingPage() {
           </span>
         ),
       }),
+      colHelper.accessor((row) => modelCacheHitRatio(row), {
+        id: 'cache_hit_ratio',
+        header: '缓存命中率',
+        cell: (info) => (
+          <span className="tabular-nums">{formatPercent(info.getValue(), true)}</span>
+        ),
+      }),
+      colHelper.accessor('avg_output_tps', {
+        header: '平均速率',
+        cell: (info) => (
+          <span className="tabular-nums" style={{ color: 'var(--accent-sky)' }}>
+            {info.getValue() > 0 ? formatTps(info.getValue()) : '—'}
+          </span>
+        ),
+      }),
       colHelper.accessor('estimated_cost_micro_usd', {
         header: `等效总成本 (${currency})`,
         cell: (info) => (
@@ -414,6 +449,220 @@ export function ModelsPricingPage() {
     getSortedRowModel: getSortedRowModel(),
   });
 
+  const topEfficiencyModels = useMemo(
+    () =>
+      [...(data?.rows ?? [])]
+        .sort((a, b) => b.estimated_cost_micro_usd - a.estimated_cost_micro_usd || b.total_tokens - a.total_tokens)
+        .slice(0, 8),
+    [data]
+  );
+
+  const efficiencyChartOption = useMemo<EChartsOption>(() => {
+    const ordered = [...topEfficiencyModels].reverse();
+    const modelLabels = ordered.map((row) => row.model_id);
+    if (efficiencyChartMode === 'cost_saved') {
+      return {
+        backgroundColor: 'transparent',
+        animationDuration: 260,
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { type: 'shadow' },
+          backgroundColor: chartTheme.tooltipBg,
+          borderColor: chartTheme.tooltipBorder,
+          textStyle: { color: chartTheme.tooltipText, fontSize: 12 },
+          valueFormatter: (value) =>
+            formatCost(typeof value === 'number' ? value : Number(value ?? 0), currency, usdToCnyRate),
+        },
+        legend: {
+          top: 0,
+          right: 0,
+          textStyle: { color: chartTheme.textSecondary, fontSize: 11 },
+          itemWidth: 10,
+          itemHeight: 6,
+        },
+        grid: { top: 28, right: 18, bottom: 24, left: 165 },
+        xAxis: {
+          type: 'value',
+          splitLine: { lineStyle: { color: chartTheme.splitLineColor, type: 'dashed' } },
+          axisLabel: {
+            color: chartTheme.textMuted,
+            fontSize: 10.5,
+            formatter: (v: number) => formatCost(v, currency, usdToCnyRate),
+          },
+        },
+        yAxis: {
+          type: 'category',
+          data: modelLabels,
+          axisLine: { lineStyle: { color: chartTheme.axisLineColor } },
+          axisLabel: { color: chartTheme.textSecondary, fontSize: 11 },
+          axisTick: { show: false },
+        },
+        series: [
+          {
+            id: 'model-cost',
+            name: '实际折算成本',
+            type: 'bar',
+            stack: 'cost-eff',
+            barMaxWidth: 16,
+            itemStyle: { color: 'var(--accent-primary)' },
+            data: ordered.map((r) => r.estimated_cost_micro_usd),
+          },
+          {
+            id: 'model-saved',
+            name: '缓存节省金额',
+            type: 'bar',
+            stack: 'cost-eff',
+            barMaxWidth: 16,
+            itemStyle: { color: 'var(--accent-emerald)' },
+            data: ordered.map((r) => r.cache_saved_micro_usd),
+          },
+        ],
+      };
+    }
+
+    const toPct = (part: number, total: number) =>
+      total > 0 ? Number(((part / total) * 100).toFixed(1)) : 0;
+
+    return {
+      backgroundColor: 'transparent',
+      animationDuration: 260,
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' },
+        backgroundColor: chartTheme.tooltipBg,
+        borderColor: chartTheme.tooltipBorder,
+        textStyle: { color: chartTheme.tooltipText, fontSize: 12 },
+        valueFormatter: (value) => `${Number(value ?? 0).toFixed(1)}%`,
+      },
+      legend: {
+        top: 0,
+        right: 0,
+        textStyle: { color: chartTheme.textSecondary, fontSize: 11 },
+        itemWidth: 10,
+        itemHeight: 6,
+      },
+      grid: { top: 28, right: 18, bottom: 24, left: 165 },
+      xAxis: {
+        type: 'value',
+        min: 0,
+        max: 100,
+        splitLine: { lineStyle: { color: chartTheme.splitLineColor, type: 'dashed' } },
+        axisLabel: {
+          color: chartTheme.textMuted,
+          fontSize: 10.5,
+          formatter: (v: number) => `${v}%`,
+        },
+      },
+      yAxis: {
+        type: 'category',
+        data: modelLabels,
+        axisLine: { lineStyle: { color: chartTheme.axisLineColor } },
+        axisLabel: { color: chartTheme.textSecondary, fontSize: 11 },
+        axisTick: { show: false },
+      },
+      series: [
+        {
+          id: 'mix-input',
+          name: 'Input',
+          type: 'bar',
+          stack: 'mix',
+          barMaxWidth: 16,
+          itemStyle: { color: TOKEN_TYPE_COLORS.input },
+          data: ordered.map((r) => {
+            const sum =
+              r.input_tokens +
+              r.output_tokens +
+              r.reasoning_tokens +
+              r.cache_read_tokens +
+              r.cache_write_tokens;
+            return toPct(r.input_tokens, sum || r.total_tokens);
+          }),
+        },
+        {
+          id: 'mix-output',
+          name: 'Output',
+          type: 'bar',
+          stack: 'mix',
+          barMaxWidth: 16,
+          itemStyle: { color: TOKEN_TYPE_COLORS.output },
+          data: ordered.map((r) => {
+            const sum =
+              r.input_tokens +
+              r.output_tokens +
+              r.reasoning_tokens +
+              r.cache_read_tokens +
+              r.cache_write_tokens;
+            return toPct(r.output_tokens + r.reasoning_tokens, sum || r.total_tokens);
+          }),
+        },
+        {
+          id: 'mix-cache-read',
+          name: 'Cache Read',
+          type: 'bar',
+          stack: 'mix',
+          barMaxWidth: 16,
+          itemStyle: { color: TOKEN_TYPE_COLORS.cache_read },
+          data: ordered.map((r) => {
+            const sum =
+              r.input_tokens +
+              r.output_tokens +
+              r.reasoning_tokens +
+              r.cache_read_tokens +
+              r.cache_write_tokens;
+            return toPct(r.cache_read_tokens, sum || r.total_tokens);
+          }),
+        },
+        {
+          id: 'mix-cache-write',
+          name: 'Cache Write',
+          type: 'bar',
+          stack: 'mix',
+          barMaxWidth: 16,
+          itemStyle: { color: TOKEN_TYPE_COLORS.cache_write },
+          data: ordered.map((r) => {
+            const sum =
+              r.input_tokens +
+              r.output_tokens +
+              r.reasoning_tokens +
+              r.cache_read_tokens +
+              r.cache_write_tokens;
+            return toPct(r.cache_write_tokens, sum || r.total_tokens);
+          }),
+        },
+      ],
+    };
+  }, [topEfficiencyModels, efficiencyChartMode, chartTheme, currency, usdToCnyRate]);
+
+  const catalogProviderOptions = useMemo(() => {
+    const ids = new Set<string>();
+    for (const entry of data?.catalog ?? []) {
+      if (!entry.model_pattern.startsWith('_default_') && entry.provider_id) {
+        ids.add(entry.provider_id);
+      }
+    }
+    return Array.from(ids).sort();
+  }, [data]);
+
+  const filteredCatalog = useMemo(() => {
+    const needle = catalogSearch.trim().toLowerCase();
+    return (data?.catalog ?? []).filter((entry) => {
+      if (entry.model_pattern.startsWith('_default_')) {
+        return false;
+      }
+      if (catalogProvider !== 'all' && entry.provider_id !== catalogProvider) {
+        return false;
+      }
+      if (!needle) {
+        return true;
+      }
+      return (
+        entry.model_pattern.toLowerCase().includes(needle) ||
+        entry.provider_id.toLowerCase().includes(needle) ||
+        providerDisplayName(entry.provider_id).toLowerCase().includes(needle)
+      );
+    });
+  }, [data, catalogSearch, catalogProvider]);
+
   return (
     <div className="relative space-y-6">
       <section
@@ -422,6 +671,37 @@ export function ModelsPricingPage() {
       >
         <div className="flex flex-wrap items-center gap-2.5">
           <h1 className="text-[16px] font-semibold tracking-tight">模型开销统计</h1>
+          <div
+            className="seg-group"
+            style={{
+              backgroundColor: 'var(--bg-sidebar)',
+              borderColor: 'var(--border-hairline)',
+            }}
+          >
+            {(
+              [
+                { id: 'efficiency', label: '模型效率分析' },
+                { id: 'catalog', label: '单价目录' },
+              ] as const
+            ).map((tab) => {
+              const active = subView === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  data-active={active}
+                  onClick={() => setSubView(tab.id)}
+                  className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer whitespace-nowrap"
+                  style={{
+                    color: active ? 'var(--accent-tonal-text)' : 'var(--text-secondary)',
+                    fontWeight: active ? 500 : 400,
+                  }}
+                >
+                  {tab.label}
+                </button>
+              );
+            })}
+          </div>
           <span
             className="px-2 py-0.5 text-[11px] rounded-md tabular-nums"
             style={{
@@ -438,7 +718,7 @@ export function ModelsPricingPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          <TimeRangeControl />
+          {subView === 'efficiency' && <TimeRangeControl />}
 
           <div className="text-right tabular-nums">
             <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
@@ -508,76 +788,269 @@ export function ModelsPricingPage() {
         </div>
       )}
 
-      {/* Sortable High-Density Model Table */}
-      <section>
-        {isLoading ? (
-          <div className="py-12 text-center" style={{ color: 'var(--text-muted)' }}>
-            加载模型用量数据…
+      {subView === 'efficiency' ? (
+        <>
+          {topEfficiencyModels.length > 0 && (
+            <section
+              data-testid="models-efficiency-chart"
+              className="pb-5"
+              style={{ borderBottom: '1px solid var(--border-hairline)' }}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-2.5">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-[13.5px] font-semibold">主力模型效率对比 (Top 8)</h2>
+                </div>
+                <div
+                  className="seg-group"
+                  style={{
+                    backgroundColor: 'var(--bg-sidebar)',
+                    borderColor: 'var(--border-hairline)',
+                  }}
+                >
+                  {(
+                    [
+                      { id: 'token_mix', label: '令牌构成比例' },
+                      { id: 'cost_saved', label: '等效成本与缓存节省' },
+                    ] as const
+                  ).map((mode) => {
+                    const active = efficiencyChartMode === mode.id;
+                    return (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        data-active={active}
+                        onClick={() => setEfficiencyChartMode(mode.id)}
+                        className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer whitespace-nowrap"
+                        style={{
+                          color: active ? 'var(--accent-tonal-text)' : 'var(--text-secondary)',
+                          fontWeight: active ? 500 : 400,
+                        }}
+                      >
+                        {mode.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <EChartBox
+                option={efficiencyChartOption}
+                height={Math.max(180, topEfficiencyModels.length * 30 + 64)}
+              />
+            </section>
+          )}
+
+          {/* Sortable High-Density Model Table */}
+          <section>
+            {isLoading ? (
+              <div className="py-12 text-center" style={{ color: 'var(--text-muted)' }}>
+                加载模型用量数据…
+              </div>
+            ) : (data?.rows.length ?? 0) === 0 ? (
+              <div className="py-12 text-center text-[12.5px]" style={{ color: 'var(--text-muted)' }}>
+                当前时间范围等待模型调用数据
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-left">
+                  <thead>
+                    {table.getHeaderGroups().map((hg) => (
+                      <tr
+                        key={hg.id}
+                        className="text-[11px] font-medium uppercase tracking-wider"
+                        style={{
+                          color: 'var(--text-muted)',
+                          borderBottom: '1px solid var(--border-subtle)',
+                        }}
+                      >
+                        {hg.headers.map((header) => (
+                          <th
+                            key={header.id}
+                            onClick={header.column.getToggleSortingHandler()}
+                            className={`py-2 px-2 cursor-pointer select-none transition-colors hover:text-[var(--text-primary)] ${
+                              header.id === 'model_id' || header.id === 'provider_id'
+                                ? 'text-left'
+                                : 'text-right'
+                            }`}
+                          >
+                            {flexRender(header.column.columnDef.header, header.getContext())}
+                            {header.column.getIsSorted() === 'asc'
+                              ? ' ↑'
+                              : header.column.getIsSorted() === 'desc'
+                                ? ' ↓'
+                                : ''}
+                          </th>
+                        ))}
+                      </tr>
+                    ))}
+                  </thead>
+                  <tbody>
+                    {table.getRowModel().rows.map((row) => (
+                      <tr
+                        key={row.id}
+                        className="row-interactive"
+                        style={{ borderBottom: '1px solid var(--border-hairline)' }}
+                      >
+                        {row.getVisibleCells().map((cell) => (
+                          <td
+                            key={cell.id}
+                            className={`py-2.5 px-2 ${
+                              cell.column.id === 'model_id' || cell.column.id === 'provider_id'
+                                ? 'text-left'
+                                : 'text-right'
+                            }`}
+                          >
+                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        </>
+      ) : (
+        <section className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="relative">
+                <Search
+                  className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                  style={{ color: 'var(--text-muted)' }}
+                />
+                <input
+                  type="text"
+                  aria-label="搜索单价目录"
+                  value={catalogSearch}
+                  onChange={(e) => setCatalogSearch(e.target.value)}
+                  placeholder="搜索模型规则或提供商…"
+                  className="pl-8 pr-3 py-1.5 text-[12px] rounded-lg w-64"
+                  style={{
+                    backgroundColor: 'var(--bg-input)',
+                    border: '1px solid var(--border-subtle)',
+                    color: 'var(--text-primary)',
+                  }}
+                />
+              </div>
+
+              <select
+                aria-label="按提供商筛选目录"
+                value={catalogProvider}
+                onChange={(e) => setCatalogProvider(e.target.value)}
+                className="px-2.5 py-1.5 text-[12px] rounded-lg cursor-pointer"
+                style={{
+                  backgroundColor: 'var(--bg-input)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                }}
+              >
+                <option value="all">全部提供商</option>
+                {catalogProviderOptions.map((pid) => (
+                  <option key={pid} value={pid}>
+                    {providerDisplayName(pid)}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <span className="text-[11.5px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+              共 {filteredCatalog.length} 条单价规则
+            </span>
           </div>
-        ) : (data?.rows.length ?? 0) === 0 ? (
-          <div className="py-12 text-center text-[12.5px]" style={{ color: 'var(--text-muted)' }}>
-            当前时间范围等待模型调用数据
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-left">
-              <thead>
-                {table.getHeaderGroups().map((hg) => (
+
+          {filteredCatalog.length === 0 ? (
+            <div className="py-12 text-center text-[12.5px]" style={{ color: 'var(--text-muted)' }}>
+              等待匹配单价规则
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-left">
+                <thead>
                   <tr
-                    key={hg.id}
                     className="text-[11px] font-medium uppercase tracking-wider"
                     style={{
                       color: 'var(--text-muted)',
                       borderBottom: '1px solid var(--border-subtle)',
                     }}
                   >
-                    {hg.headers.map((header) => (
-                      <th
-                        key={header.id}
-                        onClick={header.column.getToggleSortingHandler()}
-                        className={`py-2 px-2 cursor-pointer select-none transition-colors hover:text-[var(--text-primary)] ${
-                          header.id === 'model_id' || header.id === 'provider_id'
-                            ? 'text-left'
-                            : 'text-right'
-                        }`}
-                      >
-                        {flexRender(header.column.columnDef.header, header.getContext())}
-                        {header.column.getIsSorted() === 'asc'
-                          ? ' ↑'
-                          : header.column.getIsSorted() === 'desc'
-                            ? ' ↓'
-                            : ''}
-                      </th>
-                    ))}
+                    <th className="py-2 px-2">模型匹配规则</th>
+                    <th className="py-2 px-2">提供商</th>
+                    <th className="py-2 px-2 text-right">Input ($/1M)</th>
+                    <th className="py-2 px-2 text-right">Output ($/1M)</th>
+                    <th className="py-2 px-2 text-right">Cache R ($/1M)</th>
+                    <th className="py-2 px-2 text-right">Cache W ($/1M)</th>
+                    <th className="py-2 px-2 text-right">来源</th>
+                    <th className="py-2 px-2 text-right">操作</th>
                   </tr>
-                ))}
-              </thead>
-              <tbody>
-                {table.getRowModel().rows.map((row) => (
-                  <tr
-                    key={row.id}
-                    className="row-interactive"
-                    style={{ borderBottom: '1px solid var(--border-hairline)' }}
-                  >
-                    {row.getVisibleCells().map((cell) => (
-                      <td
-                        key={cell.id}
-                        className={`py-2.5 px-2 ${
-                          cell.column.id === 'model_id' || cell.column.id === 'provider_id'
-                            ? 'text-left'
-                            : 'text-right'
-                        }`}
-                      >
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                </thead>
+                <tbody>
+                  {filteredCatalog.map((entry) => (
+                    <tr
+                      key={`${entry.provider_id}-${entry.model_pattern}`}
+                      className="row-interactive"
+                      style={{ borderBottom: '1px solid var(--border-hairline)' }}
+                    >
+                      <td className="py-2.5 px-2 font-mono text-[12px]">{entry.model_pattern}</td>
+                      <td className="py-2.5 px-2 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+                        {providerDisplayName(entry.provider_id)}
                       </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+                      <td className="py-2.5 px-2 text-right tabular-nums text-[12px]">
+                        ${(entry.input_per_m_micro_usd / 1_000_000).toFixed(2)}
+                      </td>
+                      <td className="py-2.5 px-2 text-right tabular-nums text-[12px]">
+                        ${(entry.output_per_m_micro_usd / 1_000_000).toFixed(2)}
+                      </td>
+                      <td className="py-2.5 px-2 text-right tabular-nums text-[12px]">
+                        ${(entry.cache_read_per_m_micro_usd / 1_000_000).toFixed(3)}
+                      </td>
+                      <td className="py-2.5 px-2 text-right tabular-nums text-[12px]">
+                        ${(entry.cache_write_per_m_micro_usd / 1_000_000).toFixed(2)}
+                      </td>
+                      <td className="py-2.5 px-2 text-right text-[11px]">
+                        <span
+                          className="px-1.5 py-0.5 rounded-md"
+                          style={{
+                            backgroundColor: 'var(--bg-hover)',
+                            color: entry.is_user_override
+                              ? 'var(--accent-primary)'
+                              : 'var(--text-secondary)',
+                          }}
+                        >
+                          {entry.is_user_override ? '自定义覆盖' : '公开基准'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-2 text-right">
+                        <div className="inline-flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => openEditorForEntry(entry)}
+                            className="btn-interactive text-[11.5px] px-2 py-0.5 rounded-lg cursor-pointer"
+                            style={{ color: 'var(--accent-primary)' }}
+                          >
+                            定制单价
+                          </button>
+                          {entry.is_user_override && (
+                            <button
+                              type="button"
+                              disabled={deleteOverrideMutation.isPending}
+                              onClick={() => deleteOverrideMutation.mutate(entry.model_pattern)}
+                              className="btn-danger text-[11px] px-2 py-0.5 rounded-lg cursor-pointer disabled:opacity-50"
+                              style={{ color: 'var(--accent-rose)' }}
+                            >
+                              还原
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
 
       {/* Flat Slide-Over Pricing & Exchange Rate Drawer */}
       {drawerOpen &&

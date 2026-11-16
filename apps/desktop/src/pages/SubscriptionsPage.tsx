@@ -733,6 +733,48 @@ export function SubscriptionsPage() {
         </div>
       ) : (
         <>
+          {/* Compact Account Hub Summary Strip */}
+          <section className="surface-tonal-band px-4 py-3 grid grid-cols-2 sm:grid-cols-4 gap-3 text-[12px] tabular-nums">
+            <div>
+              <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                配额监测窗口
+              </div>
+              <div className="mt-0.5 text-[16px] font-semibold">
+                {quotaAccounts.reduce((acc, s) => acc + s.windows.length, 0) +
+                  unboundObservedGroups.reduce((acc, g) => acc + g.windows.length, 0)}
+              </div>
+            </div>
+            <div style={{ borderLeft: '1px solid var(--border-hairline)', paddingLeft: '1rem' }}>
+              <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                按量余额账户
+              </div>
+              <div className="mt-0.5 text-[16px] font-semibold">{paygAccounts.length}</div>
+            </div>
+            <div style={{ borderLeft: '1px solid var(--border-hairline)', paddingLeft: '1rem' }}>
+              <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                跨端云同步设备
+              </div>
+              <div className="mt-0.5 text-[16px] font-semibold">{remoteDeviceGroups.length}</div>
+            </div>
+            <div style={{ borderLeft: '1px solid var(--border-hairline)', paddingLeft: '1rem' }}>
+              <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                最高窗口已用占比
+              </div>
+              <div
+                className="mt-0.5 text-[16px] font-semibold"
+                style={{ color: 'var(--accent-primary)' }}
+              >
+                {(() => {
+                  const pcts = [
+                    ...quotaAccounts.flatMap((s) => s.windows.map((w) => w.used_percent)),
+                    ...unboundObservedGroups.flatMap((g) => g.windows.map((o) => o.used_percent)),
+                  ].filter((v) => Number.isFinite(v));
+                  return pcts.length > 0 ? `${Math.max(...pcts).toFixed(1)}%` : '—';
+                })()}
+              </div>
+            </div>
+          </section>
+
           {/* Section 1: Authoritative Quota Windows (CLI / Official API / Official Log Snapshot) */}
           {hasAnyQuotaSection && (
             <section className="space-y-2">
@@ -846,13 +888,13 @@ export function SubscriptionsPage() {
                                   </span>
                                 </div>
                                 <div className="shrink-0">
-                                  <span style={{ color: 'var(--text-secondary)' }}>
-                                    {isPercentOnlyWindow
-                                      ? `剩余 ${Math.max(0, 100 - w.used_percent).toFixed(1)}%`
-                                      : `${usedStr} / ${limitStr}`}
-                                  </span>
-                                  <span className="ml-2 font-semibold">
-                                    {w.used_percent.toFixed(1)}%
+                                  {!isPercentOnlyWindow && (
+                                    <span className="mr-2" style={{ color: 'var(--text-secondary)' }}>
+                                      {usedStr} / {limitStr}
+                                    </span>
+                                  )}
+                                  <span className="font-semibold">
+                                    已用 {w.used_percent.toFixed(1)}%
                                   </span>
                                 </div>
                               </div>
@@ -887,6 +929,9 @@ export function SubscriptionsPage() {
                       <div className="col-span-12 lg:col-span-3 flex items-center justify-between gap-3">
                         <div className="space-y-2 text-[11.5px] tabular-nums">
                           {windows.map((w) => {
+                            const remainingPct = Math.max(0, 100 - w.used_percent).toFixed(1);
+                            const hasBurnRate =
+                              w.burn_rate_per_hour > 0 || w.projected_exhaustion_hours !== null;
                             const burnRateStr =
                               w.unit === 'micro_usd'
                                 ? `${formatCost(w.burn_rate_per_hour, currency, usdToCnyRate)}/h`
@@ -894,21 +939,23 @@ export function SubscriptionsPage() {
                             return (
                               <div key={w.window_id} className="space-y-0.5">
                                 <div style={{ color: 'var(--text-secondary)' }}>
-                                  {w.window_id} 重置:{' '}
+                                  {w.window_id} · 剩余 {remainingPct}% · 重置{' '}
                                   <strong style={{ color: 'var(--text-primary)' }}>
                                     {formatCountdown(
                                       computeLiveResetSeconds(w, plansUpdatedAt, nowMs)
                                     )}
                                   </strong>
                                 </div>
-                                <div style={{ color: 'var(--text-muted)' }}>
-                                  流速 {burnRateStr} ·{' '}
-                                  {w.projected_exhaustion_hours !== null
-                                    ? w.projected_exhaustion_hours <= 0
-                                      ? '已触及上限'
-                                      : `约 ${w.projected_exhaustion_hours.toFixed(1)}h 触顶`
-                                    : '稳定'}
-                                </div>
+                                {hasBurnRate && (
+                                  <div style={{ color: 'var(--text-muted)' }}>
+                                    流速 {burnRateStr}
+                                    {w.projected_exhaustion_hours !== null
+                                      ? w.projected_exhaustion_hours <= 0
+                                        ? ' · 已触及上限'
+                                        : ` · 约 ${w.projected_exhaustion_hours.toFixed(1)}h 触顶`
+                                      : ''}
+                                  </div>
+                                )}
                               </div>
                             );
                           })}
@@ -1023,7 +1070,7 @@ export function SubscriptionsPage() {
                           <div key={`${obs.provider_id}-${obs.window_name}`} className="space-y-1">
                             <div className="flex items-center justify-between text-[12px] tabular-nums">
                               <span className="font-medium">{label}</span>
-                              <span className="font-semibold">{pct.toFixed(1)}%</span>
+                              <span className="font-semibold">已用 {pct.toFixed(1)}%</span>
                             </div>
                             <InlineProgressBar percent={pct} heightPx={6} />
                           </div>
@@ -1033,6 +1080,9 @@ export function SubscriptionsPage() {
 
                     <div className="col-span-12 lg:col-span-3 space-y-1.5 text-[11.5px] tabular-nums">
                       {group.windows.map((obs) => {
+                        const pct = Number.isFinite(obs.used_percent)
+                          ? Math.max(0, Math.min(100, obs.used_percent))
+                          : 0;
                         const resetSecs =
                           obs.resets_at_ms !== null
                             ? Math.max(0, Math.floor((obs.resets_at_ms - nowMs) / 1000))
@@ -1040,7 +1090,8 @@ export function SubscriptionsPage() {
                         return (
                           <div key={`${obs.provider_id}-${obs.window_name}-reset`}>
                             <div style={{ color: 'var(--text-secondary)' }}>
-                              {formatObservedWindowLabel(obs).replace(' 官方限额', '')} 重置:{' '}
+                              {formatObservedWindowLabel(obs).replace(' 官方限额', '')} · 剩余{' '}
+                              {Math.max(0, 100 - pct).toFixed(1)}% · 重置{' '}
                               <strong style={{ color: 'var(--text-primary)' }}>
                                 {resetSecs !== null ? formatCountdown(resetSecs) : '待刷新'}
                               </strong>
@@ -1410,9 +1461,10 @@ export function SubscriptionsPage() {
                               <div className="flex items-center gap-3">
                                 <span style={{ color: 'var(--text-muted)' }}>
                                   {resetSecs !== null ? `重置 ${formatCountdown(resetSecs)} · ` : ''}
-                                  同步于 {formatRelativeTime(snap.updated_at_ms)}
+                                  剩余 {Math.max(0, 100 - pct).toFixed(1)}% · 同步于{' '}
+                                  {formatRelativeTime(snap.updated_at_ms)}
                                 </span>
-                                <span className="font-semibold">{pct.toFixed(1)}%</span>
+                                <span className="font-semibold">已用 {pct.toFixed(1)}%</span>
                               </div>
                             </div>
                             <InlineProgressBar percent={pct} heightPx={6} />

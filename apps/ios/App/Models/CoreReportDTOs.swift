@@ -690,6 +690,15 @@ public struct DesktopPairingPayload: Codable, Equatable, Sendable {
     public let url: String
     public let token: String
     public let e2ee: Bool
+    public let key: String?
+
+    public init(v: Int, url: String, token: String, e2ee: Bool, key: String? = nil) {
+        self.v = v
+        self.url = url
+        self.token = token
+        self.e2ee = e2ee
+        self.key = key
+    }
 
     public enum PairingError: LocalizedError, Equatable {
         case invalidJSON
@@ -699,7 +708,7 @@ public struct DesktopPairingPayload: Codable, Equatable, Sendable {
 
         public var errorDescription: String? {
             switch self {
-            case .invalidJSON: return "配对二维码或文本格式无效"
+            case .invalidJSON: return "配对二维码或链接格式无效"
             case .unsupportedVersion(let v): return "不支持的配对协议版本 v\(v)"
             case .invalidURL: return "Worker 地址必须为有效的 https:// 或本地 http:// URL"
             case .emptyToken: return "Sync Token 不能为空"
@@ -709,9 +718,37 @@ public struct DesktopPairingPayload: Codable, Equatable, Sendable {
 
     public static func parse(_ raw: String) throws -> DesktopPairingPayload {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let data = trimmed.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode(DesktopPairingPayload.self, from: data) else {
-            throw PairingError.invalidJSON
+        let decoded: DesktopPairingPayload
+        if trimmed.lowercased().hasPrefix("tokentracker://") {
+            guard let components = URLComponents(string: trimmed),
+                  (components.host?.lowercased() == "pair" || components.path.lowercased().contains("pair")),
+                  let items = components.queryItems else {
+                throw PairingError.invalidJSON
+            }
+            let map = Dictionary(items.compactMap { item -> (String, String)? in
+                guard let value = item.value else { return nil }
+                return (item.name.lowercased(), value)
+            }, uniquingKeysWith: { _, latest in latest })
+
+            let version = Int(map["v"] ?? "1") ?? 0
+            let urlVal = map["url"] ?? map["u"] ?? ""
+            let tokenVal = map["token"] ?? map["t"] ?? ""
+            let e2eeRaw = (map["e2ee"] ?? map["e"] ?? "0").lowercased()
+            let e2eeVal = e2eeRaw == "1" || e2eeRaw == "true" || e2eeRaw == "yes"
+            let keyVal = (map["key"] ?? map["k"])?.trimmingCharacters(in: .whitespacesAndNewlines)
+            decoded = DesktopPairingPayload(
+                v: version,
+                url: urlVal,
+                token: tokenVal,
+                e2ee: e2eeVal,
+                key: keyVal?.isEmpty == true ? nil : keyVal
+            )
+        } else {
+            guard let data = trimmed.data(using: .utf8),
+                  let jsonPayload = try? JSONDecoder().decode(DesktopPairingPayload.self, from: data) else {
+                throw PairingError.invalidJSON
+            }
+            decoded = jsonPayload
         }
         guard decoded.v == 1 else {
             throw PairingError.unsupportedVersion(decoded.v)
@@ -727,11 +764,13 @@ public struct DesktopPairingPayload: Codable, Equatable, Sendable {
         guard !cleanedToken.isEmpty else {
             throw PairingError.emptyToken
         }
+        let cleanedKey = decoded.key?.trimmingCharacters(in: .whitespacesAndNewlines)
         return DesktopPairingPayload(
             v: decoded.v,
             url: cleanedURL.hasSuffix("/") ? String(cleanedURL.dropLast()) : cleanedURL,
             token: cleanedToken,
-            e2ee: decoded.e2ee
+            e2ee: decoded.e2ee,
+            key: cleanedKey?.isEmpty == true ? nil : cleanedKey
         )
     }
 }

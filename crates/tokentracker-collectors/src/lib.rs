@@ -21,9 +21,10 @@ pub use providers::official_api::{
     BalanceRefreshOutcome, ReqwestAuthFetcher, BALANCE_COOLDOWN_MS,
 };
 pub use sync_client::{
-    clear_sync_credentials, has_sync_credentials, read_sync_status_view, run_sync_cycle_once,
-    run_sync_cycle_with_transport, set_sync_credentials, ReqwestSyncTransport, SseByteStream,
-    SyncBoxFuture, SyncClientHandle, SyncHttpTransport, SyncRunReport, SyncStatusView,
-    SYNC_BEARER_TOKEN_KEY, SYNC_E2EE_PASSPHRASE_KEY,
+    build_sync_pairing_uri, clear_sync_credentials, has_sync_credentials, normalize_worker_url,
+    read_sync_status_view, run_sync_cycle_once, run_sync_cycle_with_transport,
+    set_sync_credentials, ReqwestSyncTransport, SseByteStream, SyncBoxFuture, SyncClientHandle,
+    SyncHttpTransport, SyncRunReport, SyncStatusView, SYNC_BEARER_TOKEN_KEY,
+    SYNC_E2EE_PASSPHRASE_KEY,
 };
 pub use watcher::{CollectorCoordinator, ScanReport};

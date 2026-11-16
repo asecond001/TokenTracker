@@ -143,6 +143,18 @@ pub struct OverviewReport {
     pub total_cost_micro_usd: i64,
     pub today_tokens: i64,
     pub today_cost_micro_usd: i64,
+    #[serde(default)]
+    pub today_requests: i64,
+    #[serde(default)]
+    pub today_cache_hit_ratio: f64,
+    #[serde(default)]
+    pub today_cache_saved_micro_usd: i64,
+    #[serde(default)]
+    pub today_tokens_delta_pct: Option<f64>,
+    #[serde(default)]
+    pub today_cost_delta_pct: Option<f64>,
+    #[serde(default)]
+    pub today_hourly_pulse: Vec<TimeBucketPoint>,
     pub cache_hit_ratio: f64,
     pub avg_output_tps: f64,
     pub peak_output_tps: f64,
@@ -170,6 +182,8 @@ pub struct TrendPoint {
     pub tokens: i64,
     pub cost_micro_usd: i64,
     pub requests: i64,
+    #[serde(default)]
+    pub cache_hit_ratio: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,6 +204,10 @@ pub struct TrendComparisonRow {
     pub delta_pct: Option<f64>,
     pub current_cost_micro_usd: i64,
     pub previous_cost_micro_usd: i64,
+    #[serde(default)]
+    pub cost_delta_pct: Option<f64>,
+    #[serde(default)]
+    pub cache_hit_ratio: f64,
     pub requests: i64,
 }
 
@@ -236,6 +254,10 @@ pub struct MonthlyReport {
     pub month_total_tokens: i64,
     pub month_total_requests: i64,
     pub month_cache_saved_micro_usd: i64,
+    #[serde(default)]
+    pub provider_shares: Vec<UsageShareItem>,
+    #[serde(default)]
+    pub model_shares: Vec<UsageShareItem>,
     pub daily_ledger: Vec<MonthlyDailyLedgerRow>,
     pub heatmap_365d: Vec<HeatmapDayCell>,
 }
@@ -330,6 +352,7 @@ struct PeriodTotals {
     cache_write: i64,
     reasoning: i64,
     cost_micro_usd: i64,
+    cache_saved_micro_usd: i64,
     tps_count: i64,
     tps_sum: f64,
     max_tps: f64,
@@ -457,6 +480,28 @@ fn local_offset(tz_offset_minutes: i32) -> FixedOffset {
     FixedOffset::east_opt(tz_offset_minutes.clamp(-720, 840) * 60).unwrap_or_else(|| Utc.fix())
 }
 
+fn local_day_start_ms(ts_ms: i64, tz_offset_minutes: i32) -> i64 {
+    let offset_ms = (tz_offset_minutes.clamp(-720, 840) as i64) * 60_000;
+    (ts_ms + offset_ms).div_euclid(DAY_MS) * DAY_MS - offset_ms
+}
+
+fn local_week_start_ms(ts_ms: i64, tz_offset_minutes: i32) -> i64 {
+    const WEEK_MS: i64 = 7 * DAY_MS;
+    let offset_ms = (tz_offset_minutes.clamp(-720, 840) as i64) * 60_000;
+    // 1970-01-01 UTC was a Thursday (+3 days after Monday 1969-12-29).
+    let shifted = ts_ms + offset_ms + 3 * DAY_MS;
+    shifted.div_euclid(WEEK_MS) * WEEK_MS - 3 * DAY_MS - offset_ms
+}
+
+fn inclusive_window_span(start_ms: i64, end_ms: i64) -> i64 {
+    let raw = end_ms.saturating_sub(start_ms);
+    if end_ms.rem_euclid(1_000) == 999 {
+        raw.saturating_add(1).max(HOUR_MS)
+    } else {
+        raw.max(HOUR_MS)
+    }
+}
+
 pub(crate) fn local_day_bounds_ms(now_ms: i64, tz_offset_minutes: i32) -> (i64, i64) {
     let offset = local_offset(tz_offset_minutes);
     let dt = Utc
@@ -505,6 +550,7 @@ fn query_period_totals(
             COALESCE(SUM(cache_write_tokens), 0),
             COALESCE(SUM(reasoning_tokens), 0),
             COALESCE(SUM(estimated_cost_micro_usd), 0),
+            COALESCE(SUM(cache_saved_micro_usd), 0),
             COALESCE(SUM(tps_sample_count), 0),
             COALESCE(SUM(tps_sum), 0.0),
             COALESCE(MAX(max_output_tps), 0.0)
@@ -527,9 +573,10 @@ fn query_period_totals(
             cache_write: row.get(5)?,
             reasoning: row.get(6)?,
             cost_micro_usd: row.get(7)?,
-            tps_count: row.get(8)?,
-            tps_sum: row.get(9)?,
-            max_tps: row.get(10)?,
+            cache_saved_micro_usd: row.get(8)?,
+            tps_count: row.get(9)?,
+            tps_sum: row.get(10)?,
+            max_tps: row.get(11)?,
         })
     })
     .map_err(CoreError::from)
@@ -1249,7 +1296,7 @@ impl Storage {
                 resolve_effective_window(conn, filter, provider, device_id, now_ms)?;
             let current = query_period_totals(conn, eff_start_ms, eff_end_ms, provider, device_id)?;
 
-            let span = (eff_end_ms - eff_start_ms).max(HOUR_MS);
+            let span = inclusive_window_span(eff_start_ms, eff_end_ms);
             let (tokens_delta_pct, cost_delta_pct, cache_delta_pct, tps_delta_pct) =
                 if filter.all_time {
                     (None, None, None, None)
@@ -1400,6 +1447,7 @@ impl Storage {
                                 tokens: t,
                                 cost_micro_usd: c,
                                 requests: r,
+                                cache_hit_ratio: 0.0,
                             }
                         })
                         .collect();
@@ -1424,6 +1472,48 @@ impl Storage {
                 local_day_bounds_ms(now_ms, filter.tz_offset_minutes);
             let today_totals =
                 query_period_totals(conn, today_start_ms, now_ms, provider, device_id)?;
+            let yesterday_start_ms = today_start_ms.saturating_sub(DAY_MS);
+            let yesterday_end_ms = today_start_ms.saturating_sub(1);
+            let yesterday_totals =
+                query_period_totals(conn, yesterday_start_ms, yesterday_end_ms, provider, device_id)?;
+            let today_tokens_delta_pct = pct_change(
+                today_totals.total_tokens() as f64,
+                yesterday_totals.total_tokens() as f64,
+            );
+            let today_cost_delta_pct = pct_change(
+                today_totals.cost_micro_usd as f64,
+                yesterday_totals.cost_micro_usd as f64,
+            );
+
+            let today_day_end_ms = today_start_ms.saturating_add(24 * HOUR_MS - 1);
+            let today_hourly_rows =
+                fetch_hourly_rows(conn, today_start_ms, today_day_end_ms, provider, device_id)?;
+            let mut today_hourly_pulse: Vec<TimeBucketPoint> = (0..24)
+                .map(|hour_idx| TimeBucketPoint {
+                    bucket_start_ms: today_start_ms.saturating_add(hour_idx * HOUR_MS),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    reasoning_tokens: 0,
+                    cost_micro_usd: 0,
+                    requests: 0,
+                })
+                .collect();
+            for r in today_hourly_rows {
+                if r.bucket_start_ms >= today_start_ms && r.bucket_start_ms <= today_day_end_ms {
+                    let idx = ((r.bucket_start_ms - today_start_ms) / HOUR_MS) as usize;
+                    if let Some(pt) = today_hourly_pulse.get_mut(idx) {
+                        pt.input_tokens += r.input_tokens;
+                        pt.output_tokens += r.output_tokens;
+                        pt.cache_read_tokens += r.cache_read_tokens;
+                        pt.cache_write_tokens += r.cache_write_tokens;
+                        pt.reasoning_tokens += r.reasoning_tokens;
+                        pt.cost_micro_usd += r.cost_micro_usd;
+                        pt.requests += r.requests;
+                    }
+                }
+            }
 
             let plans = load_subscription_plans(conn)?;
             let observed = load_observed_rate_limits(conn)?;
@@ -1511,6 +1601,12 @@ impl Storage {
                 total_cost_micro_usd: current.cost_micro_usd,
                 today_tokens: today_totals.total_tokens(),
                 today_cost_micro_usd: today_totals.cost_micro_usd,
+                today_requests: today_totals.requests,
+                today_cache_hit_ratio: today_totals.cache_hit_ratio(),
+                today_cache_saved_micro_usd: today_totals.cache_saved_micro_usd,
+                today_tokens_delta_pct,
+                today_cost_delta_pct,
+                today_hourly_pulse,
                 cache_hit_ratio: current.cache_hit_ratio(),
                 avg_output_tps: current.avg_tps(),
                 peak_output_tps: current.max_tps,
@@ -1545,7 +1641,7 @@ impl Storage {
                 device_id,
                 Utc::now().timestamp_millis(),
             )?;
-            let span = (eff_end_ms - eff_start_ms).max(HOUR_MS);
+            let span = inclusive_window_span(eff_start_ms, eff_end_ms);
             let effective_granularity = resolve_trend_granularity(query.granularity, span);
 
             let current_rows = fetch_trend_rows(
@@ -1555,6 +1651,7 @@ impl Storage {
                 provider,
                 device_id,
                 effective_granularity,
+                filter.tz_offset_minutes,
             )?;
             let previous_rows = if filter.all_time {
                 Vec::new()
@@ -1568,17 +1665,28 @@ impl Storage {
                     provider,
                     device_id,
                     effective_granularity,
+                    filter.tz_offset_minutes,
                 )?
             };
 
+            #[derive(Default, Clone, Copy)]
+            struct TrendBucketAccum {
+                tokens: i64,
+                cost: i64,
+                requests: i64,
+                input: i64,
+                cache_read: i64,
+                cache_write: i64,
+            }
+
             let mut all_buckets = BTreeSet::new();
-            // series_map[key][bucket] = (tokens, cost, requests)
-            let mut series_map: BTreeMap<String, BTreeMap<i64, (i64, i64, i64)>> = BTreeMap::new();
+            let mut series_map: BTreeMap<String, BTreeMap<i64, TrendBucketAccum>> =
+                BTreeMap::new();
             let mut prev_totals: HashMap<String, (i64, i64)> = HashMap::new();
 
             let accumulate = |rows: &[RawTrendRow],
                               buckets: &mut BTreeSet<i64>,
-                              map: &mut BTreeMap<String, BTreeMap<i64, (i64, i64, i64)>>,
+                              map: &mut BTreeMap<String, BTreeMap<i64, TrendBucketAccum>>,
                               record_buckets: bool| {
                 for row in rows {
                     if record_buckets {
@@ -1591,10 +1699,13 @@ impl Storage {
                                 .entry(row.provider_id.clone())
                                 .or_default()
                                 .entry(row.bucket_start_ms)
-                                .or_insert((0, 0, 0));
-                            entry.0 += tokens;
-                            entry.1 += row.cost_micro_usd;
-                            entry.2 += row.requests;
+                                .or_default();
+                            entry.tokens += tokens;
+                            entry.cost += row.cost_micro_usd;
+                            entry.requests += row.requests;
+                            entry.input += row.input_tokens;
+                            entry.cache_read += row.cache_read_tokens;
+                            entry.cache_write += row.cache_write_tokens;
                         }
                         StackDimension::Model => {
                             let tokens = row.total_tokens();
@@ -1602,10 +1713,13 @@ impl Storage {
                                 .entry(row.model_id.clone())
                                 .or_default()
                                 .entry(row.bucket_start_ms)
-                                .or_insert((0, 0, 0));
-                            entry.0 += tokens;
-                            entry.1 += row.cost_micro_usd;
-                            entry.2 += row.requests;
+                                .or_default();
+                            entry.tokens += tokens;
+                            entry.cost += row.cost_micro_usd;
+                            entry.requests += row.requests;
+                            entry.input += row.input_tokens;
+                            entry.cache_read += row.cache_read_tokens;
+                            entry.cache_write += row.cache_write_tokens;
                         }
                         StackDimension::TokenType => {
                             let parts = [
@@ -1625,10 +1739,10 @@ impl Storage {
                                     .entry(key.to_string())
                                     .or_default()
                                     .entry(row.bucket_start_ms)
-                                    .or_insert((0, 0, 0));
-                                entry.0 += tok;
-                                entry.1 += proportional_cost;
-                                entry.2 += if key == "input" { row.requests } else { 0 };
+                                    .or_default();
+                                entry.tokens += tok;
+                                entry.cost += proportional_cost;
+                                entry.requests += if key == "input" { row.requests } else { 0 };
                             }
                         }
                     }
@@ -1640,8 +1754,22 @@ impl Storage {
             // Generate continuous aligned buckets across the active window when data exists (capped at 2000).
             if !all_buckets.is_empty() {
                 let bucket_step = granularity_bucket_ms(effective_granularity);
-                let first_b = eff_start_ms.div_euclid(bucket_step) * bucket_step;
-                let last_b = eff_end_ms.div_euclid(bucket_step) * bucket_step;
+                let align_bucket = |ts: i64| -> i64 {
+                    match effective_granularity {
+                        TrendGranularity::FifteenMinutes => ts.div_euclid(900_000) * 900_000,
+                        TrendGranularity::Auto | TrendGranularity::Hourly => {
+                            ts.div_euclid(HOUR_MS) * HOUR_MS
+                        }
+                        TrendGranularity::Daily => {
+                            local_day_start_ms(ts, filter.tz_offset_minutes)
+                        }
+                        TrendGranularity::Weekly => {
+                            local_week_start_ms(ts, filter.tz_offset_minutes)
+                        }
+                    }
+                };
+                let first_b = align_bucket(eff_start_ms);
+                let last_b = align_bucket(eff_end_ms);
                 if last_b >= first_b && ((last_b - first_b) / bucket_step) < 2_000 {
                     let mut b = first_b;
                     while b <= last_b {
@@ -1654,15 +1782,15 @@ impl Storage {
                 }
             }
 
-            let mut prev_map: BTreeMap<String, BTreeMap<i64, (i64, i64, i64)>> = BTreeMap::new();
+            let mut prev_map: BTreeMap<String, BTreeMap<i64, TrendBucketAccum>> = BTreeMap::new();
             let mut dummy_buckets = BTreeSet::new();
             accumulate(&previous_rows, &mut dummy_buckets, &mut prev_map, false);
             for (key, bucket_map) in prev_map {
                 let mut tok_sum = 0i64;
                 let mut cost_sum = 0i64;
-                for (t, c, _) in bucket_map.values() {
-                    tok_sum += t;
-                    cost_sum += c;
+                for acc in bucket_map.values() {
+                    tok_sum += acc.tokens;
+                    cost_sum += acc.cost;
                 }
                 prev_totals.insert(key, (tok_sum, cost_sum));
             }
@@ -1676,26 +1804,51 @@ impl Storage {
                 let mut total_tokens = 0i64;
                 let mut total_cost = 0i64;
                 let mut total_reqs = 0i64;
+                let mut total_input = 0i64;
+                let mut total_cache_read = 0i64;
+                let mut total_cache_write = 0i64;
 
                 for &b in &buckets {
-                    let (t, c, r) = bucket_map.get(&b).copied().unwrap_or((0, 0, 0));
-                    total_tokens += t;
-                    total_cost += c;
-                    total_reqs += r;
+                    let acc = bucket_map.get(&b).copied().unwrap_or_default();
+                    total_tokens += acc.tokens;
+                    total_cost += acc.cost;
+                    total_reqs += acc.requests;
+                    total_input += acc.input;
+                    total_cache_read += acc.cache_read;
+                    total_cache_write += acc.cache_write;
+                    let denom = acc.input + acc.cache_read + acc.cache_write;
+                    let cache_hit_ratio = if denom > 0 {
+                        acc.cache_read as f64 / denom as f64
+                    } else {
+                        0.0
+                    };
                     points.push(TrendPoint {
                         bucket_start_ms: b,
-                        tokens: t,
-                        cost_micro_usd: c,
-                        requests: r,
+                        tokens: acc.tokens,
+                        cost_micro_usd: acc.cost,
+                        requests: acc.requests,
+                        cache_hit_ratio,
                     });
                 }
 
+                let total_denom = total_input + total_cache_read + total_cache_write;
+                let overall_cache_hit_ratio = if total_denom > 0 {
+                    total_cache_read as f64 / total_denom as f64
+                } else {
+                    0.0
+                };
+
                 let label = format_dimension_label(query.dimension, &key);
-                let (prev_tok, prev_cost, delta_pct) = if filter.all_time {
-                    (0, 0, None)
+                let (prev_tok, prev_cost, delta_pct, cost_delta_pct) = if filter.all_time {
+                    (0, 0, None, None)
                 } else {
                     let (pt, pc) = prev_totals.get(&key).copied().unwrap_or((0, 0));
-                    (pt, pc, pct_change(total_tokens as f64, pt as f64))
+                    (
+                        pt,
+                        pc,
+                        pct_change(total_tokens as f64, pt as f64),
+                        pct_change(total_cost as f64, pc as f64),
+                    )
                 };
 
                 if total_tokens > 0 || prev_tok > 0 {
@@ -1707,6 +1860,8 @@ impl Storage {
                         delta_pct,
                         current_cost_micro_usd: total_cost,
                         previous_cost_micro_usd: prev_cost,
+                        cost_delta_pct,
+                        cache_hit_ratio: overall_cache_hit_ratio,
                         requests: total_reqs,
                     });
                 }
@@ -1781,6 +1936,8 @@ impl Storage {
             }
 
             let mut by_day: BTreeMap<String, DayAccum> = BTreeMap::new();
+            let mut by_provider: HashMap<String, (i64, i64)> = HashMap::new();
+            let mut by_model: HashMap<String, (i64, i64)> = HashMap::new();
             let mut month_cost = 0i64;
             let mut month_tokens = 0i64;
             let mut month_requests = 0i64;
@@ -1799,13 +1956,60 @@ impl Storage {
                 acc.cost += r.cost_micro_usd;
                 acc.saved += r.cache_saved_micro_usd;
                 let tok = r.total_tokens();
-                *acc.model_tokens.entry(r.model_id).or_default() += tok;
+                *acc.model_tokens.entry(r.model_id.clone()).or_default() += tok;
+
+                let p_entry = by_provider.entry(r.provider_id).or_default();
+                p_entry.0 += tok;
+                p_entry.1 += r.cost_micro_usd;
+
+                let m_entry = by_model.entry(r.model_id).or_default();
+                m_entry.0 += tok;
+                m_entry.1 += r.cost_micro_usd;
 
                 month_cost += r.cost_micro_usd;
                 month_tokens += tok;
                 month_requests += r.requests;
                 month_saved += r.cache_saved_micro_usd;
             }
+
+            let mut provider_shares: Vec<UsageShareItem> = by_provider
+                .into_iter()
+                .filter(|(_, (tok, cost))| *tok > 0 || *cost > 0)
+                .map(|(pid, (tokens, cost_micro_usd))| UsageShareItem {
+                    label: provider_ids::display_name(&pid).to_string(),
+                    key: pid,
+                    tokens,
+                    token_share_percent: pct_share(tokens, month_tokens),
+                    cost_micro_usd,
+                    cost_share_percent: pct_share(cost_micro_usd, month_cost),
+                })
+                .collect();
+            provider_shares.sort_by(|a, b| {
+                b.cost_micro_usd
+                    .cmp(&a.cost_micro_usd)
+                    .then_with(|| b.tokens.cmp(&a.tokens))
+                    .then_with(|| a.key.cmp(&b.key))
+            });
+
+            let mut model_shares: Vec<UsageShareItem> = by_model
+                .into_iter()
+                .filter(|(_, (tok, cost))| *tok > 0 || *cost > 0)
+                .map(|(model_id, (tokens, cost_micro_usd))| UsageShareItem {
+                    label: model_id.clone(),
+                    key: model_id,
+                    tokens,
+                    token_share_percent: pct_share(tokens, month_tokens),
+                    cost_micro_usd,
+                    cost_share_percent: pct_share(cost_micro_usd, month_cost),
+                })
+                .collect();
+            model_shares.sort_by(|a, b| {
+                b.cost_micro_usd
+                    .cmp(&a.cost_micro_usd)
+                    .then_with(|| b.tokens.cmp(&a.tokens))
+                    .then_with(|| a.key.cmp(&b.key))
+            });
+            model_shares.truncate(6);
 
             let mut daily_ledger = Vec::new();
             for (date, acc) in by_day {
@@ -1916,6 +2120,8 @@ impl Storage {
                 month_total_tokens: month_tokens,
                 month_total_requests: month_requests,
                 month_cache_saved_micro_usd: month_saved,
+                provider_shares,
+                model_shares,
                 daily_ledger,
                 heatmap_365d,
             })
@@ -2430,6 +2636,7 @@ fn fetch_trend_rows(
     provider: Option<&str>,
     device_id: Option<&str>,
     granularity: TrendGranularity,
+    tz_offset_minutes: i32,
 ) -> CoreResult<Vec<RawTrendRow>> {
     let resolved = resolve_trend_granularity(granularity, (end_ms - start_ms).max(HOUR_MS));
     match resolved {
@@ -2461,13 +2668,15 @@ fn fetch_trend_rows(
             Ok(rows)
         }
         TrendGranularity::Hourly => fetch_hourly_rows(conn, start_ms, end_ms, provider, device_id),
-        TrendGranularity::Daily => fetch_daily_rows(conn, start_ms, end_ms, provider, device_id),
+        TrendGranularity::Daily => {
+            fetch_daily_rows(conn, start_ms, end_ms, provider, device_id, tz_offset_minutes)
+        }
         TrendGranularity::Weekly => {
-            let daily = fetch_daily_rows(conn, start_ms, end_ms, provider, device_id)?;
-            const WEEK_MS: i64 = 7 * DAY_MS;
+            let daily =
+                fetch_daily_rows(conn, start_ms, end_ms, provider, device_id, tz_offset_minutes)?;
             let mut grouped: BTreeMap<(i64, String, String), RawTrendRow> = BTreeMap::new();
             for row in daily {
-                let week_bucket = row.bucket_start_ms.div_euclid(WEEK_MS) * WEEK_MS;
+                let week_bucket = local_week_start_ms(row.bucket_start_ms, tz_offset_minutes);
                 let entry = grouped
                     .entry((week_bucket, row.provider_id.clone(), row.model_id.clone()))
                     .or_insert_with(|| RawTrendRow {
@@ -2728,25 +2937,48 @@ fn fetch_daily_rows(
     end_ms: i64,
     provider: Option<&str>,
     device_id: Option<&str>,
+    tz_offset_minutes: i32,
 ) -> CoreResult<Vec<RawTrendRow>> {
-    let aligned_start = start_ms.div_euclid(DAY_MS) * DAY_MS;
-    let scope = build_scope_clause(2, provider, device_id);
-    let sql = format!(
-        r#"
-        SELECT bucket_start_ms, provider_id, model_id,
-               SUM(request_count), SUM(observable_step_count),
-               SUM(input_tokens), SUM(output_tokens),
-               SUM(cache_read_tokens), SUM(cache_write_tokens),
-               SUM(reasoning_tokens), SUM(estimated_cost_micro_usd),
-               SUM(cache_saved_micro_usd)
-        FROM usage_daily_rollups
-        WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2{where_and}
-        GROUP BY bucket_start_ms, provider_id, model_id
-        ORDER BY bucket_start_ms ASC
-        "#,
-        where_and = scope.sql_and
-    );
-    run_trend_query(conn, &sql, aligned_start, end_ms, &scope.params)
+    let min_day = local_day_start_ms(start_ms, tz_offset_minutes);
+    let max_day = local_day_start_ms(end_ms, tz_offset_minutes);
+    let aligned_hour_start = start_ms.div_euclid(HOUR_MS) * HOUR_MS;
+    let hourly_rows = fetch_hourly_rows(conn, aligned_hour_start, end_ms, provider, device_id)?;
+    let mut grouped: BTreeMap<(i64, String, String), RawTrendRow> = BTreeMap::new();
+    for row in hourly_rows {
+        if row.bucket_start_ms < aligned_hour_start || row.bucket_start_ms > end_ms {
+            continue;
+        }
+        let day_bucket = local_day_start_ms(row.bucket_start_ms, tz_offset_minutes);
+        if day_bucket < min_day || day_bucket > max_day {
+            continue;
+        }
+        let entry = grouped
+            .entry((day_bucket, row.provider_id.clone(), row.model_id.clone()))
+            .or_insert_with(|| RawTrendRow {
+                bucket_start_ms: day_bucket,
+                provider_id: row.provider_id,
+                model_id: row.model_id,
+                requests: 0,
+                observable_steps: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            });
+        entry.requests += row.requests;
+        entry.observable_steps += row.observable_steps;
+        entry.input_tokens += row.input_tokens;
+        entry.output_tokens += row.output_tokens;
+        entry.cache_read_tokens += row.cache_read_tokens;
+        entry.cache_write_tokens += row.cache_write_tokens;
+        entry.reasoning_tokens += row.reasoning_tokens;
+        entry.cost_micro_usd += row.cost_micro_usd;
+        entry.cache_saved_micro_usd += row.cache_saved_micro_usd;
+    }
+    Ok(grouped.into_values().collect())
 }
 
 fn run_trend_query(
@@ -3738,5 +3970,157 @@ mod tests {
         // Live TPS fallback & active speed must reflect user session (100 tok/s), NOT 250 tok/s auto-review.
         assert_eq!(ov.latest_output_tps, Some(100.0));
         assert!(!ov.live_model_speeds.iter().any(|s| s.model_id == "codex-auto-review"));
+    }
+
+    #[test]
+    fn trends_daily_buckets_and_comparisons_align_to_local_timezone() {
+        let storage = Storage::open_in_memory().expect("in-memory");
+        let dev_id = storage.local_device().expect("device").device_id;
+        let offset_plus8 = local_offset(480);
+
+        // Window: 2026-11-11 00:00:00.000 +08:00 through 2026-11-17 23:59:59.999 +08:00 (7 calendar days)
+        let start_ms = NaiveDate::from_ymd_opt(2026, 11, 11)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|ndt| offset_plus8.from_local_datetime(&ndt).single())
+            .unwrap()
+            .timestamp_millis();
+        let end_ms = NaiveDate::from_ymd_opt(2026, 11, 17)
+            .unwrap()
+            .and_hms_milli_opt(23, 59, 59, 999)
+            .and_then(|ndt| offset_plus8.from_local_datetime(&ndt).single())
+            .unwrap()
+            .timestamp_millis();
+
+        // Event 1: 2026-11-11 01:00 +08:00 (= 2026-11-10 17:00 UTC) -> MUST land in 2026-11-11 +08:00
+        let ts_nov11_early = start_ms + HOUR_MS;
+        // Event 2: 2026-11-17 03:36 +08:00 -> MUST land in 2026-11-17 +08:00
+        let ts_nov17 = start_ms + 6 * DAY_MS + 3 * HOUR_MS + 36 * 60_000;
+        // Event 3: 2026-11-10 23:30 +08:00 -> MUST belong ONLY to previous 7-day period (2026-11-04..2026-11-10)
+        let ts_nov10_late = start_ms - 30 * 60_000;
+
+        let events = vec![
+            NormalizedUsageEvent {
+                event_id: compute_event_id("claude_code", "s-11", "m1", ts_nov11_early),
+                device_id: dev_id.clone(),
+                provider_id: "claude_code".to_string(),
+                session_id: "s-11".to_string(),
+                project_label: "proj".to_string(),
+                model_id: "claude-sonnet-4-5".to_string(),
+                timestamp_ms: ts_nov11_early,
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cache_read_tokens: 3_000,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(1_000),
+                ttft_ms: None,
+                output_tps: Some(50.0),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+            NormalizedUsageEvent {
+                event_id: compute_event_id("claude_code", "s-17", "m2", ts_nov17),
+                device_id: dev_id.clone(),
+                provider_id: "claude_code".to_string(),
+                session_id: "s-17".to_string(),
+                project_label: "proj".to_string(),
+                model_id: "claude-sonnet-4-5".to_string(),
+                timestamp_ms: ts_nov17,
+                input_tokens: 2_000,
+                output_tokens: 1_000,
+                cache_read_tokens: 2_000,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(1_500),
+                ttft_ms: None,
+                output_tps: Some(60.0),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+            NormalizedUsageEvent {
+                event_id: compute_event_id("claude_code", "s-10", "m3", ts_nov10_late),
+                device_id: dev_id,
+                provider_id: "claude_code".to_string(),
+                session_id: "s-10".to_string(),
+                project_label: "proj".to_string(),
+                model_id: "claude-sonnet-4-5".to_string(),
+                timestamp_ms: ts_nov10_late,
+                input_tokens: 1_500,
+                output_tokens: 500,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(1_000),
+                ttft_ms: None,
+                output_tps: Some(40.0),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+        ];
+        storage
+            .ingest_events_with_cursor(&events, None, &[])
+            .expect("ingest");
+
+        let filter = AnalyticsFilter {
+            start_ms,
+            end_ms,
+            provider_id: None,
+            device_id: None,
+            tz_offset_minutes: 480,
+            all_time: false,
+        };
+
+        let trends = storage
+            .query_trends(&TrendsQuery {
+                filter: filter.clone(),
+                granularity: TrendGranularity::Auto,
+                dimension: StackDimension::Provider,
+            })
+            .expect("trends");
+
+        assert_eq!(trends.effective_granularity, TrendGranularity::Daily);
+        assert_eq!(trends.buckets.len(), 7);
+        assert_eq!(trends.buckets[0], start_ms);
+        assert_eq!(trends.buckets[6], start_ms + 6 * DAY_MS);
+
+        let claude = &trends.series[0];
+        assert_eq!(claude.points[0].tokens, 4_500);
+        // 3000 / (1000 + 3000) = 0.75
+        assert!((claude.points[0].cache_hit_ratio - 0.75).abs() < 1e-6);
+        assert_eq!(claude.points[6].tokens, 5_000);
+        // 2000 / (2000 + 2000) = 0.50
+        assert!((claude.points[6].cache_hit_ratio - 0.50).abs() < 1e-6);
+
+        let cmp = &trends.comparisons[0];
+        assert_eq!(cmp.current_tokens, 9_500);
+        assert_eq!(cmp.previous_tokens, 2_000);
+        // Overall cache hit ratio: 5000 / (3000 + 5000) = 0.625
+        assert!((cmp.cache_hit_ratio - 0.625).abs() < 1e-6);
+        assert!(cmp.cost_delta_pct.is_some());
+
+        let ov = storage.query_overview(&filter, ts_nov17).expect("overview");
+        assert_eq!(ov.today_hourly_pulse.len(), 24);
+        assert_eq!(ov.today_requests, 1);
+        assert_eq!(ov.today_tokens, 5_000);
+        assert!((ov.today_cache_hit_ratio - 0.50).abs() < 1e-6);
+        assert_eq!(ov.today_hourly_pulse[3].input_tokens, 2_000);
+
+        let monthly = storage
+            .query_monthly(&MonthlyQuery {
+                year: 2026,
+                month: 11,
+                provider_id: None,
+                device_id: None,
+                tz_offset_minutes: 480,
+            })
+            .expect("monthly");
+        assert_eq!(monthly.provider_shares.len(), 1);
+        assert_eq!(monthly.provider_shares[0].key, "claude_code");
+        assert_eq!(monthly.model_shares.len(), 1);
+        assert_eq!(monthly.model_shares[0].key, "claude-sonnet-4-5");
     }
 }

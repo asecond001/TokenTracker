@@ -151,6 +151,14 @@ final class TokenTrackerTests: XCTestCase {
         XCTAssertEqual(parsed.url, "https://sync.example.workers.dev")
         XCTAssertEqual(parsed.token, "secret-tok")
         XCTAssertTrue(parsed.e2ee)
+        XCTAssertNil(parsed.key)
+
+        let deepLink = "tokentracker://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev%2F&token=secret-tok&e2ee=1&key=my-pass"
+        let parsedLink = try DesktopPairingPayload.parse(deepLink)
+        XCTAssertEqual(parsedLink.url, "https://sync.example.workers.dev")
+        XCTAssertEqual(parsedLink.token, "secret-tok")
+        XCTAssertTrue(parsedLink.e2ee)
+        XCTAssertEqual(parsedLink.key, "my-pass")
 
         XCTAssertThrowsError(try DesktopPairingPayload.parse("{\"v\":2,\"url\":\"https://x.com\",\"token\":\"t\",\"e2ee\":false}"))
         XCTAssertThrowsError(try DesktopPairingPayload.parse("{\"v\":1,\"url\":\"ftp://x.com\",\"token\":\"t\",\"e2ee\":false}"))

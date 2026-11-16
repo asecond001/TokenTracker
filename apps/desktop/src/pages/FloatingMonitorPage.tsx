@@ -617,7 +617,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
                         {providerDisplayName(providerId)} · {win.label}
                       </span>
                       <span style={{ color: 'var(--text-primary)' }}>
-                        {win.used_percent.toFixed(0)}% · {formatCountdown(win.resets_in_seconds)}
+                        已用 {win.used_percent.toFixed(0)}% · {formatCountdown(win.resets_in_seconds)}
                       </span>
                     </div>
                     <InlineProgressBar

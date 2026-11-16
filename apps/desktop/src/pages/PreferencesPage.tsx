@@ -3,15 +3,19 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { disable as disableAutostart, enable as enableAutostart } from '@tauri-apps/plugin-autostart';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
+  Check,
   Cloud,
+  Copy,
   Download,
   Image as ImageIcon,
   KeyRound,
+  QrCode,
   RefreshCw,
   RotateCcw,
   Save,
   ShieldCheck,
   Sparkles,
+  Wand2,
 } from 'lucide-react';
 import { InlineProgressBar } from '../components/InlineProgressBar';
 import {
@@ -25,6 +29,7 @@ import {
 } from '../lib/floatingConfig';
 import { formatRelativeTime } from '../lib/format';
 import { ipc, isTauriRuntime } from '../lib/ipc';
+import { QrCodeSvg } from '../lib/qrcode';
 import {
   checkForUpdates,
   downloadAndInstallUpdate,
@@ -36,6 +41,7 @@ import type {
   BootstrapState,
   CurrencyCode,
   SyncEnvelopeV1,
+  SyncPairingBundle,
   SyncStatusView,
   ThemeMode,
 } from '../types/ipc';
@@ -109,6 +115,18 @@ function clampBlurPx(raw: number | undefined): number {
   return Math.round(Math.min(32, Math.max(0, raw)));
 }
 
+function generateSecretToken(byteLength = 24): string {
+  const bytes = new Uint8Array(byteLength);
+  if (typeof globalThis.crypto?.getRandomValues === 'function') {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < byteLength; i += 1) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 export function PreferencesPage({
   onApplyTheme,
   onPreviewPreferences,
@@ -154,6 +172,10 @@ export function PreferencesPage({
   const [syncE2eeDraft, setSyncE2eeDraft] = useState(false);
   const [syncBearerTokenInput, setSyncBearerTokenInput] = useState('');
   const [syncPassphraseInput, setSyncPassphraseInput] = useState('');
+  const [pairingBundle, setPairingBundle] = useState<SyncPairingBundle | null>(null);
+  const [pairingExpanded, setPairingExpanded] = useState(false);
+  const [includePassphraseInPairing, setIncludePassphraseInPairing] = useState(false);
+  const [pairingCopied, setPairingCopied] = useState(false);
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const [syncEnvelope, setSyncEnvelope] = useState<SyncEnvelopeV1 | null>(null);
   const updater = useUpdaterStore();
@@ -640,12 +662,14 @@ export function PreferencesPage({
 
   const handleFloatingWindowToggle = (enabled: boolean) => {
     setFloatingWindowEnabled(enabled);
-    void persistPreferences({ floating_window_enabled: enabled }).catch((err: unknown) => {
-      setNotice({
-        text: err instanceof Error ? err.message : '切换桌面悬浮窗状态失败',
-        kind: 'error',
+    void persistPreferences({ floating_window_enabled: enabled })
+      .then(() => queryClient.invalidateQueries({ queryKey: ['floating-visible'] }))
+      .catch((err: unknown) => {
+        setNotice({
+          text: err instanceof Error ? err.message : '切换桌面悬浮窗状态失败',
+          kind: 'error',
+        });
       });
-    });
   };
 
   const handleFloatingElementToggle = (
@@ -675,50 +699,60 @@ export function PreferencesPage({
     },
   });
 
-  const saveSyncConfigMutation = useMutation({
-    mutationFn: () =>
-      ipc.updateSyncConfig(
+  const loadPairingMutation = useMutation({
+    mutationFn: (includePassphrase: boolean) => ipc.getSyncPairingBundle(includePassphrase),
+    onSuccess: (bundle: SyncPairingBundle) => {
+      setPairingBundle(bundle);
+      setPairingExpanded(true);
+    },
+    onError: (err: unknown) => {
+      setNotice({
+        text: err instanceof Error ? err.message : '生成配对码失败',
+        kind: 'error',
+      });
+    },
+  });
+
+  const saveCloudSyncSetupMutation = useMutation({
+    mutationFn: () => {
+      const workerUrl = syncWorkerUrlDraft.trim() || null;
+      const token = syncBearerTokenInput.trim() || null;
+      const pass = syncE2eeDraft ? syncPassphraseInput.trim() || null : null;
+      return ipc.saveCloudSyncSetup(
         syncEnabledDraft,
-        syncWorkerUrlDraft.trim() || null,
-        syncE2eeDraft
-      ),
+        workerUrl,
+        token,
+        syncE2eeDraft,
+        pass
+      );
+    },
     onSuccess: async (status: SyncStatusView) => {
       lastSyncCfgSnapshotRef.current = {
         enabled: status.enabled,
         worker_url: status.worker_url ?? '',
         e2ee_enabled: status.e2ee_enabled,
       };
-      queryClient.setQueryData<SyncStatusView>(['sync-status'], status);
-      await queryClient.invalidateQueries({ queryKey: ['sync-status'] });
-      setNotice({ text: '云端同步配置已保存', kind: 'success' });
-    },
-    onError: (err: unknown) => {
-      setNotice({
-        text: err instanceof Error ? err.message : '保存云端同步配置失败',
-        kind: 'error',
-      });
-    },
-  });
-
-  const saveSyncCredsMutation = useMutation({
-    mutationFn: () => {
-      const token = syncBearerTokenInput.trim() || null;
-      const pass = syncPassphraseInput.trim() || null;
-      if (!token && !pass) {
-        return Promise.reject(new Error('请至少填写 SYNC Bearer Token 或 E2EE 同步口令'));
-      }
-      return ipc.setSyncCredentials(token, pass);
-    },
-    onSuccess: async (status: SyncStatusView) => {
       setSyncBearerTokenInput('');
       setSyncPassphraseInput('');
       queryClient.setQueryData<SyncStatusView>(['sync-status'], status);
       await queryClient.invalidateQueries({ queryKey: ['sync-status'] });
-      setNotice({ text: '同步凭据已安全写入系统凭据库', kind: 'success' });
+      if (status.enabled && status.worker_url && status.has_bearer_token) {
+        try {
+          const bundle = await ipc.getSyncPairingBundle(includePassphraseInPairing);
+          setPairingBundle(bundle);
+          setPairingExpanded(true);
+        } catch {
+          setPairingBundle(null);
+        }
+      } else {
+        setPairingBundle(null);
+        setPairingExpanded(false);
+      }
+      setNotice({ text: '云端同步已保存并应用', kind: 'success' });
     },
     onError: (err: unknown) => {
       setNotice({
-        text: err instanceof Error ? err.message : '保存同步凭据失败',
+        text: err instanceof Error ? err.message : '保存云端同步失败',
         kind: 'error',
       });
     },
@@ -729,6 +763,8 @@ export function PreferencesPage({
     onSuccess: async (status: SyncStatusView) => {
       setSyncBearerTokenInput('');
       setSyncPassphraseInput('');
+      setPairingBundle(null);
+      setPairingExpanded(false);
       queryClient.setQueryData<SyncStatusView>(['sync-status'], status);
       await queryClient.invalidateQueries({ queryKey: ['sync-status'] });
       setNotice({ text: '已从系统凭据库清除云端同步凭据', kind: 'success' });
@@ -786,7 +822,7 @@ export function PreferencesPage({
               color: 'var(--accent-tonal-text)',
             }}
           >
-            v0.2.7
+            v0.3.0
           </span>
         </div>
 
@@ -1132,59 +1168,63 @@ export function PreferencesPage({
               </label>
             </div>
 
-            <div className="flex flex-wrap items-center gap-1.5">
-              {FLOATING_ELEMENT_TOGGLES.map((item) => {
-                const enabled = floatingConfig[item.key];
-                return (
-                  <button
-                    key={item.key}
-                    type="button"
-                    aria-pressed={enabled}
-                    onClick={() => handleFloatingElementToggle(item.key)}
-                    className="btn-interactive px-2 py-0.5 rounded-lg text-[11px] cursor-pointer"
-                    style={{
-                      backgroundColor: enabled ? 'var(--bg-hover)' : 'var(--bg-input)',
-                      border: enabled
-                        ? '1px solid var(--accent-primary)'
-                        : '1px solid var(--border-subtle)',
-                      color: enabled ? 'var(--text-primary)' : 'var(--text-muted)',
-                      fontWeight: enabled ? 500 : 400,
-                    }}
-                  >
-                    {item.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="max-w-xs">
-              <label className="space-y-1 block">
-                <div className="flex items-center justify-between text-[11.5px]">
-                  <span style={{ color: 'var(--text-secondary)' }}>悬浮窗不透明度</span>
-                  <span
-                    className="font-mono tabular-nums"
-                    style={{ color: 'var(--text-primary)' }}
-                  >
-                    {Math.round(floatingConfig.opacity * 100)}%
-                  </span>
+            {floatingWindowEnabled && (
+              <>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {FLOATING_ELEMENT_TOGGLES.map((item) => {
+                    const enabled = floatingConfig[item.key];
+                    return (
+                      <button
+                        key={item.key}
+                        type="button"
+                        aria-pressed={enabled}
+                        onClick={() => handleFloatingElementToggle(item.key)}
+                        className="btn-interactive px-2 py-0.5 rounded-lg text-[11px] cursor-pointer"
+                        style={{
+                          backgroundColor: enabled ? 'var(--bg-hover)' : 'var(--bg-input)',
+                          border: enabled
+                            ? '1px solid var(--accent-primary)'
+                            : '1px solid var(--border-subtle)',
+                          color: enabled ? 'var(--text-primary)' : 'var(--text-muted)',
+                          fontWeight: enabled ? 500 : 400,
+                        }}
+                      >
+                        {item.label}
+                      </button>
+                    );
+                  })}
                 </div>
-                <input
-                  type="range"
-                  aria-label="悬浮窗不透明度"
-                  min={0.55}
-                  max={0.98}
-                  step={0.01}
-                  value={floatingConfig.opacity}
-                  onChange={(e) => {
-                    const val = Number.parseFloat(e.target.value);
-                    if (Number.isFinite(val)) {
-                      updateFloatingConfig({ opacity: val });
-                    }
-                  }}
-                  className="w-full cursor-pointer accent-[var(--accent-primary)]"
-                />
-              </label>
-            </div>
+
+                <div className="max-w-xs">
+                  <label className="space-y-1 block">
+                    <div className="flex items-center justify-between text-[11.5px]">
+                      <span style={{ color: 'var(--text-secondary)' }}>悬浮窗不透明度</span>
+                      <span
+                        className="font-mono tabular-nums"
+                        style={{ color: 'var(--text-primary)' }}
+                      >
+                        {Math.round(floatingConfig.opacity * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      aria-label="悬浮窗不透明度"
+                      min={0.55}
+                      max={0.98}
+                      step={0.01}
+                      value={floatingConfig.opacity}
+                      onChange={(e) => {
+                        const val = Number.parseFloat(e.target.value);
+                        if (Number.isFinite(val)) {
+                          updateFloatingConfig({ opacity: val });
+                        }
+                      }}
+                      className="w-full cursor-pointer accent-[var(--accent-primary)]"
+                    />
+                  </label>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </section>
@@ -1516,14 +1556,24 @@ export function PreferencesPage({
           </div>
         </div>
 
+        {/* Unified Setup Form */}
         <div
-          className="pb-3.5 grid grid-cols-12 gap-4 items-start"
+          className="pb-4 grid grid-cols-12 gap-4 items-start"
           style={{ borderBottom: '1px solid var(--border-hairline)' }}
         >
-          <div className="col-span-4">
-            <div className="text-[13px] font-medium">同步服务</div>
+          <div className="col-span-4 space-y-1.5">
+            <div className="flex items-center gap-1.5 text-[13px] font-medium">
+              <KeyRound className="w-3.5 h-3.5" style={{ color: 'var(--text-secondary)' }} />
+              <span>连接配置</span>
+            </div>
+            <div className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+              {syncStatus?.last_sync_at_ms
+                ? `最近同步 ${formatRelativeTime(syncStatus.last_sync_at_ms)}`
+                : '等待首次同步'}
+            </div>
           </div>
-          <div className="col-span-8 space-y-2.5 text-[12px]">
+
+          <div className="col-span-8 space-y-3 text-[12px]">
             <div className="flex flex-wrap items-center gap-4">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
@@ -1531,7 +1581,7 @@ export function PreferencesPage({
                   checked={syncEnabledDraft}
                   onChange={(e) => setSyncEnabledDraft(e.target.checked)}
                 />
-                <span>启用 Cloudflare Worker 云端同步</span>
+                <span>启用云端同步</span>
               </label>
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
@@ -1541,90 +1591,78 @@ export function PreferencesPage({
                 />
                 <span className="inline-flex items-center gap-1">
                   <ShieldCheck className="w-3.5 h-3.5" style={{ color: 'var(--accent-emerald)' }} />
-                  <span>启用端到端加密 (AES-256-GCM)</span>
+                  <span>端到端加密 (AES-256-GCM)</span>
                 </span>
               </label>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
+
+            <div className="space-y-1">
+              <span className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                Worker 服务地址
+              </span>
               <input
                 type="url"
                 aria-label="Worker 服务地址"
                 placeholder="https://tokentracker-sync.your-subdomain.workers.dev"
                 value={syncWorkerUrlDraft}
                 onChange={(e) => setSyncWorkerUrlDraft(e.target.value)}
-                className="flex-1 min-w-[260px] px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
+                className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
                 style={{
                   backgroundColor: 'var(--bg-input)',
                   border: '1px solid var(--border-subtle)',
                   color: 'var(--text-primary)',
                 }}
               />
-              <button
-                type="button"
-                onClick={() => saveSyncConfigMutation.mutate()}
-                disabled={saveSyncConfigMutation.isPending}
-                className="btn-interactive inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium cursor-pointer disabled:opacity-50"
-                style={{
-                  backgroundColor: 'var(--bg-elevated)',
-                  color: 'var(--text-primary)',
-                  border: '1px solid var(--border-strong)',
-                }}
-              >
-                <Save className="w-3.5 h-3.5" />
-                <span>{saveSyncConfigMutation.isPending ? '保存中…' : '保存同步配置'}</span>
-              </button>
             </div>
-            {syncStatus?.e2ee_kdf_salt_hex && (
-              <div className="text-[11px] font-mono tabular-nums" style={{ color: 'var(--text-muted)' }}>
-                KDF Salt (PBKDF2 210k): <code>{syncStatus.e2ee_kdf_salt_hex}</code>
-              </div>
-            )}
-          </div>
-        </div>
 
-        <div
-          className="pb-3.5 grid grid-cols-12 gap-4 items-start"
-          style={{ borderBottom: '1px solid var(--border-hairline)' }}
-        >
-          <div className="col-span-4">
-            <div className="flex items-center gap-1.5 text-[13px] font-medium">
-              <KeyRound className="w-3.5 h-3.5" style={{ color: 'var(--text-secondary)' }} />
-              <span>同步凭据</span>
-            </div>
-          </div>
-          <div className="col-span-8 space-y-2.5 text-[12px]">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span style={{ color: 'var(--text-secondary)' }}>Worker SYNC_TOKEN</span>
-                  <span
-                    style={{
-                      color: syncStatus?.has_bearer_token
-                        ? 'var(--accent-emerald)'
-                        : 'var(--text-muted)',
-                    }}
-                  >
-                    {syncStatus?.has_bearer_token ? 'Bearer 已就绪' : '待录入 Bearer'}
-                  </span>
-                </div>
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[11px]">
+                <span style={{ color: 'var(--text-secondary)' }}>访问令牌</span>
+                <span
+                  style={{
+                    color: syncStatus?.has_bearer_token
+                      ? 'var(--accent-emerald)'
+                      : 'var(--text-muted)',
+                  }}
+                >
+                  {syncStatus?.has_bearer_token ? '已保存在系统凭据库' : '待录入'}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
                 <input
                   type="password"
                   aria-label="Sync Bearer Token"
-                  placeholder={syncStatus?.has_bearer_token ? '已保存在系统凭据库，输入新值可覆盖' : '输入 Cloudflare SYNC_TOKEN'}
+                  placeholder={syncStatus?.has_bearer_token ? '已保存，输入新值可更新' : '输入 Worker SYNC_TOKEN'}
                   value={syncBearerTokenInput}
                   onChange={(e) => setSyncBearerTokenInput(e.target.value)}
-                  className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
+                  className="flex-1 px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
                   style={{
                     backgroundColor: 'var(--bg-input)',
                     border: '1px solid var(--border-subtle)',
                     color: 'var(--text-primary)',
                   }}
                 />
+                <button
+                  type="button"
+                  aria-label="随机生成访问令牌"
+                  onClick={() => setSyncBearerTokenInput(generateSecretToken(24))}
+                  className="btn-interactive inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] cursor-pointer whitespace-nowrap shrink-0"
+                  style={{
+                    backgroundColor: 'var(--bg-elevated)',
+                    border: '1px solid var(--border-subtle)',
+                    color: 'var(--text-secondary)',
+                  }}
+                >
+                  <Wand2 className="w-3 h-3" />
+                  <span>随机生成</span>
+                </button>
               </div>
+            </div>
 
+            {syncE2eeDraft && (
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-[11px]">
-                  <span style={{ color: 'var(--text-secondary)' }}>E2EE 同步口令（多设备一致）</span>
+                  <span style={{ color: 'var(--text-secondary)' }}>E2EE 同步口令</span>
                   <span
                     style={{
                       color: syncStatus?.has_e2ee_passphrase
@@ -1632,45 +1670,98 @@ export function PreferencesPage({
                         : 'var(--text-muted)',
                     }}
                   >
-                    {syncStatus?.has_e2ee_passphrase ? 'E2EE 口令已就绪' : '待录入口令'}
+                    {syncStatus?.has_e2ee_passphrase ? '已保存在系统凭据库' : '待录入'}
                   </span>
                 </div>
-                <input
-                  type="password"
-                  aria-label="E2EE 同步口令"
-                  placeholder={syncStatus?.has_e2ee_passphrase ? '已保存在系统凭据库，输入新值可覆盖' : '开启 E2EE 时填写共享同步口令'}
-                  value={syncPassphraseInput}
-                  onChange={(e) => setSyncPassphraseInput(e.target.value)}
-                  className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
-                  style={{
-                    backgroundColor: 'var(--bg-input)',
-                    border: '1px solid var(--border-subtle)',
-                    color: 'var(--text-primary)',
-                  }}
-                />
+                <div className="flex items-center gap-2">
+                  <input
+                    type="password"
+                    aria-label="E2EE 同步口令"
+                    placeholder={syncStatus?.has_e2ee_passphrase ? '已保存，输入新值可更新' : '输入多端共享加密口令'}
+                    value={syncPassphraseInput}
+                    onChange={(e) => setSyncPassphraseInput(e.target.value)}
+                    className="flex-1 px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
+                    style={{
+                      backgroundColor: 'var(--bg-input)',
+                      border: '1px solid var(--border-subtle)',
+                      color: 'var(--text-primary)',
+                    }}
+                  />
+                  <button
+                    type="button"
+                    aria-label="随机生成 E2EE 口令"
+                    onClick={() => setSyncPassphraseInput(generateSecretToken(16))}
+                    className="btn-interactive inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] cursor-pointer whitespace-nowrap shrink-0"
+                    style={{
+                      backgroundColor: 'var(--bg-elevated)',
+                      border: '1px solid var(--border-subtle)',
+                      color: 'var(--text-secondary)',
+                    }}
+                  >
+                    <Wand2 className="w-3 h-3" />
+                    <span>随机生成</span>
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
 
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
               <button
                 type="button"
-                onClick={() => saveSyncCredsMutation.mutate()}
-                disabled={saveSyncCredsMutation.isPending}
-                className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11.5px] font-medium cursor-pointer disabled:opacity-50"
+                onClick={() => saveCloudSyncSetupMutation.mutate()}
+                disabled={saveCloudSyncSetupMutation.isPending}
+                className="btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium cursor-pointer disabled:opacity-50 whitespace-nowrap"
                 style={{
-                  backgroundColor: 'var(--bg-elevated)',
-                  border: '1px solid var(--border-strong)',
-                  color: 'var(--text-primary)',
+                  backgroundColor: 'var(--accent-primary)',
+                  color: '#ffffff',
                 }}
               >
-                <KeyRound className="w-3 h-3" />
-                <span>保存同步凭据</span>
+                <Save className="w-3.5 h-3.5" />
+                <span>{saveCloudSyncSetupMutation.isPending ? '配置中…' : '一键配置并连接'}</span>
               </button>
+
+              {syncStatus?.has_bearer_token && syncStatus?.worker_url && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (pairingExpanded && pairingBundle) {
+                      setPairingExpanded(false);
+                    } else {
+                      loadPairingMutation.mutate(includePassphraseInPairing);
+                    }
+                  }}
+                  disabled={loadPairingMutation.isPending}
+                  className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11.5px] cursor-pointer whitespace-nowrap"
+                  style={{
+                    backgroundColor: 'var(--bg-elevated)',
+                    border: '1px solid var(--border-strong)',
+                    color: 'var(--text-primary)',
+                  }}
+                >
+                  <QrCode className="w-3.5 h-3.5" />
+                  <span>{pairingExpanded && pairingBundle ? '收起配对码' : '移动端配对'}</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => previewSyncMutation.mutate()}
+                disabled={previewSyncMutation.isPending}
+                className="btn-interactive px-2.5 py-1.5 rounded-lg text-[11.5px] cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                style={{
+                  backgroundColor: 'var(--bg-elevated)',
+                  color: 'var(--text-secondary)',
+                  border: '1px solid var(--border-subtle)',
+                }}
+              >
+                {previewSyncMutation.isPending ? '生成中…' : '同步负载预览'}
+              </button>
+
               <button
                 type="button"
                 onClick={() => clearSyncCredsMutation.mutate()}
                 disabled={clearSyncCredsMutation.isPending}
-                className="btn-danger px-2.5 py-1 rounded-lg text-[11.5px] cursor-pointer disabled:opacity-50"
+                className="btn-danger px-2.5 py-1.5 rounded-lg text-[11.5px] cursor-pointer disabled:opacity-50 whitespace-nowrap"
                 style={{
                   backgroundColor: 'var(--bg-elevated)',
                   border: '1px solid var(--border-subtle)',
@@ -1678,43 +1769,6 @@ export function PreferencesPage({
                 }}
               >
                 清除凭据
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-12 gap-4 items-center">
-          <div className="col-span-4">
-            <div className="text-[13px] font-medium">同步状态</div>
-          </div>
-          <div className="col-span-8 space-y-2.5">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div
-                className="flex flex-wrap items-center gap-4 text-[11.5px] tabular-nums"
-                style={{ color: 'var(--text-muted)' }}
-              >
-                <span>Push 水位线: {syncStatus?.last_push_watermark_ms ?? 0}</span>
-                <span>Pull 水位线: {syncStatus?.last_pull_watermark_ms ?? 0}</span>
-                <span>
-                  最近同步:{' '}
-                  {syncStatus?.last_sync_at_ms
-                    ? formatRelativeTime(syncStatus.last_sync_at_ms)
-                    : '待首次同步'}
-                </span>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => previewSyncMutation.mutate()}
-                disabled={previewSyncMutation.isPending}
-                className="btn-interactive px-3 py-1.5 rounded-lg text-[12px] cursor-pointer disabled:opacity-50"
-                style={{
-                  backgroundColor: 'var(--bg-elevated)',
-                  color: 'var(--text-primary)',
-                  border: '1px solid var(--border-subtle)',
-                }}
-              >
-                {previewSyncMutation.isPending ? '生成中…' : '生成脱敏同步负载预览'}
               </button>
             </div>
 
@@ -1732,6 +1786,89 @@ export function PreferencesPage({
             )}
           </div>
         </div>
+
+        {/* Mobile QR & Pairing Link */}
+        {pairingExpanded && pairingBundle && (
+          <div
+            data-testid="mobile-pairing-panel"
+            className="pb-4 grid grid-cols-12 gap-4 items-start"
+            style={{ borderBottom: '1px solid var(--border-hairline)' }}
+          >
+            <div className="col-span-4 space-y-1">
+              <div className="flex items-center gap-1.5 text-[13px] font-medium">
+                <QrCode className="w-3.5 h-3.5" style={{ color: 'var(--accent-primary)' }} />
+                <span>移动端扫码配对</span>
+              </div>
+            </div>
+
+            <div className="col-span-8 flex flex-wrap items-start gap-5">
+              <div
+                className="p-2 rounded-lg shrink-0"
+                style={{
+                  backgroundColor: '#ffffff',
+                  border: '1px solid var(--border-subtle)',
+                }}
+              >
+                <QrCodeSvg value={pairingBundle.pairing_uri} size={140} />
+              </div>
+
+              <div className="flex-1 min-w-[240px] space-y-2.5 text-[12px]">
+                <input
+                  type="text"
+                  readOnly
+                  aria-label="移动端配对链接"
+                  value={pairingBundle.pairing_uri}
+                  onFocus={(e) => e.currentTarget.select()}
+                  className="w-full px-2.5 py-1.5 text-[11px] font-mono rounded-lg outline-none select-all"
+                  style={{
+                    backgroundColor: 'var(--bg-input)',
+                    border: '1px solid var(--border-subtle)',
+                    color: 'var(--text-secondary)',
+                  }}
+                />
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void navigator.clipboard?.writeText(pairingBundle.pairing_uri);
+                      setPairingCopied(true);
+                      window.setTimeout(() => setPairingCopied(false), 1800);
+                    }}
+                    className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11.5px] cursor-pointer"
+                    style={{
+                      backgroundColor: 'var(--bg-elevated)',
+                      border: '1px solid var(--border-strong)',
+                      color: 'var(--text-primary)',
+                    }}
+                  >
+                    {pairingCopied ? (
+                      <Check className="w-3.5 h-3.5" style={{ color: 'var(--accent-emerald)' }} />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                    <span>{pairingCopied ? '已复制链接' : '复制配对链接'}</span>
+                  </button>
+
+                  {syncStatus?.e2ee_enabled && (
+                    <label className="flex items-center gap-1.5 text-[11.5px] cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={includePassphraseInPairing}
+                        onChange={(e) => {
+                          const next = e.target.checked;
+                          setIncludePassphraseInPairing(next);
+                          loadPairingMutation.mutate(next);
+                        }}
+                      />
+                      <span>配对码包含口令</span>
+                    </label>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {syncEnvelope && envelopeJson && (
           <div

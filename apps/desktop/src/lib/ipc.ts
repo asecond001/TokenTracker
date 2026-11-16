@@ -28,6 +28,7 @@ import type {
   SubscriptionPlanStatus,
   SubscriptionPlanTemplate,
   SyncEnvelopeV1,
+  SyncPairingBundle,
   SyncRunReport,
   SyncStatusView,
   TraySummary,
@@ -386,6 +387,12 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
         total_cost_micro_usd: 0,
         today_tokens: 0,
         today_cost_micro_usd: 0,
+        today_requests: 0,
+        today_cache_hit_ratio: 0,
+        today_cache_saved_micro_usd: 0,
+        today_tokens_delta_pct: null,
+        today_cost_delta_pct: null,
+        today_hourly_pulse: [],
         cache_hit_ratio: 0,
         avg_output_tps: 0,
         peak_output_tps: 0,
@@ -434,6 +441,8 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
         month_total_tokens: 0,
         month_total_requests: 0,
         month_cache_saved_micro_usd: 0,
+        provider_shares: [],
+        model_shares: [],
         daily_ledger: [],
         heatmap_365d: [],
       } as T;
@@ -625,6 +634,40 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
         last_sync_error: null,
         updated_at_ms: now,
       } as T;
+    case 'save_cloud_sync_setup': {
+      const workerUrl = (args?.workerUrl as string | null) ?? 'https://sync.example.workers.dev';
+      const enabled = Boolean(args?.enabled ?? true);
+      const e2eeEnabled = Boolean(args?.e2eeEnabled ?? false);
+      return {
+        enabled,
+        worker_url: workerUrl,
+        e2ee_enabled: e2eeEnabled,
+        e2ee_kdf_salt_hex: e2eeEnabled ? 'preview-salt' : null,
+        has_bearer_token: Boolean(args?.bearerToken),
+        has_e2ee_passphrase: Boolean(args?.e2eePassphrase),
+        sse_connected: false,
+        last_push_watermark_ms: 0,
+        last_pull_watermark_ms: 0,
+        last_sync_at_ms: null,
+        last_sync_error: null,
+        updated_at_ms: now,
+      } as T;
+    }
+    case 'get_sync_pairing_bundle': {
+      const bundle: SyncPairingBundle = {
+        pairing_uri: 'tokentracker://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=preview&e2ee=0',
+        pairing_json: JSON.stringify({
+          v: 1,
+          url: 'https://sync.example.workers.dev',
+          token: 'preview',
+          e2ee: false,
+        }),
+        worker_url: 'https://sync.example.workers.dev',
+        e2ee_enabled: false,
+        includes_passphrase: Boolean(args?.includePassphrase),
+      };
+      return bundle as T;
+    }
     case 'trigger_cloud_sync_now':
       return {
         pushed_hourly_deltas: 0,
@@ -819,6 +862,24 @@ export const ipc = {
     callIpc('set_sync_credentials', { bearerToken, e2eePassphrase }),
 
   clearSyncCredentials: (): Promise<SyncStatusView> => callIpc('clear_sync_credentials'),
+
+  saveCloudSyncSetup: (
+    enabled: boolean,
+    workerUrl: string | null,
+    bearerToken: string | null,
+    e2eeEnabled: boolean,
+    e2eePassphrase: string | null
+  ): Promise<SyncStatusView> =>
+    callIpc('save_cloud_sync_setup', {
+      enabled,
+      workerUrl,
+      bearerToken,
+      e2eeEnabled,
+      e2eePassphrase,
+    }),
+
+  getSyncPairingBundle: (includePassphrase: boolean): Promise<SyncPairingBundle> =>
+    callIpc('get_sync_pairing_bundle', { includePassphrase }),
 
   triggerCloudSyncNow: (): Promise<SyncRunReport> => callIpc('trigger_cloud_sync_now'),
 
