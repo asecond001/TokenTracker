@@ -799,7 +799,7 @@ export function SubscriptionsPage() {
                   return (
                     <div
                       key={plan.plan_id}
-                      className="row-interactive py-5 px-2 grid grid-cols-12 gap-5 items-center"
+                      className="row-interactive py-5 px-4 grid grid-cols-12 gap-5 items-center"
                       style={{
                         borderBottom: '1px solid var(--border-hairline)',
                         opacity: plan.enabled ? 1 : 0.58,
@@ -1031,7 +1031,7 @@ export function SubscriptionsPage() {
                 {unboundObservedGroups.map((group) => (
                   <div
                     key={group.provider_id}
-                    className="row-interactive py-5 px-2 grid grid-cols-12 gap-5 items-center"
+                    className="row-interactive py-5 px-4 grid grid-cols-12 gap-5 items-center"
                     style={{ borderBottom: '1px solid var(--border-hairline)' }}
                   >
                     <div className="col-span-12 lg:col-span-3 space-y-1.5">
@@ -1142,7 +1142,7 @@ export function SubscriptionsPage() {
                   return (
                     <div
                       key={acc.account_id}
-                      className="row-interactive py-4 px-2.5 grid grid-cols-12 gap-5 items-center"
+                      className="row-interactive py-4 px-4 grid grid-cols-12 gap-5 items-center"
                       style={{
                         borderBottom: '1px solid var(--border-hairline)',
                         opacity: acc.enabled ? 1 : 0.58,
@@ -1408,7 +1408,7 @@ export function SubscriptionsPage() {
                 {remoteDeviceGroups.map((devGroup) => (
                   <div
                     key={devGroup.device_id}
-                    className="py-5 px-2 grid grid-cols-12 gap-5 items-start"
+                    className="py-5 px-4 grid grid-cols-12 gap-5 items-start"
                     style={{ borderBottom: '1px solid var(--border-hairline)' }}
                   >
                     <div className="col-span-12 lg:col-span-3 space-y-1">

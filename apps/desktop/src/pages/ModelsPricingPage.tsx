@@ -851,7 +851,7 @@ export function ModelsPricingPage() {
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse text-left">
+                <table className="workspace-table w-full border-collapse text-left">
                   <thead>
                     {table.getHeaderGroups().map((hg) => (
                       <tr
@@ -965,7 +965,7 @@ export function ModelsPricingPage() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-left">
+              <table className="workspace-table w-full border-collapse text-left">
                 <thead>
                   <tr
                     className="text-[11px] font-medium uppercase tracking-wider"

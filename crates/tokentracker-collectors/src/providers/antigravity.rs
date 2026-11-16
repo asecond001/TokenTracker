@@ -21,36 +21,75 @@ const DEFAULT_ANTIGRAVITY_MODEL: &str = "antigravity-planner";
 const SETTINGS_CHANGE_OPEN: &str = "<USER_SETTINGS_CHANGE>";
 const SETTINGS_CHANGE_CLOSE: &str = "</USER_SETTINGS_CHANGE>";
 
+/// Remove wrapper tags whose body may quote `<USER_SETTINGS_CHANGE>` text (for example,
+/// `<USER_REQUEST>` or `<CONTEXT_SUMMARY>`), so only real settings blocks are parsed.
+fn strip_tag_blocks(content: &str, open_tag: &str, close_tag: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut cursor = 0usize;
+    while let Some(rel_open) = content[cursor..].find(open_tag) {
+        let open_idx = cursor + rel_open;
+        out.push_str(&content[cursor..open_idx]);
+        let after_open = open_idx + open_tag.len();
+        if let Some(rel_close) = content[after_open..].find(close_tag) {
+            cursor = after_open + rel_close + close_tag.len();
+        } else {
+            return out;
+        }
+    }
+    out.push_str(&content[cursor..]);
+    out
+}
+
 /// Extract the selected model name from Antigravity's `<USER_SETTINGS_CHANGE>` block
-/// inside `USER_INPUT` content, e.g.:
+/// inside non-`SYSTEM` `USER_INPUT` content, e.g.:
 /// `The user changed setting \`Model Selection\` from None to Claude Sonnet 5.5 (Medium). ...`
 fn extract_model_selection_from_content(content: &str) -> Option<String> {
-    let start = content.find(SETTINGS_CHANGE_OPEN)? + SETTINGS_CHANGE_OPEN.len();
-    let rest = &content[start..];
-    let block = match rest.find(SETTINGS_CHANGE_CLOSE) {
-        Some(end) => &rest[..end],
-        None => rest,
-    };
-
-    let setting_pos = block.find("Model Selection")?;
-    let after_setting = &block[setting_pos + "Model Selection".len()..];
-    let to_pos = after_setting.find(" to ")?;
-    let after_to = after_setting[to_pos + " to ".len()..].trim_start();
-
-    // Stop at newline or sentence boundary (". " or trailing "."), preserving dots in version numbers like "5.5".
-    let line_part = after_to.lines().next().unwrap_or(after_to).trim();
-    let before_sentence_end = line_part
-        .split_once(". ")
-        .map(|(head, _)| head)
-        .unwrap_or(line_part)
-        .trim_end_matches('.')
-        .trim();
-
-    if before_sentence_end.is_empty() || before_sentence_end.eq_ignore_ascii_case("none") {
+    if !content.contains(SETTINGS_CHANGE_OPEN) {
         return None;
     }
+    let scrubbed = strip_tag_blocks(content, "<USER_REQUEST>", "</USER_REQUEST>");
+    let scrubbed = strip_tag_blocks(&scrubbed, "<CONTEXT_SUMMARY>", "</CONTEXT_SUMMARY>");
 
-    Some(before_sentence_end.to_string())
+    let mut latest_model: Option<String> = None;
+    let mut scan = scrubbed.as_str();
+    while let Some(rel_start) = scan.find(SETTINGS_CHANGE_OPEN) {
+        let rest = &scan[rel_start + SETTINGS_CHANGE_OPEN.len()..];
+        let (block, next_scan) = match rest.find(SETTINGS_CHANGE_CLOSE) {
+            Some(end) => (&rest[..end], &rest[end + SETTINGS_CHANGE_CLOSE.len()..]),
+            None => (rest, ""),
+        };
+        scan = next_scan;
+
+        // Require Antigravity's exact `changed setting` phrasing before `Model Selection`
+        // so copied prose or test assertions inside USER_INPUT cannot hijack model attribution.
+        let Some(changed_pos) = block.find("changed setting") else {
+            continue;
+        };
+        let after_changed = &block[changed_pos + "changed setting".len()..];
+        let Some(setting_pos) = after_changed.find("Model Selection") else {
+            continue;
+        };
+        let after_setting = &after_changed[setting_pos + "Model Selection".len()..];
+        let Some(to_pos) = after_setting.find(" to ") else {
+            continue;
+        };
+        let after_to = after_setting[to_pos + " to ".len()..].trim_start();
+
+        // Stop at newline or sentence boundary (". " or trailing "."), preserving dots in version numbers like "5.5".
+        let line_part = after_to.lines().next().unwrap_or(after_to).trim();
+        let before_sentence_end = line_part
+            .split_once(". ")
+            .map(|(head, _)| head)
+            .unwrap_or(line_part)
+            .trim_end_matches('.')
+            .trim();
+
+        if !before_sentence_end.is_empty() && !before_sentence_end.eq_ignore_ascii_case("none") {
+            latest_model = Some(before_sentence_end.to_string());
+        }
+    }
+
+    latest_model
 }
 
 /// Extract an explicit subscription / tier hint from settings or JSON tier metadata (NEVER from model names like Gemini Pro).
@@ -783,13 +822,18 @@ fn scan_initial_antigravity_metadata(path: &Path) -> InitialAntigravityMetadata 
                 }
             }
 
-            if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
-                if content.contains(SETTINGS_CHANGE_OPEN) && content.contains("Model Selection") {
-                    if let Some(model) = extract_model_selection_from_content(content) {
-                        if let Some(h) = infer_antigravity_tier_from_model_name(&model) {
-                            meta.model_tier_hint = Some(h);
+            if !source.eq_ignore_ascii_case("SYSTEM")
+                && step_type.eq_ignore_ascii_case("USER_INPUT")
+            {
+                if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
+                    if content.contains(SETTINGS_CHANGE_OPEN) && content.contains("Model Selection")
+                    {
+                        if let Some(model) = extract_model_selection_from_content(content) {
+                            if let Some(h) = infer_antigravity_tier_from_model_name(&model) {
+                                meta.model_tier_hint = Some(h);
+                            }
+                            meta.active_model = Some(model);
                         }
-                        meta.active_model = Some(model);
                     }
                 }
             }
@@ -921,15 +965,19 @@ impl ProviderLogParser for AntigravityParser {
         }
 
         let content_opt = val.get("content").and_then(|v| v.as_str());
-        if let Some(content) = content_opt {
-            if let Some(selected_model) = extract_model_selection_from_content(content) {
-                if let Some(model_hint) = infer_antigravity_tier_from_model_name(&selected_model) {
-                    if ctx.detected_plan_hint.is_none() {
-                        ctx.detected_plan_hint = Some(model_hint);
-                        ctx.plan_hint_emitted = false;
+        if !source.eq_ignore_ascii_case("SYSTEM") && step_type.eq_ignore_ascii_case("USER_INPUT") {
+            if let Some(content) = content_opt {
+                if let Some(selected_model) = extract_model_selection_from_content(content) {
+                    if let Some(model_hint) =
+                        infer_antigravity_tier_from_model_name(&selected_model)
+                    {
+                        if ctx.detected_plan_hint.is_none() {
+                            ctx.detected_plan_hint = Some(model_hint);
+                            ctx.plan_hint_emitted = false;
+                        }
                     }
+                    ctx.current_model = Some(selected_model);
                 }
-                ctx.current_model = Some(selected_model);
             }
         }
 
@@ -1161,6 +1209,44 @@ mod tests {
     }
 
     #[test]
+    fn generic_tool_output_and_context_summary_never_hijack_model_selection() {
+        let parser = AntigravityParser::new();
+        let mut ctx = parser.init_context(
+            Path::new("/tmp/conv-hijack/.system_generated/logs/transcript.jsonl"),
+            "dev-1",
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let jsonl = [
+            // Genuine USER_INPUT selects Gemini 4 Argon (High)
+            r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-16T01:00:00Z","content":"<USER_REQUEST>Fix antigravity bug</USER_REQUEST>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 4 Argon (High). No need to comment.\n</USER_SETTINGS_CHANGE>"}"#,
+            // GENERIC tool output (e.g. read_file/Select-String on source code or fixture) must be ignored
+            r#"{"step_index":1,"source":"SYSTEM","type":"GENERIC","status":"DONE","created_at":"2026-11-16T01:00:05Z","content":"<USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from None to Gemini 3.1 Pro (High).</USER_SETTINGS_CHANGE>"}"#,
+            // USER_INPUT quoting <CONTEXT_SUMMARY> with a prior session's model text must also be ignored
+            r#"{"step_index":2,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-16T01:00:10Z","content":"<CONTEXT_SUMMARY><USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from None to Gemini 3.1 Pro (High).</USER_SETTINGS_CHANGE></CONTEXT_SUMMARY>\n<USER_REQUEST><USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from None to Gemini 3.1 Pro (High).</USER_SETTINGS_CHANGE></USER_REQUEST>"}"#,
+            // USER_INPUT containing malformed tag without "changed setting" phrase must be ignored
+            r#"{"step_index":3,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-16T01:00:15Z","content":"<USER_SETTINGS_CHANGE>Model Selection from None to Gemini 3.1 Pro (High).</USER_SETTINGS_CHANGE>"}"#,
+            // Actual response should still be attributed to Gemini 4 Argon (High)
+            r#"{"step_index":4,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-16T01:00:25Z","content":"Patch applied.","usage":{"input_tokens":1000,"output_tokens":200}}"#,
+        ]
+        .join("\n");
+        std::fs::write(&transcript, jsonl).expect("write transcript");
+
+        let meta = scan_initial_antigravity_metadata(&transcript);
+        assert_eq!(meta.active_model.as_deref(), Some("Gemini 4 Argon (High)"));
+
+        let mut events = Vec::new();
+        for line in std::fs::read_to_string(&transcript).expect("read").lines() {
+            if let Some(parsed) = parser.parse_line(line, &mut ctx) {
+                events.extend(parsed.event);
+            }
+        }
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].model_id, "Gemini 4 Argon (High)");
+    }
+
+    #[test]
     fn tracks_model_changes_across_session_and_prefers_explicit_model_field() {
         let parser = AntigravityParser::new();
         let mut ctx = parser.init_context(
@@ -1299,7 +1385,7 @@ mod tests {
         std::fs::write(
             &transcript,
             concat!(
-                r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-16T01:00:00Z","content":"<USER_REQUEST>Build initial dark glass layout</USER_REQUEST>\n<USER_SETTINGS_CHANGE>Model Selection from None to Gemini 3.1 Pro (High).</USER_SETTINGS_CHANGE>"}"#,
+                r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-16T01:00:00Z","content":"<USER_REQUEST>Build initial dark glass layout</USER_REQUEST>\n<USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from None to Gemini 4 Argon (High).</USER_SETTINGS_CHANGE>"}"#,
                 "\n",
                 r#"{"step_index":1,"source":"SYSTEM","type":"USER_INPUT","status":"DONE","created_at":"2026-11-16T01:01:00Z","content":"[plan review] internal handoff"}"#,
                 "\n",

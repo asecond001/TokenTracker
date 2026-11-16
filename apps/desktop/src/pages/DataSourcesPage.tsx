@@ -1493,7 +1493,7 @@ export function DataSourcesPage() {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-[12px]">
+          <table className="workspace-table w-full border-collapse text-[12px]">
             <thead>
               <tr
                 style={{
@@ -1506,7 +1506,7 @@ export function DataSourcesPage() {
                 <th className="py-2 px-3 text-left font-medium">文件标识</th>
                 <th className="py-2 px-3 text-right font-medium">已读偏移 (Bytes)</th>
                 <th className="py-2 px-3 text-left font-medium">末行指纹</th>
-                <th className="py-2 pl-3 text-right font-medium">更新时间</th>
+                <th className="py-2 pl-3 pr-5 text-right font-medium">更新时间</th>
               </tr>
             </thead>
             <tbody>

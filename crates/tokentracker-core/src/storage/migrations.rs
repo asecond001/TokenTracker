@@ -9,7 +9,7 @@ use crate::error::CoreResult;
 use crate::pricing::default_pricing_catalog;
 use crate::storage::repository::{rebuild_rollup_from_events, DAY_MS, HOUR_MS};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 11;
+pub const CURRENT_SCHEMA_VERSION: i64 = 12;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -228,6 +228,10 @@ pub fn run_migrations(conn: &mut Connection) -> CoreResult<()> {
 
     if current_version < 11 {
         migrate_v10_to_v11(conn, now_ms)?;
+    }
+
+    if current_version < 12 {
+        migrate_v11_to_v12(conn, now_ms)?;
     }
 
     seed_defaults(conn, now_ms)?;
@@ -939,6 +943,39 @@ fn migrate_v10_to_v11(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     tx.execute(
         "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
         params![11i64, now_ms],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v11_to_v12(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+
+    // Clean historical Antigravity events poisoned by `GENERIC`/`<CONTEXT_SUMMARY>`
+    // `<USER_SETTINGS_CHANGE>` fixture strings (`Gemini 3.1 Pro`), remove the obsolete built-in
+    // pricing row, and reset Antigravity cursors so the hardened parser re-attributes real models.
+    tx.execute_batch(
+        r#"
+        UPDATE usage_events
+        SET model_id = 'antigravity-default'
+        WHERE provider_id = 'antigravity'
+          AND (LOWER(model_id) LIKE '%gemini 3.1%' OR LOWER(model_id) LIKE '%gemini-3.1%');
+
+        DELETE FROM model_pricing
+        WHERE provider_id = 'antigravity'
+          AND is_user_override = 0
+          AND LOWER(model_pattern) LIKE '%gemini-3.1%';
+
+        DELETE FROM ingestion_cursors
+        WHERE provider_id = 'antigravity';
+        "#,
+    )?;
+
+    crate::storage::repository::rebuild_local_rollups_conn(&tx, now_ms)?;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![12i64, now_ms],
     )?;
     tx.commit()?;
     Ok(())

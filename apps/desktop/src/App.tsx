@@ -417,7 +417,7 @@ export function App() {
 
         <div className="flex flex-1 min-h-0">
           <Sidebar traySummary={traySummary} hasBackdrop={hasBackdrop} />
-          <main className="flex-1 h-full overflow-y-auto px-6 py-5">
+          <main className="flex-1 h-full overflow-y-auto pl-6 pr-8 py-5 [scrollbar-gutter:stable]">
             <div key={activePage} className="page-transition-enter min-h-full">
               {renderPage()}
             </div>

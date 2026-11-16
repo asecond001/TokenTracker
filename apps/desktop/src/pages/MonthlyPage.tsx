@@ -664,7 +664,7 @@ export function MonthlyPage() {
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-left">
+            <table className="workspace-table w-full border-collapse text-left">
               <thead>
                 {table.getHeaderGroups().map((hg) => (
                   <tr

@@ -136,6 +136,17 @@ select optgroup {
   user-select: text;
 }
 
+/* Uniform outer breathing room so right-aligned cells never crowd scrollbars or pane borders */
+.workspace-table th:first-child,
+.workspace-table td:first-child {
+  padding-left: 14px;
+}
+
+.workspace-table th:last-child,
+.workspace-table td:last-child {
+  padding-right: 20px;
+}
+
 /* Custom hairline scrollbars for high-density tables and flat workspace */
 ::-webkit-scrollbar {
   width: 6px;

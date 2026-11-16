@@ -652,7 +652,7 @@ export function OverviewPage() {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-left">
+          <table className="workspace-table w-full border-collapse text-left">
             <thead>
               <tr
                 className="text-[11px] font-medium uppercase tracking-wider"
@@ -666,7 +666,7 @@ export function OverviewPage() {
                 <th className="py-2 px-3 text-right">本月用量 / 费用</th>
                 <th className="py-2 px-3 text-right">缓存命中率</th>
                 <th className="py-2 px-3 w-[220px]">配额窗口</th>
-                <th className="py-2 pl-3 text-right">最近活跃</th>
+                <th className="py-2 pl-3 pr-5 text-right">最近活跃</th>
               </tr>
             </thead>
             <tbody>
@@ -741,7 +741,7 @@ export function OverviewPage() {
                     )}
                   </td>
                   <td
-                    className="py-3 pl-3 text-right text-[12px] tabular-nums"
+                    className="py-3 pl-3 pr-5 text-right text-[12px] tabular-nums"
                     style={{ color: 'var(--text-secondary)' }}
                   >
                     <div>{formatRelativeTime(row.last_sync_at_ms)}</div>

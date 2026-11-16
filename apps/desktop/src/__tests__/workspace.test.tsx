@@ -2971,9 +2971,20 @@ describe('v0.3.0 Analytics Differentiation, Sync Pairing QR, TZ & UX Fixes', () 
     expect(await screen.findByTestId('trends-date-span')).toBeInTheDocument();
     expect(screen.getByText('区间总 Token')).toBeInTheDocument();
 
-    // Switch metric to 缓存命中率 -> multi-series line % chart and disables 按 Token 类型
+    // Switch metric to 缓存命中率 -> keeps 柱状 / 折线 switcher visible, defaults to grouped bars, and switches cleanly to line
     fireEvent.click(screen.getByRole('button', { name: '缓存命中率' }));
     expect(screen.getByRole('button', { name: '按 Token 类型' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '柱状' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '折线' })).toBeInTheDocument();
+
+    const cacheBarOpt = JSON.parse(
+      screen.getByTestId('echart-stub').getAttribute('data-option-json') || '{}'
+    ) as EChartMockOption & { series?: Array<{ stack?: string }> };
+    expect(cacheBarOpt.series?.[0]?.type).toBe('bar');
+    expect(cacheBarOpt.series?.[0]?.stack).toBeUndefined();
+    expect(cacheBarOpt.series?.[0]?.data).toEqual([58, 68]);
+
+    fireEvent.click(screen.getByRole('button', { name: '折线' }));
     const cacheOpt = JSON.parse(
       screen.getByTestId('echart-stub').getAttribute('data-option-json') || '{}'
     ) as EChartMockOption;

@@ -384,9 +384,12 @@ impl Storage {
                             + ev.cache_read_tokens
                             + ev.cache_write_tokens
                             + ev.reasoning_tokens;
-                        let model_upgraded = old_model == "codex-unknown"
+                        let model_upgraded = (old_model == "codex-unknown"
                             && ev.model_id != "codex-unknown"
-                            && !ev.model_id.trim().is_empty();
+                            && !ev.model_id.trim().is_empty())
+                            || (old_pid == provider_ids::ANTIGRAVITY
+                                && old_model != ev.model_id
+                                && !ev.model_id.trim().is_empty());
                         let should_upgrade = new_total > old_total
                             || model_upgraded
                             || (new_total == old_total && ev.output_tokens > old_out)
@@ -5057,7 +5060,7 @@ mod tests {
             .expect("seed auto kimi plan");
         storage
             .with_conn(|conn| {
-                conn.execute("DELETE FROM schema_migrations WHERE version = 11", [])?;
+                conn.execute("DELETE FROM schema_migrations WHERE version >= 11", [])?;
                 Ok(())
             })
             .expect("rewind to v10");
@@ -5067,5 +5070,121 @@ mod tests {
         let subs = migrated.query_subscriptions(now_ms).expect("query subs");
         assert!(!subs.iter().any(|s| s.plan.plan_id == "manual_claude_max"));
         assert!(subs.iter().any(|s| s.plan.plan_id == "auto_kimi_code"));
+    }
+
+    #[test]
+    fn v12_migration_heals_poisoned_antigravity_gemini_3_1_models_and_resets_cursor() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("v11_to_v12.sqlite");
+        let now_ms = 1_795_200_000_000i64;
+
+        let storage = Storage::open_file(&db_path).expect("seed base db");
+        let dev = storage.local_device().expect("device").device_id;
+        let poisoned_ev = NormalizedUsageEvent {
+            event_id: "agy-poison-31".to_string(),
+            device_id: dev.clone(),
+            provider_id: provider_ids::ANTIGRAVITY.to_string(),
+            session_id: "conv-poison".to_string(),
+            project_label: "TokenTracker".to_string(),
+            model_id: "Gemini 3.1 Pro (High)".to_string(),
+            timestamp_ms: now_ms - 60_000,
+            input_tokens: 4_000,
+            output_tokens: 1_000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            observable_only: false,
+            duration_ms: Some(1_200),
+            ttft_ms: None,
+            output_tps: Some(40.0),
+            estimated_cost_micro_usd: 15_000,
+            cache_saved_micro_usd: 0,
+        };
+        let cursor = IngestionCursor {
+            source_path: "/tmp/conv-poison/transcript.jsonl".to_string(),
+            provider_id: provider_ids::ANTIGRAVITY.to_string(),
+            file_identity: "inode-31".to_string(),
+            byte_offset: 1024,
+            last_line_hash: "hash-31".to_string(),
+            updated_at_ms: now_ms - 60_000,
+        };
+        storage
+            .ingest_events_with_cursor(std::slice::from_ref(&poisoned_ev), Some(&cursor), &[])
+            .expect("seed poisoned event and cursor");
+
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO model_pricing (
+                        model_pattern, provider_id, input_per_m_micro_usd, output_per_m_micro_usd,
+                        cache_read_per_m_micro_usd, cache_write_per_m_micro_usd, reasoning_per_m_micro_usd,
+                        is_user_override, effective_from
+                    ) VALUES ('gemini-3.1-pro', 'antigravity', 2000000, 12000000, 200000, 0, 12000000, 0, '2026-01-01')",
+                    [],
+                )?;
+                conn.execute("DELETE FROM schema_migrations WHERE version >= 12", [])?;
+                Ok(())
+            })
+            .expect("rewind to v11");
+        drop(storage);
+
+        let migrated = Storage::open_file(&db_path).expect("run v12 migration");
+        migrated
+            .with_conn(|conn| {
+                let healed_model: String = conn.query_row(
+                    "SELECT model_id FROM usage_events WHERE event_id = 'agy-poison-31'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(healed_model, "antigravity-default");
+
+                let poisoned_rollups: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM usage_daily_rollups WHERE provider_id = 'antigravity' AND LOWER(model_id) LIKE '%gemini 3.1%'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(poisoned_rollups, 0);
+
+                let agy_cursors: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM ingestion_cursors WHERE provider_id = 'antigravity'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(agy_cursors, 0);
+
+                let obsolete_pricing: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM model_pricing WHERE model_pattern = 'gemini-3.1-pro'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(obsolete_pricing, 0);
+                Ok(())
+            })
+            .expect("verify v12 cleanup");
+
+        // Re-ingesting the same event with its corrected real model upgrades both the event and rollups.
+        let mut repaired_ev = poisoned_ev;
+        repaired_ev.model_id = "Gemini 4 Carbon (High)".to_string();
+        migrated
+            .ingest_events_with_cursor(&[repaired_ev], None, &[])
+            .expect("re-ingest repaired model");
+        migrated
+            .with_conn(|conn| {
+                let updated_model: String = conn.query_row(
+                    "SELECT model_id FROM usage_events WHERE event_id = 'agy-poison-31'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(updated_model, "Gemini 4 Carbon (High)");
+
+                let carbon_rollup: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM usage_daily_rollups WHERE provider_id = 'antigravity' AND model_id = 'Gemini 4 Carbon (High)'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(carbon_rollup, 1);
+                Ok(())
+            })
+            .expect("verify re-ingest upgrade");
     }
 }

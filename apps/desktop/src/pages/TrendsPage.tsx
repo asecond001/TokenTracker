@@ -215,15 +215,12 @@ export function TrendsPage() {
     tzOffsetMinutes,
   ]);
 
-  const effectiveChartStyle: TrendChartStyle =
-    metric === 'cache_hit' ? 'line' : chartStyle;
-
   const chartOption = useMemo<EChartsOption>(() => {
     const buckets = data?.buckets ?? [];
     const xLabels = buckets.map((ts) =>
       formatBucketInTz(ts, effectiveGranularity, tzOffsetMinutes)
     );
-    const isLine = effectiveChartStyle === 'line';
+    const isLine = chartStyle === 'line';
     const isCacheHit = metric === 'cache_hit';
 
     return {
@@ -315,8 +312,8 @@ export function TrendsPage() {
           id: `${dimension}-${metric}-${s.key}`,
           name: s.label,
           type: 'bar' as const,
-          stack: 'total',
-          barMaxWidth: 28,
+          stack: isCacheHit ? undefined : 'total',
+          barMaxWidth: isCacheHit ? 18 : 28,
           universalTransition: true,
           emphasis: { focus: 'series' as const },
           itemStyle: { color },
@@ -328,7 +325,7 @@ export function TrendsPage() {
     data,
     effectiveGranularity,
     tzOffsetMinutes,
-    effectiveChartStyle,
+    chartStyle,
     metric,
     visibleSeries,
     chartTheme,
@@ -480,39 +477,37 @@ export function TrendsPage() {
           </div>
 
           {/* Bar / Line Toggle */}
-          {metric !== 'cache_hit' && (
-            <div
-              className="seg-group"
-              style={{
-                backgroundColor: 'var(--bg-sidebar)',
-                borderColor: 'var(--border-hairline)',
-              }}
-            >
-              {(
-                [
-                  { id: 'bar', label: '柱状' },
-                  { id: 'line', label: '折线' },
-                ] as const
-              ).map((kind) => {
-                const active = chartStyle === kind.id;
-                return (
-                  <button
-                    key={kind.id}
-                    type="button"
-                    data-active={active}
-                    onClick={() => setChartStyle(kind.id)}
-                    className="seg-pill px-2.5 py-1 text-[11.5px] cursor-pointer whitespace-nowrap"
-                    style={{
-                      color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                      fontWeight: active ? 500 : 400,
-                    }}
-                  >
-                    {kind.label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
+          <div
+            className="seg-group"
+            style={{
+              backgroundColor: 'var(--bg-sidebar)',
+              borderColor: 'var(--border-hairline)',
+            }}
+          >
+            {(
+              [
+                { id: 'bar', label: '柱状' },
+                { id: 'line', label: '折线' },
+              ] as const
+            ).map((kind) => {
+              const active = chartStyle === kind.id;
+              return (
+                <button
+                  key={kind.id}
+                  type="button"
+                  data-active={active}
+                  onClick={() => setChartStyle(kind.id)}
+                  className="seg-pill px-2.5 py-1 text-[11.5px] cursor-pointer whitespace-nowrap"
+                  style={{
+                    color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                    fontWeight: active ? 500 : 400,
+                  }}
+                >
+                  {kind.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </section>
 
@@ -632,7 +627,7 @@ export function TrendsPage() {
           </h2>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-left">
+          <table className="workspace-table w-full border-collapse text-left">
             <thead>
               <tr
                 className="text-[11px] font-medium uppercase tracking-wider"
@@ -652,7 +647,7 @@ export function TrendsPage() {
                 </th>
                 {!isAllTime && <th className="py-2 px-3 text-right">费用环比</th>}
                 <th className="py-2 px-3 text-right">缓存命中率</th>
-                <th className="py-2 pl-3 text-right">请求 / 步数</th>
+                <th className="py-2 pl-3 pr-5 text-right">请求 / 步数</th>
               </tr>
             </thead>
             <tbody>
@@ -709,7 +704,7 @@ export function TrendsPage() {
                         : '—'}
                     </td>
                     <td
-                      className="py-2.5 pl-3 text-right tabular-nums"
+                      className="py-2.5 pl-3 pr-5 text-right tabular-nums"
                       style={{ color: 'var(--text-secondary)' }}
                     >
                       {formatExactInt(row.requests)}
