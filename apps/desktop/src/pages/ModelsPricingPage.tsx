@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   createColumnHelper,
@@ -195,7 +196,12 @@ export function ModelsPricingPage() {
       await queryClient.invalidateQueries({
         predicate: (query) => query.queryKey[0] !== 'bg-image-data-url',
       });
-      if (res.warning && !res.rate_updated && !res.pricing_updated) {
+      if (
+        res.warning &&
+        !res.rate_updated &&
+        !res.pricing_updated &&
+        !res.subscriptions_updated
+      ) {
         setFeedback({
           kind: 'error',
           text: `在线同步受限（已保留本地基线）：${res.warning}`,
@@ -208,6 +214,9 @@ export function ModelsPricingPage() {
           res.pricing_updated
             ? `公开模型目录已更新 (${res.synced_models_count} 款，重算 ${res.recomputed_events_count} 条历史${res.pricing_source ? ` · ${res.pricing_source}` : ''})`
             : `公开模型目录 (${res.synced_models_count} 款) 已是最新`,
+          res.subscriptions_updated
+            ? `套餐目录已更新 (${res.synced_plans_count} 款)`
+            : `套餐目录 (${res.synced_plans_count} 款) 已是最新`,
         ];
         setFeedback({ kind: 'success', text: parts.join('；') });
       }
@@ -299,7 +308,7 @@ export function ModelsPricingPage() {
             <span className="font-medium select-text">{info.getValue()}</span>
             {info.row.original.effective_pricing?.is_user_override && (
               <span
-                className="px-1.5 py-0.5 text-[10px] rounded"
+                className="px-1.5 py-0.5 text-[10px] rounded-md"
                 style={{
                   backgroundColor: 'var(--bg-hover)',
                   border: '1px solid var(--border-hairline)',
@@ -384,7 +393,7 @@ export function ModelsPricingPage() {
                 info.row.original.provider_id
               )
             }
-            className="btn-interactive text-[11.5px] px-2 py-0.5 rounded cursor-pointer"
+            className="btn-interactive text-[11.5px] px-2 py-0.5 rounded-lg cursor-pointer"
             style={{ color: 'var(--accent-primary)' }}
           >
             改价
@@ -441,7 +450,7 @@ export function ModelsPricingPage() {
             type="button"
             disabled={syncCatalogMutation.isPending}
             onClick={() => syncCatalogMutation.mutate()}
-            className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] rounded cursor-pointer disabled:opacity-50"
+            className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] rounded-lg cursor-pointer disabled:opacity-50"
             style={{
               border: '1px solid var(--border-subtle)',
               color: 'var(--text-primary)',
@@ -456,7 +465,7 @@ export function ModelsPricingPage() {
           <button
             type="button"
             onClick={() => openEditorForEntry(null)}
-            className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] rounded cursor-pointer"
+            className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] rounded-lg cursor-pointer"
             style={{
               border: '1px solid var(--border-strong)',
               color: 'var(--text-primary)',
@@ -470,7 +479,7 @@ export function ModelsPricingPage() {
 
       {feedback && (
         <div
-          className="px-3 py-2 text-[12px] rounded flex items-center justify-between gap-3"
+          className="px-3 py-2 text-[12px] rounded-lg flex items-center justify-between gap-3"
           style={{
             backgroundColor: 'var(--bg-elevated)',
             border: `1px solid ${
@@ -483,7 +492,7 @@ export function ModelsPricingPage() {
           <button
             type="button"
             onClick={() => setFeedback(null)}
-            className="btn-interactive p-1 rounded cursor-pointer"
+            className="btn-interactive p-1 rounded-lg cursor-pointer"
             style={{ color: 'var(--text-muted)' }}
             aria-label="关闭提示"
           >
@@ -564,9 +573,10 @@ export function ModelsPricingPage() {
       </section>
 
       {/* Flat Slide-Over Pricing & Exchange Rate Drawer */}
-      {drawerOpen && (
-        <div
-          className="drawer-backdrop-enter fixed inset-0 z-50 flex justify-end backdrop-blur-sm"
+      {drawerOpen &&
+        createPortal(
+          <div
+            className="drawer-backdrop-enter fixed inset-0 z-50 flex justify-end backdrop-blur-sm"
           style={{ backgroundColor: 'rgba(6, 8, 14, 0.42)' }}
           onClick={(e) => {
             if (e.target === e.currentTarget) {
@@ -592,7 +602,7 @@ export function ModelsPricingPage() {
                 <button
                   type="button"
                   onClick={() => setDrawerOpen(false)}
-                  className="btn-interactive p-1.5 rounded cursor-pointer"
+                  className="btn-interactive p-1.5 rounded-lg cursor-pointer"
                   style={{ color: 'var(--text-secondary)' }}
                   aria-label="关闭抽屉"
                 >
@@ -622,7 +632,7 @@ export function ModelsPricingPage() {
                     inputMode="decimal"
                     value={rateInput}
                     onChange={(e) => setRateInput(e.target.value)}
-                    className="w-28 px-2.5 py-1.5 text-[12.5px] rounded tabular-nums outline-none"
+                    className="w-28 px-2.5 py-1.5 text-[12.5px] rounded-lg tabular-nums outline-none"
                     style={{
                       backgroundColor: 'var(--bg-input)',
                       border: '1px solid var(--border-subtle)',
@@ -638,7 +648,7 @@ export function ModelsPricingPage() {
                         type="button"
                         disabled={restoreAutoRateMutation.isPending}
                         onClick={() => restoreAutoRateMutation.mutate()}
-                        className="btn-interactive bg-[var(--bg-elevated)] px-2.5 py-1 text-[11.5px] rounded cursor-pointer disabled:opacity-50"
+                        className="btn-interactive bg-[var(--bg-elevated)] px-2.5 py-1 text-[11.5px] rounded-lg cursor-pointer disabled:opacity-50"
                         style={{
                           border: '1px solid var(--border-subtle)',
                           color: 'var(--accent-emerald)',
@@ -651,7 +661,7 @@ export function ModelsPricingPage() {
                       type="button"
                       disabled={saveRateMutation.isPending}
                       onClick={() => saveRateMutation.mutate()}
-                      className="btn-interactive bg-[var(--bg-elevated)] px-2.5 py-1 text-[11.5px] rounded cursor-pointer disabled:opacity-50"
+                      className="btn-interactive bg-[var(--bg-elevated)] px-2.5 py-1 text-[11.5px] rounded-lg cursor-pointer disabled:opacity-50"
                       style={{
                         border: '1px solid var(--border-subtle)',
                         color: 'var(--text-primary)',
@@ -678,7 +688,7 @@ export function ModelsPricingPage() {
                       placeholder="例如 claude-sonnet-4-5"
                       value={form.model_pattern}
                       onChange={(e) => setForm({ ...form, model_pattern: e.target.value })}
-                      className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none"
+                      className="w-full px-2.5 py-1.5 text-[12px] rounded-lg outline-none"
                       style={{
                         backgroundColor: 'var(--bg-input)',
                         border: '1px solid var(--border-subtle)',
@@ -697,7 +707,7 @@ export function ModelsPricingPage() {
                       aria-label="所属模型提供商"
                       value={form.provider_id}
                       onChange={(e) => setForm({ ...form, provider_id: e.target.value })}
-                      className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none cursor-pointer"
+                      className="w-full px-2.5 py-1.5 text-[12px] rounded-lg outline-none cursor-pointer"
                       style={{
                         backgroundColor: 'var(--bg-input)',
                         border: '1px solid var(--border-subtle)',
@@ -738,7 +748,7 @@ export function ModelsPricingPage() {
                         inputMode="decimal"
                         value={form[field.key]}
                         onChange={(e) => setForm({ ...form, [field.key]: e.target.value })}
-                        className="w-full px-2.5 py-1.5 text-[12px] rounded tabular-nums outline-none"
+                        className="w-full px-2.5 py-1.5 text-[12px] rounded-lg tabular-nums outline-none"
                         style={{
                           backgroundColor: 'var(--bg-input)',
                           border: '1px solid var(--border-subtle)',
@@ -763,7 +773,7 @@ export function ModelsPricingPage() {
                     type="button"
                     disabled={saveOverrideMutation.isPending}
                     onClick={() => saveOverrideMutation.mutate()}
-                    className="btn-primary px-3.5 py-1.5 text-[12px] font-medium rounded cursor-pointer disabled:opacity-50"
+                    className="btn-primary px-3.5 py-1.5 text-[12px] font-medium rounded-lg cursor-pointer disabled:opacity-50"
                     style={{
                       backgroundColor: 'var(--accent-primary)',
                       color: '#ffffff',
@@ -774,7 +784,7 @@ export function ModelsPricingPage() {
                   <button
                     type="button"
                     onClick={() => setDrawerOpen(false)}
-                    className="btn-interactive bg-[var(--bg-elevated)] px-3 py-1.5 text-[12px] rounded cursor-pointer"
+                    className="btn-interactive bg-[var(--bg-elevated)] px-3 py-1.5 text-[12px] rounded-lg cursor-pointer"
                     style={{
                       border: '1px solid var(--border-subtle)',
                       color: 'var(--text-secondary)',
@@ -794,7 +804,7 @@ export function ModelsPricingPage() {
                     .map((entry) => (
                       <div
                         key={entry.model_pattern}
-                        className="row-interactive flex items-center justify-between py-1.5 px-2 text-[11.5px] rounded"
+                        className="row-interactive flex items-center justify-between py-1.5 px-2 text-[11.5px] rounded-lg"
                         style={{ borderBottom: '1px solid var(--border-hairline)' }}
                       >
                         <button
@@ -825,7 +835,7 @@ export function ModelsPricingPage() {
                             type="button"
                             disabled={deleteOverrideMutation.isPending}
                             onClick={() => deleteOverrideMutation.mutate(entry.model_pattern)}
-                            className="btn-interactive text-[11px] px-2 py-0.5 rounded cursor-pointer disabled:opacity-50"
+                            className="btn-danger text-[11px] px-2 py-0.5 rounded-lg cursor-pointer disabled:opacity-50"
                             style={{ color: 'var(--accent-rose)' }}
                           >
                             还原
@@ -837,8 +847,9 @@ export function ModelsPricingPage() {
               </div>
             </div>
           </div>
-        </div>
-      )}
+        </div>,
+          document.body
+        )}
     </div>
   );
 }

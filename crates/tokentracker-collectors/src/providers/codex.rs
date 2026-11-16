@@ -14,6 +14,217 @@ use crate::providers::{
 };
 use crate::watcher::open_shared_readonly;
 
+const INITIAL_CODEX_SCAN_MAX_LINES: usize = 256;
+const INITIAL_CODEX_SCAN_MAX_BYTES: usize = 512 * 1024;
+
+#[derive(Default)]
+struct InitialCodexMetadata {
+    session_id: Option<String>,
+    project_label: Option<String>,
+    model: Option<String>,
+    initial_title: Option<(String, String, i64)>,
+    is_background: bool,
+    background_ts_ms: i64,
+}
+
+fn extract_codex_model(payload: &Value) -> Option<String> {
+    payload
+        .get("model")
+        .or_else(|| payload.pointer("/collaboration_mode/settings/model"))
+        .or_else(|| payload.pointer("/info/model"))
+        .or_else(|| payload.pointer("/settings/model"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
+fn is_background_title_str(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "guardian review" | "codex-auto-review" | "auto-review" | "auto review"
+    )
+}
+
+fn is_background_model_name(model: &str) -> bool {
+    let lower = model.trim().to_ascii_lowercase();
+    lower.contains("auto-review") || lower.contains("auto_review")
+}
+
+fn is_codex_background_meta(payload: &Value) -> bool {
+    if let Some(src) = payload.get("source") {
+        match src {
+            Value::String(s) => {
+                let lower = s.to_ascii_lowercase();
+                if lower.contains("subagent")
+                    || lower.contains("guardian")
+                    || lower.contains("auto_review")
+                    || lower.contains("auto-review")
+                {
+                    return true;
+                }
+            }
+            Value::Object(map)
+                if map.contains_key("subagent")
+                    || map.contains_key("guardian")
+                    || map.contains_key("auto_review") =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    if let Some(role) = payload
+        .get("agent_role")
+        .or_else(|| payload.get("role"))
+        .and_then(|v| v.as_str())
+    {
+        let lower = role.to_ascii_lowercase();
+        if lower.contains("guardian") || lower.contains("auto_review") || lower.contains("auto-review")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn scan_initial_codex_metadata(path: &Path) -> InitialCodexMetadata {
+    let Ok(file) = open_shared_readonly(path) else {
+        return InitialCodexMetadata::default();
+    };
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let mut meta = InitialCodexMetadata::default();
+    let mut bytes_read = 0usize;
+
+    for _ in 0..INITIAL_CODEX_SCAN_MAX_LINES {
+        line.clear();
+        let Ok(n) = reader.read_line(&mut line) else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        bytes_read = bytes_read.saturating_add(n);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if bytes_read >= INITIAL_CODEX_SCAN_MAX_BYTES {
+                break;
+            }
+            continue;
+        }
+        if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+            let ts_ms = parse_timestamp_ms(val.get("timestamp")).unwrap_or(0);
+            let top_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(payload) = val.get("payload") {
+                if let Some(m) = extract_codex_model(payload) {
+                    if is_background_model_name(&m) {
+                        meta.is_background = true;
+                        meta.background_ts_ms = meta.background_ts_ms.max(ts_ms);
+                    }
+                    if meta.model.is_none() || top_type == "turn_context" {
+                        meta.model = Some(m);
+                    }
+                }
+                match top_type {
+                    "session_meta" => {
+                        if let Some(id) = payload.get("id").and_then(|v| v.as_str()) {
+                            let clean = id.trim();
+                            if !clean.is_empty() {
+                                meta.session_id = Some(clean.to_string());
+                            }
+                        }
+                        if let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) {
+                            meta.project_label = Some(sanitize_project_label(Some(cwd)));
+                        }
+                        if is_codex_background_meta(payload) {
+                            meta.is_background = true;
+                            meta.background_ts_ms = meta.background_ts_ms.max(ts_ms);
+                        }
+                        if let Some(title) = payload
+                            .get("title")
+                            .or_else(|| payload.get("name"))
+                            .and_then(|v| v.as_str())
+                        {
+                            if is_background_title_str(title) {
+                                meta.is_background = true;
+                                meta.background_ts_ms = meta.background_ts_ms.max(ts_ms);
+                            } else if let Some(clean) = sanitize_session_title(title) {
+                                meta.initial_title = Some((clean, "explicit".to_string(), ts_ms));
+                            }
+                        }
+                    }
+                    "turn_context" => {
+                        if let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) {
+                            if meta.project_label.is_none() {
+                                meta.project_label = Some(sanitize_project_label(Some(cwd)));
+                            }
+                        }
+                    }
+                    "response_item" => {
+                        if payload.get("role").and_then(|v| v.as_str()) == Some("user") {
+                            if let Some(text) = extract_codex_user_prompt(payload.get("content")) {
+                                if text
+                                    .to_ascii_lowercase()
+                                    .starts_with("you are judging one planned coding-agent action")
+                                {
+                                    meta.is_background = true;
+                                    meta.background_ts_ms = meta.background_ts_ms.max(ts_ms);
+                                } else if meta.initial_title.is_none() {
+                                    meta.initial_title = Some((text, "derived".to_string(), ts_ms));
+                                }
+                            }
+                        }
+                    }
+                    "event_msg"
+                        if payload.get("type").and_then(|v| v.as_str()) == Some("user_message") =>
+                    {
+                        if let Some(msg) = extract_text_from_content(
+                            payload
+                                .get("message")
+                                .or_else(|| payload.get("text"))
+                                .or_else(|| payload.get("content")),
+                        ) {
+                            if msg
+                                .to_ascii_lowercase()
+                                .starts_with("you are judging one planned coding-agent action")
+                            {
+                                meta.is_background = true;
+                                meta.background_ts_ms = meta.background_ts_ms.max(ts_ms);
+                            } else if !is_codex_injected_preamble(&msg) {
+                                if let Some(clean) = sanitize_session_title(&msg) {
+                                    let replace = match &meta.initial_title {
+                                        None => true,
+                                        Some((_, src, prev_ts)) => {
+                                            src == "derived" || ts_ms < *prev_ts
+                                        }
+                                    };
+                                    if replace {
+                                        meta.initial_title =
+                                            Some((clean, "user_prompt".to_string(), ts_ms));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if meta.session_id.is_some()
+            && meta.model.is_some()
+            && (meta.initial_title.is_some() || meta.is_background)
+        {
+            break;
+        }
+        if bytes_read >= INITIAL_CODEX_SCAN_MAX_BYTES {
+            break;
+        }
+    }
+
+    meta
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct CodexParser;
 
@@ -48,20 +259,29 @@ impl ProviderLogParser for CodexParser {
     }
 
     fn init_context(&self, path: &Path, device_id: &str) -> FileParseContext {
-        let session_id = path
+        let fallback_sid = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("codex-session")
             .to_string();
+        let meta = scan_initial_codex_metadata(path);
 
-        FileParseContext {
+        let mut ctx = FileParseContext {
             file_path: path.to_string_lossy().to_string(),
             device_id: device_id.to_string(),
-            session_id,
-            project_label: "workspace".to_string(),
-            current_model: Some("gpt-5-codex".to_string()),
+            session_id: meta.session_id.unwrap_or(fallback_sid),
+            project_label: meta.project_label.unwrap_or_else(|| "workspace".to_string()),
+            current_model: meta.model,
+            session_title: meta.initial_title,
             ..Default::default()
+        };
+        if meta.is_background {
+            ctx.mark_background_session("Guardian review", meta.background_ts_ms);
         }
+        if ctx.session_title.is_some() {
+            ctx.session_title_dirty = true;
+        }
+        ctx
     }
 
     fn parse_line(&self, line: &str, ctx: &mut FileParseContext) -> Option<ParsedLineResult> {
@@ -88,25 +308,34 @@ impl ProviderLogParser for CodexParser {
                 if let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) {
                     ctx.project_label = sanitize_project_label(Some(cwd));
                 }
-                if let Some(model) = payload.get("model").and_then(|v| v.as_str()) {
-                    if !model.trim().is_empty() {
-                        ctx.current_model = Some(model.trim().to_string());
+                if let Some(model) = extract_codex_model(payload) {
+                    if is_background_model_name(&model) {
+                        ctx.mark_background_session("Guardian review", ts_ms);
                     }
+                    ctx.current_model = Some(model);
+                }
+                if is_codex_background_meta(payload) {
+                    ctx.mark_background_session("Guardian review", ts_ms);
                 }
                 if let Some(title) = payload
                     .get("title")
                     .or_else(|| payload.get("name"))
                     .and_then(|v| v.as_str())
                 {
-                    ctx.record_session_title(title, "explicit", ts_ms);
+                    if is_background_title_str(title) {
+                        ctx.mark_background_session(title, ts_ms);
+                    } else {
+                        ctx.record_session_title(title, "explicit", ts_ms);
+                    }
                 }
                 None
             }
             "turn_context" => {
-                if let Some(model) = payload.get("model").and_then(|v| v.as_str()) {
-                    if !model.trim().is_empty() {
-                        ctx.current_model = Some(model.trim().to_string());
+                if let Some(model) = extract_codex_model(payload) {
+                    if is_background_model_name(&model) {
+                        ctx.mark_background_session("Guardian review", ts_ms);
                     }
+                    ctx.current_model = Some(model);
                 }
                 if let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) {
                     ctx.project_label = sanitize_project_label(Some(cwd));
@@ -119,11 +348,24 @@ impl ProviderLogParser for CodexParser {
                 None
             }
             "response_item" => {
+                if let Some(model) = extract_codex_model(payload) {
+                    if is_background_model_name(&model) {
+                        ctx.mark_background_session("Guardian review", ts_ms);
+                    }
+                    ctx.current_model = Some(model);
+                }
                 let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
                 if role == "user" {
                     ctx.last_prompt_ts_ms = Some(ts_ms);
                     if let Some(text) = extract_codex_user_prompt(payload.get("content")) {
-                        ctx.record_session_title(&text, "derived", ts_ms);
+                        if text
+                            .to_ascii_lowercase()
+                            .starts_with("you are judging one planned coding-agent action")
+                        {
+                            ctx.mark_background_session("Guardian review", ts_ms);
+                        } else {
+                            ctx.record_session_title(&text, "derived", ts_ms);
+                        }
                     }
                 }
                 None
@@ -138,7 +380,12 @@ impl ProviderLogParser for CodexParser {
                             .or_else(|| payload.get("text"))
                             .or_else(|| payload.get("content")),
                     ) {
-                        if !is_codex_injected_preamble(&msg) {
+                        if msg
+                            .to_ascii_lowercase()
+                            .starts_with("you are judging one planned coding-agent action")
+                        {
+                            ctx.mark_background_session("Guardian review", ts_ms);
+                        } else if !is_codex_injected_preamble(&msg) {
                             ctx.record_session_title(&msg, "user_prompt", ts_ms);
                         }
                     }
@@ -163,14 +410,12 @@ impl ProviderLogParser for CodexParser {
                     };
                 };
 
-                if let Some(model) = info
-                    .get("model")
-                    .or_else(|| payload.get("model"))
-                    .and_then(|v| v.as_str())
+                if let Some(model) = extract_codex_model(payload).or_else(|| extract_codex_model(info))
                 {
-                    if !model.trim().is_empty() {
-                        ctx.current_model = Some(model.trim().to_string());
+                    if is_background_model_name(&model) {
+                        ctx.mark_background_session("Guardian review", ts_ms);
                     }
+                    ctx.current_model = Some(model);
                 }
 
                 let raw_totals = info.get("total_token_usage").map(read_codex_totals);
@@ -259,7 +504,7 @@ impl ProviderLogParser for CodexParser {
                 let model_id = ctx
                     .current_model
                     .clone()
-                    .unwrap_or_else(|| "gpt-5-codex".to_string());
+                    .unwrap_or_else(|| "codex-unknown".to_string());
                 let step_key = raw_totals
                     .map(|t| {
                         format!(
@@ -472,6 +717,13 @@ fn extract_codex_credits(payload: &Value, observed_at_ms: i64) -> Option<Provide
 
 /// Read-only loader for Codex's official `~/.codex/session_index.jsonl` explicit thread names.
 pub fn load_codex_session_index_titles(roots: &[PathBuf]) -> Vec<SessionTitleRecord> {
+    load_codex_session_index_titles_from_roots(roots, true)
+}
+
+fn load_codex_session_index_titles_from_roots(
+    roots: &[PathBuf],
+    include_default_home: bool,
+) -> Vec<SessionTitleRecord> {
     let mut index_paths = BTreeSet::new();
     for root in roots {
         let direct = root.join("session_index.jsonl");
@@ -485,10 +737,12 @@ pub fn load_codex_session_index_titles(roots: &[PathBuf]) -> Vec<SessionTitleRec
             }
         }
     }
-    if let Some(home) = user_home_dir() {
-        let default_idx = home.join(".codex").join("session_index.jsonl");
-        if default_idx.is_file() {
-            index_paths.insert(default_idx);
+    if include_default_home {
+        if let Some(home) = user_home_dir() {
+            let default_idx = home.join(".codex").join("session_index.jsonl");
+            if default_idx.is_file() {
+                index_paths.insert(default_idx);
+            }
         }
     }
 
@@ -518,6 +772,11 @@ pub fn load_codex_session_index_titles(roots: &[PathBuf]) -> Vec<SessionTitleRec
                         let should_insert = latest_by_session
                             .get(&key)
                             .is_none_or(|prev| ts_ms >= prev.updated_at_ms);
+                        let source = if is_background_title_str(&clean_title) {
+                            "background"
+                        } else {
+                            "explicit"
+                        };
                         if should_insert {
                             latest_by_session.insert(
                                 key.clone(),
@@ -525,7 +784,7 @@ pub fn load_codex_session_index_titles(roots: &[PathBuf]) -> Vec<SessionTitleRec
                                     session_key: key,
                                     provider_id: provider_ids::CODEX.to_string(),
                                     title: clean_title,
-                                    source: "explicit".to_string(),
+                                    source: source.to_string(),
                                     updated_at_ms: ts_ms,
                                 },
                             );
@@ -590,7 +849,8 @@ mod tests {
         )
         .expect("write session index");
 
-        let index_titles = load_codex_session_index_titles(std::slice::from_ref(&sessions_dir));
+        let index_titles =
+            load_codex_session_index_titles_from_roots(std::slice::from_ref(&sessions_dir), false);
         assert_eq!(index_titles.len(), 1);
         assert_eq!(index_titles[0].session_key, "codex:codex-s1");
         assert_eq!(index_titles[0].title, "Renamed PayG Feature Thread");
@@ -619,5 +879,53 @@ mod tests {
         let bal = parsed.balance.expect("balance snapshot");
         assert_eq!(bal.currency, "CREDITS");
         assert_eq!(bal.total_balance_micro, Some(766_760_000));
+    }
+
+    #[test]
+    fn codex_never_fabricates_gpt5_codex_and_marks_guardian_background_sessions() {
+        let parser = CodexParser::new();
+        let mut ctx_no_model = parser.init_context(Path::new("C:/tmp/nonexistent/rollout-no-model.jsonl"), "dev-1");
+        let tok_no_model = r#"{"timestamp":"2026-11-16T04:10:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":50,"reasoning_output_tokens":0}}}}"#;
+        let ev_unknown = parser
+            .parse_line(tok_no_model, &mut ctx_no_model)
+            .and_then(|r| r.event)
+            .expect("event without explicit model");
+        assert_eq!(ev_unknown.model_id, "codex-unknown");
+
+        // Extracts nested collaboration_mode.settings.model and subagent/guardian background metadata
+        let mut ctx_collab = parser.init_context(Path::new("C:/tmp/nonexistent/rollout-collab.jsonl"), "dev-1");
+        let turn_nested = r#"{"timestamp":"2026-11-16T04:11:00.000Z","type":"turn_context","payload":{"collaboration_mode":{"mode":"default","settings":{"model":"gpt-5.4","reasoning_effort":"high"}}}}"#;
+        assert!(parser.parse_line(turn_nested, &mut ctx_collab).is_none());
+        let tok_nested = r#"{"timestamp":"2026-11-16T04:11:05.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":50,"reasoning_output_tokens":0}}}}"#;
+        let ev_54 = parser
+            .parse_line(tok_nested, &mut ctx_collab)
+            .and_then(|r| r.event)
+            .expect("nested model event");
+        assert_eq!(ev_54.model_id, "gpt-5.4");
+
+        let mut ctx_bg = parser.init_context(Path::new("C:/tmp/nonexistent/rollout-guardian.jsonl"), "dev-1");
+        let bg_meta = r#"{"timestamp":"2026-11-16T04:12:00.000Z","type":"session_meta","payload":{"id":"codex-guardian-1","source":{"subagent":"guardian"},"cwd":"C:/Projects/TokenTracker"}}"#;
+        let bg_turn = r#"{"timestamp":"2026-11-16T04:12:01.000Z","type":"turn_context","payload":{"model":"codex-auto-review"}}"#;
+        assert!(parser.parse_line(bg_meta, &mut ctx_bg).is_none());
+        assert!(parser.parse_line(bg_turn, &mut ctx_bg).is_none());
+        assert!(ctx_bg.is_background_session);
+        let title_rec = ctx_bg
+            .take_session_title_record(provider_ids::CODEX)
+            .expect("background title");
+        assert_eq!(title_rec.source, "background");
+
+        // session_index.jsonl Guardian review entries emit source = "background"
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("mkdir");
+        std::fs::write(
+            dir.path().join("session_index.jsonl"),
+            r#"{"id":"codex-guardian-1","thread_name":"Guardian review","updated_at":"2026-11-16T04:12:05Z"}"#,
+        )
+        .expect("write idx");
+        let idx =
+            load_codex_session_index_titles_from_roots(std::slice::from_ref(&sessions_dir), false);
+        assert_eq!(idx.len(), 1);
+        assert_eq!(idx[0].source, "background");
     }
 }

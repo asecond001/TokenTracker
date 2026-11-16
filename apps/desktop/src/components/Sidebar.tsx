@@ -96,7 +96,7 @@ export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
                 <button
                   type="button"
                   onClick={() => setActivePage('preferences')}
-                  className="px-1.5 py-0.5 rounded text-[9.5px] font-medium normal-case tracking-normal cursor-pointer hover:opacity-90 tabular-nums"
+                  className="px-1.5 py-0.5 rounded-md text-[9.5px] font-medium normal-case tracking-normal cursor-pointer hover:opacity-90 tabular-nums"
                   style={{
                     backgroundColor: 'rgba(16, 185, 129, 0.14)',
                     color: 'var(--accent-emerald)',
@@ -107,7 +107,7 @@ export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
                 </button>
               )}
               <span className="font-mono text-[10px] font-normal lowercase tabular-nums">
-                v0.2.5
+                v0.2.6
               </span>
             </div>
           </div>

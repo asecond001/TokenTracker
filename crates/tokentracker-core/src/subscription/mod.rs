@@ -1,13 +1,16 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub use crate::domain::{SubscriptionPlanTemplate, SubscriptionWindowStatus};
 use crate::domain::{
     provider_ids, ObservedRateLimitWindow, QuotaUnit, SubscriptionPlan, SubscriptionWindowRule,
 };
+use crate::error::{CoreError, CoreResult};
 
 const HOUR_MS: i64 = 3_600_000;
+const MAX_MONTHLY_FEE_MICRO_USD: i64 = 10_000_000_000; // $10,000 / mo sanity cap
 
 /// Single event contribution sample used for rolling window evaluation.
 #[derive(Debug, Clone, Copy)]
@@ -17,11 +20,19 @@ pub struct WindowUsageSample {
     pub total_tokens: i64,
 }
 
-/// Evaluated live status for a subscription plan across all its windows.
+/// Evaluated live status for a subscription plan across authoritative quota windows + factual spend.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubscriptionPlanStatus {
     pub plan: SubscriptionPlan,
     pub windows: Vec<SubscriptionWindowStatus>,
+    #[serde(default)]
+    pub today_cost_micro_usd: i64,
+    #[serde(default)]
+    pub week_cost_micro_usd: i64,
+    #[serde(default)]
+    pub month_cost_micro_usd: i64,
+    #[serde(default)]
+    pub month_tokens: i64,
 }
 
 fn standard_two_windows(limit_5h_micro_usd: i64, limit_7d_micro_usd: i64) -> Vec<SubscriptionWindowRule> {
@@ -501,13 +512,30 @@ fn match_observed_snapshot<'a>(
         })
 }
 
-/// Evaluate all reference templates against current live usage samples and observed snapshots.
+/// Evaluate all reference templates against current live authoritative snapshots.
 pub fn evaluate_subscription_templates(
     samples_map: &HashMap<String, Vec<WindowUsageSample>>,
     observed_snapshots: &[ObservedRateLimitWindow],
     now_ms: i64,
 ) -> Vec<SubscriptionPlanTemplate> {
-    subscription_plan_templates()
+    evaluate_subscription_templates_from_list(
+        subscription_plan_templates(),
+        samples_map,
+        observed_snapshots,
+        now_ms,
+    )
+}
+
+/// Evaluate a supplied template catalog list against authoritative observed rate-limit snapshots.
+/// Unverified local-estimated windows are intentionally omitted from `live_windows` to prevent
+/// misleading fabricated percentages on providers without an official quota endpoint.
+pub fn evaluate_subscription_templates_from_list(
+    templates: Vec<SubscriptionPlanTemplate>,
+    samples_map: &HashMap<String, Vec<WindowUsageSample>>,
+    observed_snapshots: &[ObservedRateLimitWindow],
+    now_ms: i64,
+) -> Vec<SubscriptionPlanTemplate> {
+    templates
         .into_iter()
         .map(|mut tpl| {
             let samples = samples_map
@@ -520,13 +548,16 @@ pub fn evaluate_subscription_templates(
                 .map(|rule| {
                     evaluate_window(&tpl.provider_id, rule, samples, observed_snapshots, now_ms)
                 })
+                .filter(|w| w.source != "local_estimation")
                 .collect();
             tpl
         })
         .collect()
 }
 
-/// Evaluate all windows of a subscription plan given historical samples for that provider.
+/// Evaluate a subscription plan. Only windows backed by fresh authoritative snapshots
+/// (`official_api` or `official_log_snapshot`) are emitted; plans without an official quota
+/// source report an empty `windows` vector and track factual spend + ROI instead.
 pub fn evaluate_subscription_plan(
     plan: &SubscriptionPlan,
     samples: &[WindowUsageSample],
@@ -537,12 +568,152 @@ pub fn evaluate_subscription_plan(
         .windows
         .iter()
         .map(|rule| evaluate_window(&plan.provider_id, rule, samples, observed_snapshots, now_ms))
+        .filter(|w| w.source != "local_estimation")
         .collect();
 
     SubscriptionPlanStatus {
         plan: plan.clone(),
         windows,
+        today_cost_micro_usd: 0,
+        week_cost_micro_usd: 0,
+        month_cost_micro_usd: 0,
+        month_tokens: 0,
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteCatalogPlanRaw {
+    template_id: String,
+    provider_id: String,
+    plan_name: String,
+    monthly_fee_micro_usd: i64,
+    #[serde(default)]
+    windows: Vec<SubscriptionWindowRule>,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteCatalogDocumentRaw {
+    #[serde(default)]
+    plans: Vec<RemoteCatalogPlanRaw>,
+}
+
+/// Parse either an `AI Subscription Catalog` full document (`plans.json` / `subscription-plans.json`)
+/// or a TokenTracker templates array (`tokentracker-templates.json`), filtering legacy entries and
+/// normalizing plan metadata cleanly.
+pub fn parse_subscription_catalog_json(raw_json: &str) -> CoreResult<Vec<SubscriptionPlanTemplate>> {
+    let trimmed = raw_json.trim();
+    if trimmed.is_empty() {
+        return Err(CoreError::Validation(
+            "Empty subscription catalog JSON payload".to_string(),
+        ));
+    }
+
+    let raw_plans: Vec<RemoteCatalogPlanRaw> = if trimmed.starts_with('[') {
+        serde_json::from_str(trimmed).map_err(|e| {
+            CoreError::Validation(format!("Invalid subscription templates array JSON: {e}"))
+        })?
+    } else {
+        let doc: RemoteCatalogDocumentRaw = serde_json::from_str(trimmed).map_err(|e| {
+            CoreError::Validation(format!("Invalid subscription catalog document JSON: {e}"))
+        })?;
+        doc.plans
+    };
+
+    let mut seen_ids = HashSet::new();
+    let mut out = Vec::with_capacity(raw_plans.len());
+
+    for raw in raw_plans {
+        if raw
+            .status
+            .as_deref()
+            .is_some_and(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "legacy" | "deprecated"))
+        {
+            continue;
+        }
+        let template_id = raw.template_id.trim().to_string();
+        let provider_id = raw.provider_id.trim().to_ascii_lowercase();
+        let mut plan_name = raw.plan_name.trim().to_string();
+        let mut description = raw.description.trim().to_string();
+        if template_id.is_empty() || provider_id.is_empty() || plan_name.is_empty() {
+            continue;
+        }
+        if raw.monthly_fee_micro_usd < 0 || raw.monthly_fee_micro_usd > MAX_MONTHLY_FEE_MICRO_USD {
+            continue;
+        }
+        if !seen_ids.insert(template_id.clone()) {
+            continue;
+        }
+
+        // Preserve v0.2.5 canonical naming for Google AI Ultra even against v0.2.4-derived upstream tags.
+        if template_id == "google_ai_ultra" && plan_name == "Google AI Ultra 20x" {
+            plan_name = "Google AI Ultra".to_string();
+            description = description.replace("Google AI Ultra 20x", "Google AI Ultra");
+        }
+
+        let windows: Vec<SubscriptionWindowRule> = raw
+            .windows
+            .into_iter()
+            .filter(|w| {
+                !w.window_id.trim().is_empty()
+                    && !w.label.trim().is_empty()
+                    && w.duration_hours > 0
+                    && w.limit_value >= 0
+            })
+            .map(|mut w| {
+                w.window_id = w.window_id.trim().to_string();
+                w.label = w.label.trim().to_string();
+                w
+            })
+            .collect();
+
+        out.push(SubscriptionPlanTemplate {
+            template_id,
+            provider_id,
+            plan_name,
+            monthly_fee_micro_usd: raw.monthly_fee_micro_usd,
+            windows,
+            description,
+            live_windows: Vec::new(),
+        });
+    }
+
+    if out.len() < 10 {
+        return Err(CoreError::Validation(format!(
+            "Subscription catalog sanity check failed: expected at least 10 active plans, parsed {}",
+            out.len()
+        )));
+    }
+
+    Ok(out)
+}
+
+/// Compute a deterministic SHA-256 hash over an ordered list of subscription templates.
+pub fn compute_subscription_catalog_hash(templates: &[SubscriptionPlanTemplate]) -> String {
+    let mut hasher = Sha256::new();
+    for tpl in templates {
+        hasher.update(tpl.template_id.as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(tpl.provider_id.as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(tpl.plan_name.as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(tpl.monthly_fee_micro_usd.to_le_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(tpl.description.as_bytes());
+        for w in &tpl.windows {
+            hasher.update(b"\x1e");
+            hasher.update(w.window_id.as_bytes());
+            hasher.update(w.duration_hours.to_le_bytes());
+            hasher.update([u8::from(w.rolling)]);
+            hasher.update(w.limit_value.to_le_bytes());
+        }
+        hasher.update(b"\n");
+    }
+    hex::encode(hasher.finalize())
 }
 
 /// Evaluate a single subscription quota window.
@@ -767,16 +938,20 @@ mod tests {
             },
         ];
 
-        let status = evaluate_subscription_plan(&pro, &samples, &[], now_ms);
-        let w5 = &status.windows[0];
+        let w5 = evaluate_window(&pro.provider_id, &pro.windows[0], &samples, &[], now_ms);
+        assert_eq!(w5.source, "local_estimation");
         assert!((w5.used_percent - 80.0).abs() < 0.01);
         assert_eq!(w5.alert_level, "warning");
         assert_eq!(w5.resets_in_seconds, 2 * 3600);
         let proj = w5.projected_exhaustion_hours.expect("projected");
         assert!((proj - 0.5).abs() < 0.01);
 
-        let w7 = &status.windows[1];
+        let w7 = evaluate_window(&pro.provider_id, &pro.windows[1], &samples, &[], now_ms);
         assert_eq!(w7.used_value, 22_000_000);
+
+        // SubscriptionPlanStatus must NOT expose local_estimation windows when no official quota exists.
+        let plan_status = evaluate_subscription_plan(&pro, &samples, &[], now_ms);
+        assert!(plan_status.windows.is_empty());
     }
 
     #[test]
@@ -795,9 +970,65 @@ mod tests {
         }];
 
         let status = evaluate_subscription_plan(&codex, &[], &obs, now_ms);
+        assert_eq!(status.windows.len(), 1);
         let w5 = &status.windows[0];
         assert_eq!(w5.source, "official_log_snapshot");
         assert!((w5.used_percent - 42.5).abs() < 0.01);
         assert_eq!(w5.resets_in_seconds, 3600);
+    }
+
+    #[test]
+    fn parses_ai_subscription_catalog_document_and_normalizes_ultra_name() {
+        let base_plans: Vec<serde_json::Value> = subscription_plan_templates()
+            .into_iter()
+            .take(12)
+            .map(|t| {
+                let mut val = serde_json::to_value(&t).expect("json");
+                val.as_object_mut()
+                    .expect("obj")
+                    .insert("status".to_string(), serde_json::json!("active"));
+                val
+            })
+            .collect();
+        let mut all_plans = base_plans;
+        all_plans.push(serde_json::json!({
+            "template_id": "cursor_pro_legacy",
+            "provider_id": "cursor",
+            "plan_name": "Cursor Pro (Legacy)",
+            "monthly_fee_micro_usd": 20000000,
+            "windows": [],
+            "description": "Legacy",
+            "status": "legacy"
+        }));
+        all_plans.push(serde_json::json!({
+            "template_id": "google_ai_ultra_override",
+            "provider_id": "antigravity",
+            "plan_name": "Ultra Extra",
+            "monthly_fee_micro_usd": 199990000,
+            "windows": [],
+            "description": "Test",
+            "status": "active"
+        }));
+        // Replace google_ai_ultra with old v0.2.4 name to verify normalization
+        for item in &mut all_plans {
+            if item.get("template_id").and_then(|v| v.as_str()) == Some("google_ai_ultra") {
+                item["plan_name"] = serde_json::json!("Google AI Ultra 20x");
+                item["description"] = serde_json::json!("Google AI Ultra 20x flagship");
+            }
+        }
+        let doc = serde_json::json!({
+            "schema_version": "1.0.0",
+            "plans": all_plans
+        })
+        .to_string();
+
+        let parsed = parse_subscription_catalog_json(&doc).expect("parse catalog");
+        assert!(!parsed.iter().any(|p| p.template_id == "cursor_pro_legacy"));
+        let ultra = parsed
+            .iter()
+            .find(|p| p.template_id == "google_ai_ultra")
+            .expect("google_ai_ultra");
+        assert_eq!(ultra.plan_name, "Google AI Ultra");
+        assert_eq!(ultra.description, "Google AI Ultra flagship");
     }
 }

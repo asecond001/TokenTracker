@@ -110,7 +110,7 @@ export function TrayPopupPage() {
               aria-label="切换桌面悬浮窗"
               title="开启 / 关闭实时桌面悬浮窗"
               onClick={() => void ipc.toggleFloatingWindow()}
-              className="btn-interactive p-1 rounded cursor-pointer"
+              className="btn-interactive p-1 rounded-lg cursor-pointer"
               style={{ color: 'var(--text-secondary)' }}
             >
               <PictureInPicture2 className="w-3.5 h-3.5" />
@@ -205,7 +205,7 @@ export function TrayPopupPage() {
                 onClick={() => {
                   void ipc.openMainWorkspace('overview', session.provider_id);
                 }}
-                className="row-interactive w-full text-left px-1.5 py-1 rounded flex items-center justify-between gap-2 cursor-pointer"
+                className="row-interactive w-full text-left px-1.5 py-1 rounded-lg flex items-center justify-between gap-2 cursor-pointer"
                 title="点击打开主工作台查看该模型提供商实时用量"
               >
                 <div className="min-w-0 flex items-center gap-1.5">
@@ -251,32 +251,39 @@ export function TrayPopupPage() {
           >
             订阅窗口配额
           </div>
-          {(summary?.subscriptions ?? []).slice(0, 3).map((sub) => {
-            const win = sub.windows[0];
-            if (!win) return null;
-            return (
-              <div key={sub.plan.plan_id} className="space-y-1">
-                <div className="flex items-center justify-between text-[11.5px] tabular-nums">
-                  <span className="truncate max-w-[190px]" style={{ color: 'var(--text-primary)' }}>
-                    {providerDisplayName(sub.plan.provider_id)} · {win.label}
-                  </span>
-                  <span style={{ color: 'var(--text-secondary)' }}>
-                    {win.used_percent.toFixed(1)}% · {formatCountdown(win.resets_in_seconds)}
-                  </span>
+          {(() => {
+            const officialSubs = (summary?.subscriptions ?? [])
+              .filter((sub) => sub.windows.length > 0)
+              .slice(0, 3);
+            if (officialSubs.length === 0) {
+              return (
+                <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                  暂无官方实测订阅配额窗口
                 </div>
-                <InlineProgressBar
-                  percent={win.used_percent}
-                  alertLevel={win.alert_level}
-                  heightPx={4}
-                />
-              </div>
-            );
-          })}
-          {(summary?.subscriptions ?? []).length === 0 && (
-            <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-              暂无启用的订阅配额规则
-            </div>
-          )}
+              );
+            }
+            return officialSubs.map((sub) => {
+              const win = sub.windows[0];
+              if (!win) return null;
+              return (
+                <div key={sub.plan.plan_id} className="space-y-1">
+                  <div className="flex items-center justify-between text-[11.5px] tabular-nums">
+                    <span className="truncate max-w-[190px]" style={{ color: 'var(--text-primary)' }}>
+                      {providerDisplayName(sub.plan.provider_id)} · {win.label}
+                    </span>
+                    <span style={{ color: 'var(--text-secondary)' }}>
+                      {win.used_percent.toFixed(1)}% · {formatCountdown(win.resets_in_seconds)}
+                    </span>
+                  </div>
+                  <InlineProgressBar
+                    percent={win.used_percent}
+                    alertLevel={win.alert_level}
+                    heightPx={4}
+                  />
+                </div>
+              );
+            });
+          })()}
         </div>
       </div>
 
@@ -289,7 +296,7 @@ export function TrayPopupPage() {
           type="button"
           onClick={() => scanMutation.mutate()}
           disabled={scanMutation.isPending}
-          className="btn-interactive flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 rounded text-[11.5px] cursor-pointer disabled:opacity-50"
+          className="btn-interactive flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[11.5px] cursor-pointer disabled:opacity-50"
           style={{
             backgroundColor: 'var(--bg-elevated)',
             color: 'var(--text-primary)',
@@ -305,7 +312,7 @@ export function TrayPopupPage() {
           onClick={() => {
             void ipc.openMainWorkspace();
           }}
-          className="btn-primary flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 rounded text-[11.5px] font-medium cursor-pointer"
+          className="btn-primary flex-1 inline-flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[11.5px] font-medium cursor-pointer"
           style={{
             backgroundColor: 'var(--accent-primary)',
             color: '#ffffff',

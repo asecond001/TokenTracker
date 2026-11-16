@@ -180,7 +180,7 @@ export function TrendsPage() {
             <h1 className="text-[16px] font-semibold tracking-tight">趋势分析</h1>
             {data?.effective_granularity && (
               <span
-                className="px-1.5 py-0.5 text-[10.5px] rounded tabular-nums"
+                className="px-1.5 py-0.5 text-[10.5px] rounded-md tabular-nums"
                 style={{
                   backgroundColor: 'var(--bg-hover)',
                   border: '1px solid var(--border-hairline)',
@@ -200,10 +200,10 @@ export function TrendsPage() {
 
           {/* Granularity Switcher */}
           <div
-            className="flex items-center p-0.5 rounded"
+            className="seg-group"
             style={{
               backgroundColor: 'var(--bg-sidebar)',
-              border: '1px solid var(--border-hairline)',
+              borderColor: 'var(--border-hairline)',
             }}
           >
             {GRANULARITIES.map((g) => {
@@ -214,7 +214,7 @@ export function TrendsPage() {
                   type="button"
                   data-active={active}
                   onClick={() => setGranularity(g.id)}
-                  className="seg-pill px-2.5 py-1 text-[11.5px] rounded-sm cursor-pointer"
+                  className="seg-pill px-2.5 py-1 text-[11.5px] cursor-pointer"
                   style={{
                     color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
                     fontWeight: active ? 500 : 400,
@@ -228,10 +228,10 @@ export function TrendsPage() {
 
           {/* Stack Dimension Switcher */}
           <div
-            className="flex items-center p-0.5 rounded"
+            className="seg-group"
             style={{
               backgroundColor: 'var(--bg-sidebar)',
-              border: '1px solid var(--border-hairline)',
+              borderColor: 'var(--border-hairline)',
             }}
           >
             {DIMENSIONS.map((d) => {
@@ -245,7 +245,7 @@ export function TrendsPage() {
                     setDimension(d.id);
                     setFocusedKey(null);
                   }}
-                  className="seg-pill px-2.5 py-1 text-[11.5px] rounded-sm cursor-pointer"
+                  className="seg-pill px-2.5 py-1 text-[11.5px] cursor-pointer"
                   style={{
                     color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
                     fontWeight: active ? 500 : 400,
@@ -265,7 +265,7 @@ export function TrendsPage() {
           <button
             type="button"
             onClick={() => setFocusedKey(null)}
-            className="btn-interactive px-2 py-0.5 text-[11.5px] rounded cursor-pointer"
+            className="btn-interactive px-2 py-0.5 text-[11.5px] rounded-lg cursor-pointer"
             style={{
               backgroundColor: activeFocusedKey === null ? 'var(--bg-hover)' : 'transparent',
               border: '1px solid var(--border-hairline)',
@@ -283,7 +283,7 @@ export function TrendsPage() {
                 key={s.key}
                 type="button"
                 onClick={() => setFocusedKey(active ? null : s.key)}
-                className="btn-interactive inline-flex items-center gap-1.5 px-2 py-0.5 text-[11.5px] rounded cursor-pointer tabular-nums"
+                className="btn-interactive inline-flex items-center gap-1.5 px-2 py-0.5 text-[11.5px] rounded-lg cursor-pointer tabular-nums"
                 style={{
                   backgroundColor: active ? 'var(--bg-hover)' : 'transparent',
                   border: '1px solid var(--border-hairline)',

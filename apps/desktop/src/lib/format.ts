@@ -116,10 +116,24 @@ export function providerDisplayName(providerId: string): string {
       return 'QCode';
     case 'minimax_code':
       return 'MiniMax Code';
+    case 'cursor':
+      return 'Cursor';
+    case 'github_copilot':
+      return 'GitHub Copilot';
+    case 'windsurf':
+      return 'Windsurf';
     default:
-      return providerId.startsWith('custom_')
-        ? `自定义 (${providerId.slice(7)})`
-        : providerId;
+      if (providerId.startsWith('custom_')) {
+        return `自定义 (${providerId.slice(7)})`;
+      }
+      if (providerId.includes('_')) {
+        return providerId
+          .split('_')
+          .filter(Boolean)
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(' ');
+      }
+      return providerId;
   }
 }
 
@@ -141,6 +155,12 @@ export function providerAccentColor(providerId: string): string {
       return '#2dd4bf';
     case 'minimax_code':
       return '#a855f7';
+    case 'cursor':
+      return '#22d3ee';
+    case 'github_copilot':
+      return '#6e7681';
+    case 'windsurf':
+      return '#06b6d4';
     default:
       return providerId.startsWith('custom_') ? '#8b5cf6' : '#60a5fa';
   }
@@ -178,7 +198,8 @@ export function resolveSubscriptionTierLabel(
     auto_source?: string | null;
   },
   currency: CurrencyCode,
-  usdToCnyRateStr: string
+  usdToCnyRateStr: string,
+  hasOfficialWindows = false
 ): string {
   if (plan.monthly_fee_micro_usd > 0) {
     return `月费 ${formatCost(plan.monthly_fee_micro_usd, currency, usdToCnyRateStr)}`;
@@ -189,5 +210,5 @@ export function resolveSubscriptionTierLabel(
   if (plan.auto_source === 'local_log') {
     return '日志探测档位';
   }
-  return '按窗口配额监测';
+  return hasOfficialWindows ? '官方配额窗口监测' : '按月费与真实消耗监测';
 }

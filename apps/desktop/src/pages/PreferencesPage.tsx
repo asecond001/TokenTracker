@@ -549,14 +549,19 @@ export function PreferencesPage({
       await queryClient.invalidateQueries({
         predicate: (query) => query.queryKey[0] !== 'bg-image-data-url',
       });
-      if (res.warning && !res.rate_updated && !res.pricing_updated) {
+      if (
+        res.warning &&
+        !res.rate_updated &&
+        !res.pricing_updated &&
+        !res.subscriptions_updated
+      ) {
         setNotice({
           text: `在线刷新受限（已保持本地基线）：${res.warning}`,
           kind: 'error',
         });
       } else {
         setNotice({
-          text: `已刷新汇率与公开模型单价（1 USD = ${res.usd_to_cny_rate} CNY · ${res.synced_models_count} 款模型）`,
+          text: `已刷新汇率、公开模型单价与套餐目录（1 USD = ${res.usd_to_cny_rate} CNY · ${res.synced_models_count} 款模型 · ${res.synced_plans_count} 款订阅）`,
           kind: 'success',
         });
       }
@@ -773,7 +778,7 @@ export function PreferencesPage({
         <div className="flex items-center gap-2">
           <h1 className="text-[16px] font-semibold tracking-tight">偏好设置</h1>
           <span
-            className="px-2 py-0.5 rounded-full text-[10.5px] font-mono tabular-nums"
+            className="px-2 py-0.5 rounded-md text-[10.5px] font-mono tabular-nums"
             style={{
               backgroundColor: 'var(--accent-tonal-bg)',
               boxShadow: 'var(--border-specular)',
@@ -781,7 +786,7 @@ export function PreferencesPage({
               color: 'var(--accent-tonal-text)',
             }}
           >
-            v0.2.5
+            v0.2.6
           </span>
         </div>
 
@@ -789,7 +794,7 @@ export function PreferencesPage({
           type="button"
           onClick={() => savePrefsMutation.mutate()}
           disabled={savePrefsMutation.isPending}
-          className="btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium cursor-pointer disabled:opacity-50"
+          className="btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium cursor-pointer disabled:opacity-50"
           style={{
             backgroundColor: 'var(--accent-primary)',
             color: '#ffffff',
@@ -841,7 +846,7 @@ export function PreferencesPage({
                   type="button"
                   data-active={active ? 'true' : undefined}
                   onClick={() => handleThemeSelect(opt.id)}
-                  className="seg-pill px-3 py-1 rounded text-[12px] cursor-pointer"
+                  className="seg-pill px-3 py-1 rounded-lg text-[12px] cursor-pointer"
                   style={{
                     backgroundColor: active ? 'var(--bg-hover)' : 'var(--bg-input)',
                     border: active
@@ -867,13 +872,7 @@ export function PreferencesPage({
           </div>
 
           <div className="col-span-8 space-y-3.5">
-            <div
-              className="inline-flex items-center p-0.5 rounded"
-              style={{
-                backgroundColor: 'var(--bg-input)',
-                border: '1px solid var(--border-subtle)',
-              }}
-            >
+            <div className="seg-group">
               {BG_MODE_OPTIONS.map((modeOpt) => {
                 const active = bgMode === modeOpt.id;
                 return (
@@ -882,7 +881,7 @@ export function PreferencesPage({
                     type="button"
                     data-active={active ? 'true' : undefined}
                     onClick={() => handleBgModeSelect(modeOpt.id)}
-                    className="seg-pill px-3 py-1 text-[12px] rounded-sm cursor-pointer"
+                    className="seg-pill px-3 py-1 text-[12px] cursor-pointer"
                     style={{
                       color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
                       fontWeight: active ? 500 : 400,
@@ -912,7 +911,7 @@ export function PreferencesPage({
                         type="button"
                         data-selected={selected ? 'true' : undefined}
                         onClick={() => handlePresetSelect(preset.id)}
-                        className="btn-interactive text-left p-2 rounded cursor-pointer space-y-1.5"
+                        className="btn-interactive text-left p-2 rounded-lg cursor-pointer space-y-1.5"
                         style={{
                           backgroundColor: selected ? 'var(--bg-hover)' : 'var(--bg-input)',
                           border: selected
@@ -921,7 +920,7 @@ export function PreferencesPage({
                         }}
                       >
                         <div
-                          className="h-7 w-full rounded-sm overflow-hidden"
+                          className="h-7 w-full rounded-md overflow-hidden"
                           style={{
                             backgroundColor: 'var(--bg-canvas)',
                             border: '1px solid var(--border-hairline)',
@@ -950,7 +949,7 @@ export function PreferencesPage({
 
             {bgMode === 'image' && (
               <div
-                className="flex flex-wrap items-center justify-between gap-3 px-3 py-2.5 rounded"
+                className="flex flex-wrap items-center justify-between gap-3 px-3 py-2.5 rounded-lg"
                 style={{
                   backgroundColor: 'var(--bg-input)',
                   border: '1px solid var(--border-subtle)',
@@ -974,7 +973,7 @@ export function PreferencesPage({
                     type="button"
                     onClick={() => void handlePickBackgroundImage()}
                     disabled={importBgMutation.isPending}
-                    className="btn-interactive px-2.5 py-1 rounded text-[11.5px] font-medium cursor-pointer disabled:opacity-50"
+                    className="btn-interactive px-2.5 py-1 rounded-lg text-[11.5px] font-medium cursor-pointer disabled:opacity-50"
                     style={{
                       backgroundColor: 'var(--bg-elevated)',
                       border: '1px solid var(--border-subtle)',
@@ -993,7 +992,7 @@ export function PreferencesPage({
                       type="button"
                       onClick={() => clearBgMutation.mutate()}
                       disabled={clearBgMutation.isPending}
-                      className="btn-interactive inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11.5px] cursor-pointer disabled:opacity-50"
+                      className="btn-interactive inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11.5px] cursor-pointer disabled:opacity-50"
                       style={{
                         backgroundColor: 'var(--bg-elevated)',
                         border: '1px solid var(--border-subtle)',
@@ -1142,7 +1141,7 @@ export function PreferencesPage({
                     type="button"
                     aria-pressed={enabled}
                     onClick={() => handleFloatingElementToggle(item.key)}
-                    className="btn-interactive px-2 py-0.5 rounded text-[11px] cursor-pointer"
+                    className="btn-interactive px-2 py-0.5 rounded-lg text-[11px] cursor-pointer"
                     style={{
                       backgroundColor: enabled ? 'var(--bg-hover)' : 'var(--bg-input)',
                       border: enabled
@@ -1214,7 +1213,7 @@ export function PreferencesPage({
               aria-label="显示币种"
               value={currencyDraft}
               onChange={(e) => setCurrencyDraft(e.target.value as CurrencyCode)}
-              className="px-2.5 py-1 text-[12px] rounded outline-none cursor-pointer"
+              className="px-2.5 py-1 text-[12px] rounded-lg outline-none cursor-pointer"
               style={{
                 backgroundColor: 'var(--bg-input)',
                 border: '1px solid var(--border-subtle)',
@@ -1225,18 +1224,12 @@ export function PreferencesPage({
               <option value="CNY">CNY（人民币）</option>
             </select>
 
-            <div
-              className="inline-flex items-center p-0.5 rounded"
-              style={{
-                backgroundColor: 'var(--bg-input)',
-                border: '1px solid var(--border-subtle)',
-              }}
-            >
+            <div className="seg-group">
               <button
                 type="button"
                 data-active={exchangeRateAuto ? 'true' : undefined}
                 onClick={() => handleExchangeRateAutoToggle(true)}
-                className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
+                className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer"
                 style={{
                   color: exchangeRateAuto ? 'var(--text-primary)' : 'var(--text-secondary)',
                   fontWeight: exchangeRateAuto ? 500 : 400,
@@ -1248,7 +1241,7 @@ export function PreferencesPage({
                 type="button"
                 data-active={!exchangeRateAuto ? 'true' : undefined}
                 onClick={() => handleExchangeRateAutoToggle(false)}
-                className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
+                className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer"
                 style={{
                   color: !exchangeRateAuto ? 'var(--text-primary)' : 'var(--text-secondary)',
                   fontWeight: !exchangeRateAuto ? 500 : 400,
@@ -1266,7 +1259,7 @@ export function PreferencesPage({
                 readOnly={exchangeRateAuto}
                 value={rateDraft}
                 onChange={(e) => setRateDraft(e.target.value)}
-                className="w-24 px-2 py-1 text-[12px] rounded outline-none tabular-nums"
+                className="w-24 px-2 py-1 text-[12px] rounded-lg outline-none tabular-nums"
                 style={{
                   backgroundColor: 'var(--bg-input)',
                   border: '1px solid var(--border-subtle)',
@@ -1280,7 +1273,7 @@ export function PreferencesPage({
               type="button"
               disabled={syncNowMutation.isPending}
               onClick={() => syncNowMutation.mutate()}
-              className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 text-[11.5px] rounded cursor-pointer disabled:opacity-50"
+              className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 text-[11.5px] rounded-lg cursor-pointer disabled:opacity-50"
               style={{
                 backgroundColor: 'var(--bg-elevated)',
                 border: '1px solid var(--border-subtle)',
@@ -1290,7 +1283,7 @@ export function PreferencesPage({
               <RefreshCw
                 className={`w-3 h-3 ${syncNowMutation.isPending ? 'animate-spin' : ''}`}
               />
-              <span>{syncNowMutation.isPending ? '刷新中…' : '刷新汇率与价格'}</span>
+              <span>{syncNowMutation.isPending ? '刷新中…' : '刷新目录与汇率'}</span>
             </button>
           </div>
         </div>
@@ -1300,7 +1293,7 @@ export function PreferencesPage({
           style={{ borderBottom: '1px solid var(--border-subtle)' }}
         >
           <div className="col-span-4">
-            <div className="text-[13px] font-medium">模型价格同步</div>
+            <div className="text-[13px] font-medium">模型与套餐目录同步</div>
           </div>
           <div className="col-span-8 flex flex-wrap items-center gap-4 text-[11.5px]">
             <label className="flex items-center gap-2 cursor-pointer">
@@ -1310,7 +1303,7 @@ export function PreferencesPage({
                 onChange={(e) => handleAutoSyncPricingToggle(e.target.checked)}
               />
               <span style={{ color: 'var(--text-secondary)' }}>
-                自动联网更新开源模型价格目录与汇率
+                自动联网更新模型价格、汇率与 AI 订阅目录
               </span>
             </label>
             <span className="tabular-nums" style={{ color: 'var(--text-muted)' }}>
@@ -1321,6 +1314,10 @@ export function PreferencesPage({
               {activePrefs?.last_rate_sync_at_ms
                 ? `汇率同步于 ${formatRelativeTime(activePrefs.last_rate_sync_at_ms)}`
                 : '汇率待首次同步'}
+              {' · '}
+              {activePrefs?.last_subscription_sync_at_ms
+                ? `订阅目录同步于 ${formatRelativeTime(activePrefs.last_subscription_sync_at_ms)}`
+                : '订阅目录使用内置基线'}
             </span>
           </div>
         </div>
@@ -1361,7 +1358,7 @@ export function PreferencesPage({
                   type="button"
                   disabled={updater.status === 'downloading' || updater.status === 'installing'}
                   onClick={() => void downloadAndInstallUpdate()}
-                  className="btn-primary inline-flex items-center gap-1.5 px-3 py-1 rounded text-[11.5px] font-medium cursor-pointer disabled:opacity-50"
+                  className="btn-primary inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-[11.5px] font-medium cursor-pointer disabled:opacity-50"
                   style={{
                     backgroundColor: 'var(--accent-emerald)',
                     color: '#ffffff',
@@ -1385,7 +1382,7 @@ export function PreferencesPage({
                     updater.status === 'installing'
                   }
                   onClick={() => void checkForUpdates(true)}
-                  className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 text-[11.5px] rounded cursor-pointer disabled:opacity-50"
+                  className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 text-[11.5px] rounded-lg cursor-pointer disabled:opacity-50"
                   style={{
                     backgroundColor: 'var(--bg-elevated)',
                     border: '1px solid var(--border-subtle)',
@@ -1438,7 +1435,7 @@ export function PreferencesPage({
                 type="text"
                 value={deviceDisplayName}
                 onChange={(e) => setDeviceDisplayName(e.target.value)}
-                className="w-56 px-2.5 py-1 text-[12px] rounded outline-none"
+                className="w-56 px-2.5 py-1 text-[12px] rounded-lg outline-none"
                 style={{
                   backgroundColor: 'var(--bg-input)',
                   border: '1px solid var(--border-subtle)',
@@ -1478,7 +1475,7 @@ export function PreferencesPage({
 
           <div className="flex flex-wrap items-center gap-2 text-[11px] tabular-nums">
             <span
-              className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded"
+              className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md"
               style={{
                 backgroundColor: 'var(--bg-elevated)',
                 border: '1px solid var(--border-subtle)',
@@ -1499,7 +1496,7 @@ export function PreferencesPage({
               type="button"
               onClick={() => triggerCloudSyncMutation.mutate()}
               disabled={triggerCloudSyncMutation.isPending}
-              className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-[12px] font-medium cursor-pointer disabled:opacity-50"
+              className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-medium cursor-pointer disabled:opacity-50"
               style={{
                 backgroundColor: 'var(--bg-elevated)',
                 color: 'var(--text-primary)',
@@ -1550,7 +1547,7 @@ export function PreferencesPage({
                 placeholder="https://tokentracker-sync.your-subdomain.workers.dev"
                 value={syncWorkerUrlDraft}
                 onChange={(e) => setSyncWorkerUrlDraft(e.target.value)}
-                className="flex-1 min-w-[260px] px-2.5 py-1.5 text-[12px] font-mono rounded outline-none"
+                className="flex-1 min-w-[260px] px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
                 style={{
                   backgroundColor: 'var(--bg-input)',
                   border: '1px solid var(--border-subtle)',
@@ -1561,7 +1558,7 @@ export function PreferencesPage({
                 type="button"
                 onClick={() => saveSyncConfigMutation.mutate()}
                 disabled={saveSyncConfigMutation.isPending}
-                className="btn-interactive inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium cursor-pointer disabled:opacity-50"
+                className="btn-interactive inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium cursor-pointer disabled:opacity-50"
                 style={{
                   backgroundColor: 'var(--bg-elevated)',
                   color: 'var(--text-primary)',
@@ -1611,7 +1608,7 @@ export function PreferencesPage({
                   placeholder={syncStatus?.has_bearer_token ? '已保存在系统凭据库，输入新值可覆盖' : '输入 Cloudflare SYNC_TOKEN'}
                   value={syncBearerTokenInput}
                   onChange={(e) => setSyncBearerTokenInput(e.target.value)}
-                  className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded outline-none"
+                  className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
                   style={{
                     backgroundColor: 'var(--bg-input)',
                     border: '1px solid var(--border-subtle)',
@@ -1639,7 +1636,7 @@ export function PreferencesPage({
                   placeholder={syncStatus?.has_e2ee_passphrase ? '已保存在系统凭据库，输入新值可覆盖' : '开启 E2EE 时填写共享同步口令'}
                   value={syncPassphraseInput}
                   onChange={(e) => setSyncPassphraseInput(e.target.value)}
-                  className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded outline-none"
+                  className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
                   style={{
                     backgroundColor: 'var(--bg-input)',
                     border: '1px solid var(--border-subtle)',
@@ -1654,7 +1651,7 @@ export function PreferencesPage({
                 type="button"
                 onClick={() => saveSyncCredsMutation.mutate()}
                 disabled={saveSyncCredsMutation.isPending}
-                className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-[11.5px] font-medium cursor-pointer disabled:opacity-50"
+                className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11.5px] font-medium cursor-pointer disabled:opacity-50"
                 style={{
                   backgroundColor: 'var(--bg-elevated)',
                   border: '1px solid var(--border-strong)',
@@ -1668,7 +1665,7 @@ export function PreferencesPage({
                 type="button"
                 onClick={() => clearSyncCredsMutation.mutate()}
                 disabled={clearSyncCredsMutation.isPending}
-                className="btn-interactive px-2.5 py-1 rounded text-[11.5px] cursor-pointer disabled:opacity-50"
+                className="btn-danger px-2.5 py-1 rounded-lg text-[11.5px] cursor-pointer disabled:opacity-50"
                 style={{
                   backgroundColor: 'var(--bg-elevated)',
                   border: '1px solid var(--border-subtle)',
@@ -1705,7 +1702,7 @@ export function PreferencesPage({
                 type="button"
                 onClick={() => previewSyncMutation.mutate()}
                 disabled={previewSyncMutation.isPending}
-                className="btn-interactive px-3 py-1.5 rounded text-[12px] cursor-pointer disabled:opacity-50"
+                className="btn-interactive px-3 py-1.5 rounded-lg text-[12px] cursor-pointer disabled:opacity-50"
                 style={{
                   backgroundColor: 'var(--bg-elevated)',
                   color: 'var(--text-primary)',
@@ -1718,7 +1715,7 @@ export function PreferencesPage({
 
             {syncStatus?.last_sync_error && (
               <div
-                className="px-3 py-2 rounded text-[11.5px]"
+                className="px-3 py-2 rounded-lg text-[11.5px]"
                 style={{
                   backgroundColor: 'rgba(244, 63, 94, 0.08)',
                   border: '1px solid rgba(244, 63, 94, 0.35)',
@@ -1733,7 +1730,7 @@ export function PreferencesPage({
 
         {syncEnvelope && envelopeJson && (
           <div
-            className="p-3 rounded space-y-2"
+            className="p-3 rounded-lg space-y-2"
             style={{
               backgroundColor: 'var(--bg-elevated)',
               border: '1px solid var(--border-subtle)',

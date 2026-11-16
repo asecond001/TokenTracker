@@ -125,6 +125,7 @@ function makePreferences(overrides: Partial<AppPreferences> = {}): AppPreference
     floating_window_enabled: false,
     last_rate_sync_at_ms: null,
     last_pricing_sync_at_ms: null,
+    last_subscription_sync_at_ms: null,
     updated_at_ms: 1_770_000_000_000,
     ...overrides,
   };
@@ -463,6 +464,10 @@ function makePlanStatus(overrides: Partial<SubscriptionPlanStatus> = {}): Subscr
         alert_level: 'normal',
       },
     ],
+    today_cost_micro_usd: 4_000_000,
+    week_cost_micro_usd: 22_000_000,
+    month_cost_micro_usd: 85_000_000,
+    month_tokens: 1_200_000,
     ...overrides,
   };
 }
@@ -1364,9 +1369,12 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
       pricing_updated: true,
       synced_models_count: 42,
       recomputed_events_count: 15,
+      subscriptions_updated: true,
+      synced_plans_count: 40,
       synced_at_ms: Date.now(),
       rate_source: 'frankfurter',
       pricing_source: 'models.dev',
+      subscription_source: 'pages',
       warning: null,
     };
 
@@ -1416,7 +1424,7 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
     expect((screen.getByLabelText('USD 对 CNY 汇率') as HTMLInputElement).readOnly).toBe(false);
 
     fireEvent.click(
-      screen.getByLabelText(/自动联网更新开源模型价格目录与汇率/)
+      screen.getByLabelText(/自动联网更新模型价格、汇率与 AI 订阅目录/)
     );
     await waitFor(() => {
       expect(updatePrefsSpy).toHaveBeenCalledWith(
@@ -1424,7 +1432,7 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
       );
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '刷新汇率与价格' }));
+    fireEvent.click(screen.getByRole('button', { name: '刷新目录与汇率' }));
     await waitFor(() => {
       expect(syncSpy).toHaveBeenLastCalledWith(true);
     });
@@ -1900,6 +1908,10 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
           alert_level: 'normal',
         },
       ],
+      today_cost_micro_usd: 1_200_000,
+      week_cost_micro_usd: 5_000_000,
+      month_cost_micro_usd: 12_000_000,
+      month_tokens: 450_000,
     };
 
     const liveTemplates: SubscriptionPlanTemplate[] = makeTemplates().map((tpl) =>
@@ -1951,8 +1963,7 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
 
     const feeInput = screen.getByLabelText(/订阅月费/) as HTMLInputElement;
     expect(feeInput.value).toBe('100');
-    const limitInput = screen.getByLabelText(/估算等效额度/) as HTMLInputElement;
-    expect(limitInput.value).toBe('75');
+    expect(screen.queryByLabelText(/估算等效额度/)).not.toBeInTheDocument();
 
     act(() => {
       useWorkspaceStore.getState().setCurrency('CNY');
@@ -1960,7 +1971,6 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
 
     await waitFor(() => {
       expect((screen.getByLabelText(/订阅月费/) as HTMLInputElement).value).toBe('725');
-      expect((screen.getByLabelText(/估算等效额度/) as HTMLInputElement).value).toBe('543.75');
     });
   });
 
@@ -2245,6 +2255,10 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
             alert_level: 'normal',
           },
         ],
+        today_cost_micro_usd: 1_000_000,
+        week_cost_micro_usd: 4_000_000,
+        month_cost_micro_usd: 9_000_000,
+        month_tokens: 200_000,
       },
       {
         plan: {
@@ -2289,6 +2303,10 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
             alert_level: 'normal',
           },
         ],
+        today_cost_micro_usd: 500_000,
+        week_cost_micro_usd: 1_500_000,
+        month_cost_micro_usd: 3_000_000,
+        month_tokens: 80_000,
       },
     ];
 
@@ -2300,7 +2318,7 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
 
     expect(await screen.findByText('Kimi Code Vivace')).toBeInTheDocument();
     expect(screen.getByText('官方同步档位')).toBeInTheDocument();
-    expect(screen.getByText('按窗口配额监测')).toBeInTheDocument();
+    expect(screen.getByText('官方配额窗口监测')).toBeInTheDocument();
     expect(screen.queryByText(/未设月费/)).not.toBeInTheDocument();
   });
 
@@ -2447,6 +2465,7 @@ describe('v0.2.5 Pay-As-You-Go, Credits & Floating Toggle', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '添加按量计费' }));
     expect(await screen.findByText('添加按量计费账户')).toBeInTheDocument();
+    expect(document.querySelector('body > .drawer-backdrop-enter')).not.toBeNull();
 
     const keyInput = screen.getByLabelText(/官方 API Key/) as HTMLInputElement;
     fireEvent.change(keyInput, { target: { value: 'sk-deepseek-test-123' } });
@@ -2487,5 +2506,168 @@ describe('v0.2.5 Pay-As-You-Go, Credits & Floating Toggle', () => {
     await waitFor(() => {
       expect(toggleSpy).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('v0.2.6 AI Subscription Catalog & Factual Subscriptions (No Local Estimated Quotas)', () => {
+  beforeEach(() => {
+    resetWorkspaceState();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it('renders factual spend & ROI without fake progress bars for non-API subscriptions and filters catalog templates', async () => {
+    const now = Date.now();
+    const ultraPlan: SubscriptionPlanStatus = {
+      plan: {
+        plan_id: 'sub_antigravity_ultra',
+        provider_id: 'antigravity',
+        plan_name: 'Google AI Ultra',
+        enabled: true,
+        monthly_fee_micro_usd: 200_000_000,
+        is_user_configured: true,
+        auto_source: null,
+        updated_at_ms: now,
+        windows: [],
+      },
+      windows: [],
+      today_cost_micro_usd: 15_000_000,
+      week_cost_micro_usd: 82_000_000,
+      month_cost_micro_usd: 240_000_000,
+      month_tokens: 4_800_000,
+    };
+
+    const catalogTemplates: SubscriptionPlanTemplate[] = [
+      ...makeTemplates(),
+      {
+        template_id: 'cursor_pro',
+        provider_id: 'cursor',
+        plan_name: 'Cursor Pro',
+        monthly_fee_micro_usd: 20_000_000,
+        description: 'Cursor Pro 月度订阅（USD 20/月）',
+        windows: [],
+        live_windows: [],
+      },
+    ];
+
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(
+      makePreferences({ last_subscription_sync_at_ms: now - 30_000 })
+    );
+    vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue([ultraPlan]);
+    vi.spyOn(ipc, 'getObservedRateLimits').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getSubscriptionTemplates').mockResolvedValue(catalogTemplates);
+    vi.spyOn(ipc, 'getRemoteSubscriptionSnapshots').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getPaygAccounts').mockResolvedValue([]);
+    vi.spyOn(ipc, 'getProviderConfigs').mockResolvedValue([]);
+    const syncSpy = vi.spyOn(ipc, 'syncPricingAndRate').mockResolvedValue({
+      rate_updated: false,
+      usd_to_cny_rate: '7.25',
+      pricing_updated: false,
+      synced_models_count: 100,
+      recomputed_events_count: 0,
+      subscriptions_updated: true,
+      synced_plans_count: 40,
+      synced_at_ms: now,
+      rate_source: null,
+      pricing_source: null,
+      subscription_source: 'pages',
+      warning: null,
+    });
+
+    renderWithQuery(<SubscriptionsPage />);
+
+    expect(await screen.findByText('Google AI Ultra')).toBeInTheDocument();
+    expect(screen.getByText('套餐目录 · 3 款')).toBeInTheDocument();
+    expect(screen.getByText('仅统计真实消耗 · 官方未公开配额接口')).toBeInTheDocument();
+    expect(screen.getByText('今日等效消耗')).toBeInTheDocument();
+    expect(screen.getByText('$15.00')).toBeInTheDocument();
+    expect(screen.getByText('$82.00')).toBeInTheDocument();
+    expect(screen.getByText('$240.00')).toBeInTheDocument();
+    expect(screen.getByText('120.0%')).toBeInTheDocument();
+    expect(screen.getByText('1.20x 月费')).toBeInTheDocument();
+    // Strictly zero estimated quota progress bars when no official window exists
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '同步套餐目录' }));
+    await waitFor(() => {
+      expect(syncSpy).toHaveBeenCalledWith(true);
+    });
+    expect(await screen.findByText(/套餐目录已更新（共 40 款套餐/)).toBeInTheDocument();
+
+    // Open drawer and filter AI Subscription Catalog templates by search query
+    fireEvent.click(screen.getByRole('button', { name: '添加我的订阅' }));
+    const searchInput = await screen.findByLabelText('搜索套餐模板');
+    expect(document.querySelector('body > .drawer-backdrop-enter')).not.toBeNull();
+    fireEvent.change(searchInput, { target: { value: 'Cursor' } });
+    expect(await screen.findByRole('button', { name: /Cursor Pro/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Claude Max 5x/ })).not.toBeInTheDocument();
+  });
+
+  it('hides non-API plans without official windows from TrayPopupPage quota section', async () => {
+    const now = Date.now();
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(makePreferences());
+    vi.spyOn(ipc, 'getTraySummary').mockResolvedValue(
+      makeTraySummary({
+        subscriptions: [
+          {
+            plan: {
+              plan_id: 'claude_max_5x',
+              provider_id: 'claude_code',
+              plan_name: 'Claude Max 5x',
+              enabled: true,
+              monthly_fee_micro_usd: 100_000_000,
+              windows: [],
+              is_user_configured: true,
+              updated_at_ms: now,
+            },
+            windows: [],
+            today_cost_micro_usd: 5_000_000,
+            week_cost_micro_usd: 15_000_000,
+            month_cost_micro_usd: 45_000_000,
+            month_tokens: 500_000,
+          },
+          makePlanStatus({
+            plan: {
+              plan_id: 'codex_plus',
+              provider_id: 'codex',
+              plan_name: 'ChatGPT Plus / Codex',
+              enabled: true,
+              monthly_fee_micro_usd: 20_000_000,
+              windows: [],
+              is_user_configured: true,
+              updated_at_ms: now,
+            },
+            windows: [
+              {
+                window_id: '5h',
+                label: '5h 官方限额',
+                duration_hours: 5,
+                rolling: true,
+                unit: 'micro_usd',
+                used_value: 42,
+                limit_value: 100,
+                used_percent: 42.0,
+                warning_percent: 80,
+                critical_percent: 95,
+                burn_rate_per_hour: 10,
+                projected_exhaustion_hours: null,
+                resets_at_ms: now + 3600_000,
+                resets_in_seconds: 3600,
+                source: 'official_log_snapshot',
+                alert_level: 'normal',
+              },
+            ],
+          }),
+        ],
+      })
+    );
+
+    renderWithQuery(<TrayPopupPage />);
+
+    expect(await screen.findByText('Codex · 5h 官方限额')).toBeInTheDocument();
+    expect(screen.queryByText('暂无官方实测订阅配额窗口')).not.toBeInTheDocument();
   });
 });

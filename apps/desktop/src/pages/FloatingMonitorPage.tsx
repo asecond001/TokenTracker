@@ -326,7 +326,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
             aria-label="展开悬浮窗"
             title="展开悬浮窗"
             onClick={handleToggleCompact}
-            className="btn-interactive p-1 rounded cursor-pointer"
+            className="btn-interactive p-1 rounded-lg cursor-pointer"
             style={{ color: 'var(--text-secondary)' }}
           >
             <Maximize2 className="w-3 h-3" />
@@ -336,7 +336,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
             aria-label="关闭悬浮窗"
             title="关闭悬浮窗"
             onClick={handleClose}
-            className="btn-interactive p-1 rounded cursor-pointer"
+            className="btn-interactive p-1 rounded-lg cursor-pointer"
             style={{ color: 'var(--text-secondary)' }}
           >
             <X className="w-3 h-3" />
@@ -399,7 +399,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
             title="自定义悬浮窗显示元素"
             data-active={customizing ? 'true' : undefined}
             onClick={() => setCustomizing((prev) => !prev)}
-            className="btn-interactive p-1 rounded cursor-pointer"
+            className="btn-interactive p-1 rounded-lg cursor-pointer"
             style={{
               color: customizing ? 'var(--accent-primary)' : 'var(--text-secondary)',
             }}
@@ -411,7 +411,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
             aria-label="切换精简胶囊模式"
             title="切换精简胶囊模式"
             onClick={handleToggleCompact}
-            className="btn-interactive p-1 rounded cursor-pointer"
+            className="btn-interactive p-1 rounded-lg cursor-pointer"
             style={{ color: 'var(--text-secondary)' }}
           >
             <Minimize2 className="w-3 h-3" />
@@ -421,7 +421,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
             aria-label="打开工作台"
             title="打开主工作台"
             onClick={() => void ipc.openMainWorkspace('overview')}
-            className="btn-interactive p-1 rounded cursor-pointer"
+            className="btn-interactive p-1 rounded-lg cursor-pointer"
             style={{ color: 'var(--text-secondary)' }}
           >
             <ExternalLink className="w-3 h-3" />
@@ -431,7 +431,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
             aria-label="关闭悬浮窗"
             title="关闭悬浮窗"
             onClick={handleClose}
-            className="btn-interactive p-1 rounded cursor-pointer"
+            className="btn-interactive p-1 rounded-lg cursor-pointer"
             style={{ color: 'var(--text-secondary)' }}
           >
             <X className="w-3 h-3" />
@@ -453,7 +453,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
                     type="button"
                     data-active={active ? 'true' : undefined}
                     onClick={() => handleToggleElement(item.key)}
-                    className="seg-pill px-2 py-0.5 rounded text-[10.5px] cursor-pointer"
+                    className="seg-pill px-2 py-0.5 rounded-lg text-[10.5px] cursor-pointer"
                     style={{
                       border: active
                         ? '1px solid var(--accent-primary)'
@@ -504,7 +504,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
                     {recentDeltaTokens > 0 && (
                       <span
                         key={burstKey}
-                        className="hud-burst-badge text-[10.5px] font-medium px-1 py-0.5 rounded-sm tabular-nums"
+                        className="hud-burst-badge text-[10.5px] font-medium px-1 py-0.5 rounded-md tabular-nums"
                         style={{
                           backgroundColor: 'rgba(16, 185, 129, 0.14)',
                           color: 'var(--accent-emerald)',
@@ -569,7 +569,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
                     key={`${sess.provider_id}-${sess.session_key}`}
                     type="button"
                     onClick={() => void ipc.openMainWorkspace('overview', sess.provider_id)}
-                    className="row-interactive w-full text-left px-1 py-0.5 rounded flex items-center justify-between gap-2 cursor-pointer"
+                    className="row-interactive w-full text-left px-1 py-0.5 rounded-lg flex items-center justify-between gap-2 cursor-pointer"
                   >
                     <div className="min-w-0 flex-1">
                       <div className="text-[11px] font-medium truncate">
@@ -629,7 +629,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
                 ))
               ) : (
                 <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
-                  暂无启用订阅配额
+                  暂无官方实测配额窗口
                 </div>
               )}
             </div>

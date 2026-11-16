@@ -151,7 +151,7 @@ export function LiveSpeedBadge({
         <div
           role="tooltip"
           data-testid="live-speed-tooltip"
-          className={`z-50 min-w-[205px] max-w-[270px] px-2.5 py-2 rounded text-left text-[11px] space-y-1.5 pointer-events-none select-none ${
+          className={`z-50 min-w-[205px] max-w-[270px] px-2.5 py-2 rounded-lg text-left text-[11px] space-y-1.5 pointer-events-none select-none ${
             placement === 'top' ? 'bottom-full mb-1.5' : 'top-full mt-1.5'
           } ${align === 'right' ? 'right-0' : 'left-0'}`}
           style={{

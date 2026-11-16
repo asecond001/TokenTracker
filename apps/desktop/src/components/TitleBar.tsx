@@ -271,7 +271,7 @@ export function TitleBar({
             aria-label="设备筛选"
             value={deviceFilter}
             onChange={(e) => setDeviceFilter(e.target.value)}
-            className="px-2 py-1 text-[11.5px] rounded outline-none cursor-pointer"
+            className="px-2 py-1 text-[11.5px] rounded-lg outline-none cursor-pointer"
             style={{
               backgroundColor: controlBgToken,
               border: `1px solid ${borderToken}`,
@@ -292,7 +292,7 @@ export function TitleBar({
           aria-label="模型提供商筛选"
           value={providerFilter}
           onChange={(e) => setProviderFilter(e.target.value)}
-          className="px-2 py-1 text-[11.5px] rounded outline-none cursor-pointer"
+          className="px-2 py-1 text-[11.5px] rounded-lg outline-none cursor-pointer"
           style={{
             backgroundColor: controlBgToken,
             border: `1px solid ${borderToken}`,
@@ -308,10 +308,10 @@ export function TitleBar({
 
         {/* Currency Switcher */}
         <div
-          className="flex items-center p-0.5 rounded-full"
+          className="seg-group"
           style={{
             backgroundColor: controlBgToken,
-            border: `1px solid ${borderToken}`,
+            borderColor: borderToken,
             boxShadow: 'var(--border-specular)',
           }}
         >
@@ -343,7 +343,7 @@ export function TitleBar({
               title={`发现新版本 v${updater.availableUpdate.version}，点击立即更新`}
               disabled={updater.status === 'downloading' || updater.status === 'installing'}
               onClick={() => void downloadAndInstallUpdate()}
-              className="btn-interactive inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium tabular-nums cursor-pointer disabled:opacity-60"
+              className="btn-interactive inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-medium tabular-nums cursor-pointer disabled:opacity-60"
               style={{
                 backgroundColor: 'rgba(16, 185, 129, 0.14)',
                 border: '1px solid var(--accent-emerald)',
@@ -396,7 +396,7 @@ export function TitleBar({
             aria-label="切换主题"
             title={`切换主题（当前: ${THEME_LABELS[theme]}）`}
             onClick={cycleTheme}
-            className="btn-interactive p-1 rounded cursor-pointer"
+            className="btn-interactive p-1 rounded-lg cursor-pointer"
             style={{ color: 'var(--text-secondary)' }}
           >
             {theme === 'light' ? (
@@ -420,7 +420,7 @@ export function TitleBar({
             type="button"
             aria-label="最小化"
             onClick={handleMinimize}
-            className="btn-interactive inline-flex items-center justify-center w-7 h-7 rounded cursor-pointer"
+            className="btn-interactive inline-flex items-center justify-center w-7 h-7 rounded-lg cursor-pointer"
             style={{ color: 'var(--text-secondary)' }}
           >
             <Minus className="w-3.5 h-3.5" />
@@ -429,7 +429,7 @@ export function TitleBar({
             type="button"
             aria-label="最大化或还原"
             onClick={handleToggleMaximize}
-            className="btn-interactive inline-flex items-center justify-center w-7 h-7 rounded cursor-pointer"
+            className="btn-interactive inline-flex items-center justify-center w-7 h-7 rounded-lg cursor-pointer"
             style={{ color: 'var(--text-secondary)' }}
           >
             <Square className="w-3 h-3" />
@@ -438,7 +438,7 @@ export function TitleBar({
             type="button"
             aria-label="关闭窗口"
             onClick={handleClose}
-            className="inline-flex items-center justify-center w-7 h-7 rounded text-[var(--text-secondary)] hover:bg-rose-500/85 hover:text-white transition-colors cursor-pointer"
+            className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-[var(--text-secondary)] hover:bg-rose-500/85 hover:text-white transition-colors cursor-pointer"
           >
             <X className="w-3.5 h-3.5" />
           </button>

@@ -98,6 +98,12 @@ impl ProviderLogParser for ClaudeCodeParser {
             .get("isSidechain")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        if is_sidechain
+            && (ctx.file_path.contains("/subagents/") || ctx.file_path.contains("\\subagents\\"))
+            && ctx.session_id.to_ascii_lowercase().starts_with("agent-")
+        {
+            ctx.mark_background_session("Claude Subagent", ts_ms);
+        }
 
         if let Some(explicit_title) = val
             .get("customTitle")

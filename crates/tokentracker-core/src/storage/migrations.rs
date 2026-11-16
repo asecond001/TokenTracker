@@ -9,7 +9,7 @@ use crate::error::CoreResult;
 use crate::pricing::default_pricing_catalog;
 use crate::storage::repository::{rebuild_rollup_from_events, DAY_MS, HOUR_MS};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 9;
+pub const CURRENT_SCHEMA_VERSION: i64 = 10;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -220,6 +220,10 @@ pub fn run_migrations(conn: &mut Connection) -> CoreResult<()> {
 
     if current_version < 9 {
         migrate_v8_to_v9(conn, now_ms)?;
+    }
+
+    if current_version < 10 {
+        migrate_v9_to_v10(conn, now_ms)?;
     }
 
     seed_defaults(conn, now_ms)?;
@@ -830,6 +834,86 @@ fn migrate_v8_to_v9(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     tx.execute(
         "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
         params![9i64, now_ms],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v9_to_v10(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS subscription_catalog (
+            template_id TEXT PRIMARY KEY,
+            provider_id TEXT NOT NULL,
+            plan_name TEXT NOT NULL,
+            monthly_fee_micro_usd INTEGER NOT NULL,
+            windows_json TEXT NOT NULL,
+            description TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            updated_at_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_subscription_catalog_order
+            ON subscription_catalog (sort_order ASC, template_id ASC);
+        "#,
+    )?;
+
+    add_column_if_missing(
+        &tx,
+        "app_preferences",
+        "last_subscription_sync_at_ms",
+        "INTEGER",
+    )?;
+    add_column_if_missing(
+        &tx,
+        "app_preferences",
+        "subscription_catalog_hash",
+        "TEXT",
+    )?;
+
+    // Remove bogus `gpt-5-codex` rows fabricated by previous hardcoded fallback and reset Codex
+    // ingestion cursors so startup scan cleanly re-ingests real turn_context models.
+    tx.execute_batch(
+        r#"
+        DELETE FROM usage_events
+        WHERE provider_id = 'codex' AND model_id = 'gpt-5-codex';
+
+        DELETE FROM ingestion_cursors
+        WHERE provider_id = 'codex';
+        "#,
+    )?;
+
+    crate::storage::repository::rebuild_local_rollups_conn(&tx, now_ms)?;
+
+    // Mark historical Codex Guardian / auto-review titles as background sessions so they do not
+    // appear under Active Sessions.
+    tx.execute(
+        r#"
+        UPDATE session_titles
+        SET source = 'background',
+            updated_at_ms = ?1
+        WHERE provider_id = 'codex'
+          AND LOWER(TRIM(title)) IN ('guardian review', 'codex-auto-review', 'auto-review', 'auto review')
+        "#,
+        params![now_ms],
+    )?;
+
+    // Abolish unverified local estimated windows on auto-discovered Antigravity plans.
+    tx.execute(
+        r#"
+        UPDATE subscription_plans
+        SET windows_json = '[]',
+            updated_at_ms = ?1
+        WHERE plan_id = 'auto_antigravity'
+          AND user_customized = 0
+        "#,
+        params![now_ms],
+    )?;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![10i64, now_ms],
     )?;
     tx.commit()?;
     Ok(())

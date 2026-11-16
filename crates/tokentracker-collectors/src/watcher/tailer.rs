@@ -119,7 +119,7 @@ pub fn tail_file_incremental(
     let mut raw_buf: Vec<u8> = Vec::with_capacity(4096);
 
     if start_offset > 0 {
-        // 1. Lightweight header pass to restore session_id, project_label, model, and initial session title.
+        // 1. Lightweight header pass to restore session_id, project_label, initial model, and session title.
         file.seek(SeekFrom::Start(0))?;
         let header_limit = start_offset.min(HEADER_SCAN_MAX_BYTES);
         let mut header_pos = 0u64;
@@ -137,7 +137,7 @@ pub fn tail_file_incremental(
                 let line_str = String::from_utf8_lossy(&raw_buf);
                 let _ = parser.parse_line(&line_str, &mut ctx);
                 if !ctx.session_id.trim().is_empty()
-                    && ctx.session_title.is_some()
+                    && (ctx.session_title.is_some() || ctx.is_background_session)
                     && ctx.current_model.is_some()
                 {
                     break;
@@ -146,8 +146,32 @@ pub fn tail_file_incremental(
         }
 
         // Prevent trailing warmup slice or mid-file tail lines from capturing a late turn as the
-        // session's opening sentence (explicit renames remain allowed).
+        // session's opening sentence (explicit renames & background markers remain allowed).
         ctx.lock_non_explicit_title = true;
+
+        // 1b. Fast byte pre-filtered scan across any gap [header_pos, warmup_start) so mid-file
+        // model switches or turn_context entries >64 KB before start_offset are never missed.
+        let warmup_start = start_offset.saturating_sub(WARMUP_TAIL_BYTES);
+        if warmup_start > header_pos {
+            file.seek(SeekFrom::Start(header_pos))?;
+            let mut mid_pos = header_pos;
+            let mut mid_reader = BufReader::with_capacity(READ_BUF_CAPACITY, &mut file);
+            while mid_pos < warmup_start {
+                raw_buf.clear();
+                let n = mid_reader.read_until(b'\n', &mut raw_buf)?;
+                if n == 0 || mid_pos + (n as u64) > start_offset || !raw_buf.ends_with(b"\n") {
+                    break;
+                }
+                mid_pos += n as u64;
+                let may_carry_model = raw_buf.windows(12).any(|w| w == b"turn_context")
+                    || raw_buf.windows(7).any(|w| w == b"\"model\"")
+                    || raw_buf.windows(15).any(|w| w == b"Model Selection");
+                if may_carry_model {
+                    let line_str = String::from_utf8_lossy(&raw_buf);
+                    let _ = parser.parse_line(&line_str, &mut ctx);
+                }
+            }
+        }
 
         // Clear transient timing/delta state before the trailing warmup slice right ahead of start_offset.
         ctx.last_prompt_ts_ms = None;
@@ -160,7 +184,6 @@ pub fn tail_file_incremental(
 
         // 2. Trailing warmup slice (up to 64 KB immediately before start_offset) to reconstruct
         // ongoing prompt/turn timestamps, streaming chunk baselines, and cumulative delta checkpoints.
-        let warmup_start = start_offset.saturating_sub(WARMUP_TAIL_BYTES);
         file.seek(SeekFrom::Start(warmup_start))?;
         let mut warmup_pos = warmup_start;
         {

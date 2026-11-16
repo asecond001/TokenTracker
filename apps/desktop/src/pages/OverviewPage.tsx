@@ -95,6 +95,22 @@ export function OverviewPage() {
     refetchInterval: 10_000,
   });
 
+  const { data: subscriptions } = useQuery({
+    queryKey: ['subscriptions'],
+    queryFn: () => ipc.getSubscriptions(),
+    refetchInterval: 15_000,
+  });
+
+  const configuredProviderIds = useMemo(
+    () =>
+      new Set(
+        (subscriptions ?? [])
+          .filter((s) => s.plan.enabled)
+          .map((s) => s.plan.provider_id)
+      ),
+    [subscriptions]
+  );
+
   const costFormatter = useCallback(
     (value: number) => formatCost(value, currency, usdToCnyRate),
     [currency, usdToCnyRate]
@@ -414,7 +430,7 @@ export function OverviewPage() {
             <div className="flex items-center gap-2">
               <span className="text-[12px] font-medium">活跃与近期会话（15m）</span>
               <span
-                className="px-1.5 py-0.5 rounded text-[10.5px] tabular-nums"
+                className="px-1.5 py-0.5 rounded-md text-[10.5px] tabular-nums"
                 style={{
                   backgroundColor: 'rgba(16, 185, 129, 0.12)',
                   color: 'var(--accent-emerald)',
@@ -424,7 +440,7 @@ export function OverviewPage() {
               </span>
               {recentCount > 0 && (
                 <span
-                  className="px-1.5 py-0.5 rounded text-[10.5px] tabular-nums"
+                  className="px-1.5 py-0.5 rounded-md text-[10.5px] tabular-nums"
                   style={{
                     backgroundColor: 'var(--bg-hover)',
                     color: 'var(--text-secondary)',
@@ -481,7 +497,7 @@ export function OverviewPage() {
                             {formatSessionDisplayName(session)}
                           </span>
                           <span
-                            className="text-[10px] px-1.5 py-0.2 rounded shrink-0"
+                            className="text-[10px] px-1.5 py-0.2 rounded-md shrink-0"
                             style={{
                               backgroundColor: isLive
                                 ? 'rgba(16, 185, 129, 0.14)'
@@ -652,7 +668,7 @@ export function OverviewPage() {
           <div className="flex items-center gap-2.5">
             <h2 className="text-[13.5px] font-semibold">Token 构成趋势</h2>
             <span
-              className="px-1.5 py-0.5 text-[10.5px] rounded tabular-nums"
+              className="px-1.5 py-0.5 text-[10.5px] rounded-md tabular-nums"
               style={{
                 backgroundColor: 'var(--bg-sidebar)',
                 border: '1px solid var(--border-hairline)',
@@ -668,10 +684,10 @@ export function OverviewPage() {
 
             {/* Dimension Toggle */}
             <div
-              className="flex items-center p-0.5 rounded-full"
+              className="seg-group"
               style={{
                 backgroundColor: 'var(--surface-glass)',
-                border: '1px solid var(--border-hairline)',
+                borderColor: 'var(--border-hairline)',
                 boxShadow: 'var(--border-specular)',
               }}
             >
@@ -705,10 +721,10 @@ export function OverviewPage() {
 
             {/* Chart Type Toggle */}
             <div
-              className="flex items-center p-0.5 rounded-full"
+              className="seg-group"
               style={{
                 backgroundColor: 'var(--surface-glass)',
-                border: '1px solid var(--border-hairline)',
+                borderColor: 'var(--border-hairline)',
                 boxShadow: 'var(--border-specular)',
               }}
             >
@@ -747,7 +763,7 @@ export function OverviewPage() {
                   onClick={() =>
                     setFocusedSeriesId((prev) => (prev === pill.id ? null : pill.id))
                   }
-                  className="seg-pill inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] cursor-pointer"
+                  className="seg-pill inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[11px] cursor-pointer"
                   style={{
                     color: dimmed ? 'var(--text-muted)' : 'var(--text-secondary)',
                     opacity: dimmed ? 0.55 : 1,
@@ -774,7 +790,7 @@ export function OverviewPage() {
             <button
               type="button"
               onClick={() => setActivePage('sources')}
-              className="btn-interactive px-2.5 py-1 rounded text-[12px] underline cursor-pointer"
+              className="btn-interactive px-2.5 py-1 rounded-lg text-[12px] underline cursor-pointer"
               style={{ color: 'var(--accent-primary)' }}
             >
               前往数据源与合规检查路径或触发扫描
@@ -825,7 +841,7 @@ export function OverviewPage() {
                       <span className="font-medium">{providerDisplayName(row.provider_id)}</span>
                       {!row.enabled && (
                         <span
-                          className="px-1.5 py-0.5 text-[10px] rounded"
+                          className="px-1.5 py-0.5 text-[10px] rounded-md"
                           style={{
                             backgroundColor: 'var(--bg-hover)',
                             color: 'var(--text-muted)',
@@ -836,7 +852,7 @@ export function OverviewPage() {
                       )}
                       {row.observable_steps > 0 && (
                         <span
-                          className="px-1.5 py-0.5 text-[10px] rounded tabular-nums"
+                          className="px-1.5 py-0.5 text-[10px] rounded-md tabular-nums"
                           style={{
                             backgroundColor: 'var(--bg-hover)',
                             color: 'var(--text-secondary)',
@@ -874,6 +890,10 @@ export function OverviewPage() {
                         </div>
                         <InlineProgressBar percent={row.active_window_used_percent} heightPx={4} />
                       </div>
+                    ) : configuredProviderIds.has(row.provider_id) ? (
+                      <span className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+                        无官方限额（按真实消耗统计）
+                      </span>
                     ) : (
                       <span className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
                         未配置订阅规则

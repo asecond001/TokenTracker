@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, Info, Pencil, Plus, RefreshCw, Trash2, Wallet, X } from 'lucide-react';
 import { InlineProgressBar } from '../components/InlineProgressBar';
@@ -18,7 +19,6 @@ import type {
   ObservedRateLimitWindow,
   PaygAccount,
   PaygAccountStatus,
-  QuotaUnit,
   RemoteSubscriptionSnapshot,
   SubscriptionPlan,
   SubscriptionPlanStatus,
@@ -35,18 +35,10 @@ const PROVIDERS: Array<{ id: string; label: string }> = [
   { id: 'deepseek_harness', label: 'DeepSeek Harness' },
   { id: 'qcode', label: 'QCode' },
   { id: 'minimax_code', label: 'MiniMax Code' },
+  { id: 'cursor', label: 'Cursor' },
+  { id: 'github_copilot', label: 'GitHub Copilot' },
+  { id: 'windsurf', label: 'Windsurf' },
 ];
-
-interface WindowFormDraft {
-  window_id: string;
-  label: string;
-  duration_hours: string;
-  rolling: boolean;
-  unit: QuotaUnit;
-  limit_input: string;
-  warning_percent: string;
-  critical_percent: string;
-}
 
 interface PlanFormDraft {
   mode: 'create' | 'edit';
@@ -55,7 +47,7 @@ interface PlanFormDraft {
   plan_name: string;
   enabled: boolean;
   monthly_fee_input: string;
-  windows: WindowFormDraft[];
+  windows: SubscriptionWindowRule[];
 }
 
 interface PaygFormDraft {
@@ -165,51 +157,6 @@ function currencyInputToMicroUsd(
   return Math.max(0, Math.round(usd * 1_000_000));
 }
 
-function buildDefaultWindowRules(): SubscriptionWindowRule[] {
-  return [
-    {
-      window_id: '5h',
-      label: '5h 滚动窗口',
-      duration_hours: 5,
-      rolling: true,
-      unit: 'micro_usd',
-      limit_value: 20_000_000,
-      warning_percent: 80,
-      critical_percent: 95,
-    },
-    {
-      window_id: '7d',
-      label: '7d 周额度',
-      duration_hours: 168,
-      rolling: true,
-      unit: 'micro_usd',
-      limit_value: 100_000_000,
-      warning_percent: 80,
-      critical_percent: 95,
-    },
-  ];
-}
-
-function windowsToDrafts(
-  windows: SubscriptionWindowRule[],
-  currency: CurrencyCode,
-  usdToCnyRate: string
-): WindowFormDraft[] {
-  return windows.map((w) => ({
-    window_id: w.window_id,
-    label: w.label,
-    duration_hours: String(w.duration_hours),
-    rolling: w.rolling,
-    unit: w.unit,
-    limit_input:
-      w.unit === 'micro_usd'
-        ? microUsdToCurrencyInput(w.limit_value, currency, usdToCnyRate)
-        : String(w.limit_value),
-    warning_percent: String(w.warning_percent),
-    critical_percent: String(w.critical_percent),
-  }));
-}
-
 function formatObservedWindowLabel(obs: ObservedRateLimitWindow): string {
   if (obs.window_minutes !== null && Number.isFinite(obs.window_minutes) && obs.window_minutes > 0) {
     if (obs.window_minutes % 1440 === 0) {
@@ -289,6 +236,7 @@ export function SubscriptionsPage() {
   const [draft, setDraft] = useState<PlanFormDraft | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('custom');
   const [templateProviderFilter, setTemplateProviderFilter] = useState<string>('all');
+  const [templateSearch, setTemplateSearch] = useState<string>('');
   const [formError, setFormError] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
@@ -333,19 +281,6 @@ export function SubscriptionsPage() {
           feeMicro !== null
             ? microUsdToCurrencyInput(feeMicro, currency, usdToCnyRate)
             : current.monthly_fee_input,
-        windows: current.windows.map((w) => {
-          if (w.unit !== 'micro_usd') {
-            return w;
-          }
-          const limitMicro = currencyInputToMicroUsd(
-            w.limit_input,
-            prev.currency,
-            prev.usdToCnyRate
-          );
-          return limitMicro !== null
-            ? { ...w, limit_input: microUsdToCurrencyInput(limitMicro, currency, usdToCnyRate) }
-            : w;
-        }),
       };
     });
     setPaygDraft((current) => {
@@ -403,6 +338,12 @@ export function SubscriptionsPage() {
   const { data: providerConfigs = [] } = useQuery({
     queryKey: ['provider_configs'],
     queryFn: () => ipc.getProviderConfigs(),
+    staleTime: 30_000,
+  });
+
+  const { data: prefs } = useQuery({
+    queryKey: ['preferences'],
+    queryFn: () => ipc.getPreferences(),
     staleTime: 30_000,
   });
 
@@ -469,6 +410,7 @@ export function SubscriptionsPage() {
   const invalidateSubscriptionQueries = async () => {
     await queryClient.invalidateQueries({ queryKey: ['subscriptions'] });
     await queryClient.invalidateQueries({ queryKey: ['subscription_templates'] });
+    await queryClient.invalidateQueries({ queryKey: ['preferences'] });
     await queryClient.invalidateQueries({ queryKey: ['payg_accounts'] });
     await queryClient.invalidateQueries({ queryKey: ['provider_configs'] });
     await queryClient.invalidateQueries({ queryKey: ['provider_balances'] });
@@ -478,6 +420,37 @@ export function SubscriptionsPage() {
     await queryClient.invalidateQueries({ queryKey: ['tray-summary'] });
     await queryClient.invalidateQueries({ queryKey: ['observed_rate_limits'] });
   };
+
+  const syncCatalogMutation = useMutation({
+    mutationFn: () => ipc.syncPricingAndRate(true),
+    onSuccess: async (res) => {
+      await invalidateSubscriptionQueries();
+      if (
+        res.warning &&
+        !res.subscriptions_updated &&
+        !res.pricing_updated &&
+        !res.rate_updated
+      ) {
+        setPaygNotice({
+          kind: 'error',
+          text: `套餐目录同步受限（已保留本地基线）：${res.warning}`,
+        });
+      } else {
+        setPaygNotice({
+          kind: 'success',
+          text: res.subscriptions_updated
+            ? `套餐目录已更新（共 ${res.synced_plans_count} 款套餐${res.subscription_source ? ` · ${res.subscription_source}` : ''}）`
+            : `套餐目录已是最新（${res.synced_plans_count || templates.length} 款模板）`,
+        });
+      }
+    },
+    onError: (err: unknown) => {
+      setPaygNotice({
+        kind: 'error',
+        text: err instanceof Error ? err.message : String(err),
+      });
+    },
+  });
 
   const savePlanMutation = useMutation({
     mutationFn: (plan: SubscriptionPlan) => ipc.upsertSubscriptionPlan(plan),
@@ -674,6 +647,7 @@ export function SubscriptionsPage() {
   const openCreateDrawer = (preselectedProviderId?: string) => {
     const providerId = preselectedProviderId ?? 'claude_code';
     setTemplateProviderFilter(preselectedProviderId ?? 'all');
+    setTemplateSearch('');
     setSelectedTemplateId('custom');
     setFormError(null);
     setDraft({
@@ -683,12 +657,13 @@ export function SubscriptionsPage() {
       plan_name: '',
       enabled: true,
       monthly_fee_input: '0',
-      windows: windowsToDrafts(buildDefaultWindowRules(), currency, usdToCnyRate),
+      windows: [],
     });
   };
 
   const openEditDrawer = (plan: SubscriptionPlan) => {
     setTemplateProviderFilter('all');
+    setTemplateSearch('');
     setSelectedTemplateId('custom');
     setFormError(null);
     setDraft({
@@ -702,11 +677,7 @@ export function SubscriptionsPage() {
         currency,
         usdToCnyRate
       ),
-      windows: windowsToDrafts(
-        plan.windows.length > 0 ? plan.windows : buildDefaultWindowRules(),
-        currency,
-        usdToCnyRate
-      ),
+      windows: plan.windows,
     });
   };
 
@@ -727,7 +698,7 @@ export function SubscriptionsPage() {
         currency,
         usdToCnyRate
       ),
-      windows: windowsToDrafts(tpl.windows, currency, usdToCnyRate),
+      windows: tpl.windows,
     });
   };
 
@@ -742,10 +713,7 @@ export function SubscriptionsPage() {
       provider_id: activeProvider,
       plan_name: draft.mode === 'create' ? '' : draft.plan_name,
       monthly_fee_input: draft.mode === 'create' ? '0' : draft.monthly_fee_input,
-      windows:
-        draft.mode === 'create'
-          ? windowsToDrafts(buildDefaultWindowRules(), currency, usdToCnyRate)
-          : draft.windows,
+      windows: draft.mode === 'create' ? [] : draft.windows,
     });
   };
 
@@ -774,58 +742,6 @@ export function SubscriptionsPage() {
       return;
     }
 
-    const parsedWindows: SubscriptionWindowRule[] = [];
-    for (let i = 0; i < draft.windows.length; i += 1) {
-      const w = draft.windows[i];
-      const durationHours = Number.parseInt(w.duration_hours, 10);
-      if (!Number.isFinite(durationHours) || durationHours < 1) {
-        setFormError(`窗口 #${i + 1} 周期时长必须为至少 1 小时`);
-        return;
-      }
-
-      let limitValue: number;
-      if (w.unit === 'micro_usd') {
-        const parsedLimit = currencyInputToMicroUsd(w.limit_input, currency, usdToCnyRate);
-        if (parsedLimit === null || parsedLimit < 1) {
-          setFormError(`窗口 #${i + 1} 估算等效额度必须大于 0`);
-          return;
-        }
-        limitValue = parsedLimit;
-      } else {
-        const parsedTokens = Number.parseInt(w.limit_input, 10);
-        if (!Number.isFinite(parsedTokens) || parsedTokens < 1) {
-          setFormError(`窗口 #${i + 1} Token 额度必须大于 0`);
-          return;
-        }
-        limitValue = parsedTokens;
-      }
-
-      const warnPct = Number.parseInt(w.warning_percent, 10);
-      const critPct = Number.parseInt(w.critical_percent, 10);
-      if (
-        !Number.isFinite(warnPct) ||
-        warnPct < 1 ||
-        warnPct > 99 ||
-        !Number.isFinite(critPct) ||
-        critPct < 1 ||
-        critPct > 100
-      ) {
-        setFormError(`窗口 #${i + 1} 预警阈值需在 1%–100% 范围内`);
-        return;
-      }
-
-      parsedWindows.push({
-        window_id: w.window_id,
-        label: w.label.trim() || `${durationHours}h 滚动窗口`,
-        duration_hours: durationHours,
-        rolling: w.rolling,
-        unit: w.unit,
-        limit_value: limitValue,
-        warning_percent: Math.min(warnPct, critPct),
-        critical_percent: Math.max(warnPct, critPct),
-      });
-    }
-
     setFormError(null);
     savePlanMutation.mutate({
       plan_id: draft.plan_id,
@@ -833,19 +749,49 @@ export function SubscriptionsPage() {
       plan_name: trimmedName,
       enabled: draft.enabled,
       monthly_fee_micro_usd: monthlyFeeMicroUsd,
-      windows: parsedWindows,
+      windows: draft.windows,
       is_user_configured: true,
       auto_source: null,
       updated_at_ms: Date.now(),
     });
   };
 
-  const visibleTemplates = useMemo(() => {
-    if (templateProviderFilter === 'all') {
-      return templates;
+  const dynamicProviders = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const p of PROVIDERS) {
+      map.set(p.id, p.label);
     }
-    return templates.filter((t) => t.provider_id === templateProviderFilter);
-  }, [templates, templateProviderFilter]);
+    for (const tpl of templates) {
+      if (!map.has(tpl.provider_id)) {
+        map.set(tpl.provider_id, providerDisplayName(tpl.provider_id));
+      }
+    }
+    for (const sub of plans) {
+      if (!map.has(sub.plan.provider_id)) {
+        map.set(sub.plan.provider_id, providerDisplayName(sub.plan.provider_id));
+      }
+    }
+    return Array.from(map.entries()).map(([id, label]) => ({ id, label }));
+  }, [templates, plans]);
+
+  const templateFilterOptions = useMemo(() => {
+    const seen = new Set(templates.map((t) => t.provider_id));
+    return dynamicProviders.filter((p) => seen.has(p.id));
+  }, [dynamicProviders, templates]);
+
+  const visibleTemplates = useMemo(() => {
+    const query = templateSearch.trim().toLowerCase();
+    return templates.filter((t) => {
+      if (templateProviderFilter !== 'all' && t.provider_id !== templateProviderFilter) {
+        return false;
+      }
+      if (!query) {
+        return true;
+      }
+      const haystack = `${t.plan_name} ${t.provider_id} ${providerDisplayName(t.provider_id)} ${t.description}`.toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [templates, templateProviderFilter, templateSearch]);
 
   const draftFeeMicroPreview = draft
     ? currencyInputToMicroUsd(draft.monthly_fee_input, currency, usdToCnyRate)
@@ -861,15 +807,46 @@ export function SubscriptionsPage() {
         className="flex flex-wrap items-center justify-between gap-4 pb-5"
         style={{ borderBottom: '1px solid var(--border-subtle)' }}
       >
-        <div>
+        <div className="flex flex-wrap items-center gap-2.5">
           <h1 className="text-[16px] font-semibold tracking-tight">订阅用量</h1>
+          <span
+            className="px-2 py-0.5 text-[11px] rounded-md tabular-nums"
+            style={{
+              backgroundColor: 'var(--bg-elevated)',
+              border: '1px solid var(--border-hairline)',
+              color: 'var(--text-secondary)',
+            }}
+          >
+            套餐目录 · {templates.length} 款
+          </span>
+          <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+            {prefs?.last_subscription_sync_at_ms
+              ? `同步于 ${formatRelativeTime(prefs.last_subscription_sync_at_ms)}`
+              : '内置基线目录'}
+          </span>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            disabled={syncCatalogMutation.isPending}
+            onClick={() => syncCatalogMutation.mutate()}
+            className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] cursor-pointer disabled:opacity-50"
+            style={{
+              border: '1px solid var(--border-subtle)',
+              color: 'var(--text-primary)',
+            }}
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 ${syncCatalogMutation.isPending ? 'animate-spin' : ''}`}
+            />
+            <span>{syncCatalogMutation.isPending ? '同步中…' : '同步套餐目录'}</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => openCreatePaygDrawer()}
-            className="btn-tonal inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium cursor-pointer"
+            className="btn-tonal inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium cursor-pointer"
           >
             <Wallet className="w-3.5 h-3.5" />
             <span>添加按量计费</span>
@@ -878,7 +855,7 @@ export function SubscriptionsPage() {
           <button
             type="button"
             onClick={() => openCreateDrawer()}
-            className="btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium cursor-pointer"
+            className="btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium cursor-pointer"
             style={{
               backgroundColor: 'var(--accent-primary)',
               color: '#ffffff',
@@ -901,7 +878,7 @@ export function SubscriptionsPage() {
           <button
             type="button"
             onClick={() => setPaygNotice(null)}
-            className="btn-interactive px-2 py-0.5 text-[11px] cursor-pointer"
+            className="btn-interactive px-2 py-0.5 rounded-lg text-[11px] cursor-pointer"
             style={{ color: 'var(--text-muted)' }}
           >
             关闭
@@ -911,7 +888,7 @@ export function SubscriptionsPage() {
 
       {isLoading ? (
         <div className="py-12 text-center" style={{ color: 'var(--text-muted)' }}>
-          计算滚动窗口配额中…
+          加载订阅数据与实测用量中…
         </div>
       ) : (
         <>
@@ -937,14 +914,14 @@ export function SubscriptionsPage() {
                     <span>尚未添加个人订阅配置</span>
                   </div>
                   <p className="text-[12px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
-                    TokenTracker 仅通过本地只读日志与官方公开 API 核算用量；在配置支持官方配额接口的 Key（如 Kimi Code `sk-kimi-...`、MiniMax、QCode）或产生含官方限额快照的本地日志（如 Codex）后，系统会自动将其加入此处。您也可以随时手动添加固定月费订阅（如 Claude Pro / Max、ChatGPT Plus / Pro、Google AI Pro / Ultra）或在下方追踪 DeepSeek / Codex Credits 等按量计费账户。
+                    TokenTracker 仅通过本地只读日志与官方公开 API 核算用量；在配置支持官方配额接口的 Key（如 Kimi Code `sk-kimi-...`、MiniMax、QCode）或产生含官方限额快照的本地日志（如 Codex）后，系统会自动将其加入此处。您也可以随时从云端共享目录添加固定月费订阅（如 Claude Pro / Max、ChatGPT Plus / Pro、Google AI Pro / Ultra、Cursor、GitHub Copilot）追踪真实等效消耗与月费回本率，或在下方追踪 DeepSeek / Codex Credits 等按量计费账户。
                   </p>
                 </div>
 
                 <button
                   type="button"
                   onClick={() => openCreateDrawer()}
-                  className="btn-primary inline-flex items-center gap-1.5 px-3.5 py-2 text-[12px] font-medium shrink-0 cursor-pointer"
+                  className="btn-primary inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-[12px] font-medium shrink-0 cursor-pointer"
                   style={{
                     backgroundColor: 'var(--accent-primary)',
                     color: '#ffffff',
@@ -958,8 +935,14 @@ export function SubscriptionsPage() {
               <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
                 {configuredPlans.map((status) => {
                   const { plan, windows } = status;
+                  const hasOfficialWindows = windows.length > 0;
                   const confirmingDelete = confirmDeleteId === plan.plan_id;
                   const autoBadge = autoSourceBadge(plan.auto_source);
+                  const hasFee = plan.monthly_fee_micro_usd > 0;
+                  const roiRatio = hasFee
+                    ? status.month_cost_micro_usd / plan.monthly_fee_micro_usd
+                    : 0;
+                  const roiPct = roiRatio * 100;
 
                   return (
                     <div
@@ -988,7 +971,7 @@ export function SubscriptionsPage() {
                           <span className="text-[14px] font-semibold">{plan.plan_name}</span>
                           {autoBadge && (
                             <span
-                              className="px-1.5 py-0.5 text-[10px] rounded shrink-0"
+                              className="px-1.5 py-0.5 text-[10px] rounded-md shrink-0"
                               style={{
                                 backgroundColor: 'var(--bg-elevated)',
                                 border: '1px solid var(--border-hairline)',
@@ -998,19 +981,36 @@ export function SubscriptionsPage() {
                               {autoBadge.label}
                             </span>
                           )}
+                          {!hasOfficialWindows && (
+                            <span
+                              className="px-1.5 py-0.5 text-[10px] rounded-md shrink-0"
+                              style={{
+                                backgroundColor: 'var(--bg-elevated)',
+                                border: '1px solid var(--border-hairline)',
+                                color: 'var(--text-muted)',
+                              }}
+                            >
+                              仅统计真实消耗 · 官方未公开配额接口
+                            </span>
+                          )}
                         </div>
                         <div
                           className="flex flex-wrap items-center gap-2 text-[11.5px] tabular-nums"
                           style={{ color: 'var(--text-secondary)' }}
                         >
                           <span>
-                            {resolveSubscriptionTierLabel(plan, currency, usdToCnyRate)}
+                            {resolveSubscriptionTierLabel(
+                              plan,
+                              currency,
+                              usdToCnyRate,
+                              hasOfficialWindows
+                            )}
                           </span>
                           <button
                             type="button"
                             onClick={() => toggleEnabled(status)}
                             disabled={savePlanMutation.isPending}
-                            className="btn-interactive bg-[var(--bg-elevated)] px-2 py-0.5 rounded text-[11px] cursor-pointer disabled:opacity-50"
+                            className="btn-interactive bg-[var(--bg-elevated)] px-2 py-0.5 rounded-lg text-[11px] cursor-pointer disabled:opacity-50"
                             style={{
                               border: '1px solid var(--border-hairline)',
                               color: plan.enabled ? 'var(--accent-emerald)' : 'var(--text-muted)',
@@ -1021,83 +1021,189 @@ export function SubscriptionsPage() {
                         </div>
                       </div>
 
-                      {/* Center Column: 5h / 7d Inline Progress Bars */}
+                      {/* Center Column: Official Windows OR Factual Spend & ROI */}
                       <div className="col-span-12 lg:col-span-6 space-y-3">
-                        {windows.map((w) => {
-                          const usedStr =
-                            w.unit === 'micro_usd'
-                              ? formatCost(w.used_value, currency, usdToCnyRate)
-                              : formatTokens(w.used_value);
-                          const limitStr =
-                            w.unit === 'micro_usd'
-                              ? formatCost(w.limit_value, currency, usdToCnyRate)
-                              : formatTokens(w.limit_value);
-                          const srcBadge = windowSourceBadge(w.source);
-                          return (
-                            <div key={w.window_id} className="space-y-1">
-                              <div className="flex items-center justify-between gap-2 text-[12px] tabular-nums">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <span className="font-medium truncate">{w.label}</span>
-                                  <span
-                                    className="px-1.5 py-0.5 text-[10px] rounded shrink-0"
+                        {hasOfficialWindows ? (
+                          <>
+                            {windows.map((w) => {
+                              const usedStr =
+                                w.unit === 'micro_usd'
+                                  ? formatCost(w.used_value, currency, usdToCnyRate)
+                                  : formatTokens(w.used_value);
+                              const limitStr =
+                                w.unit === 'micro_usd'
+                                  ? formatCost(w.limit_value, currency, usdToCnyRate)
+                                  : formatTokens(w.limit_value);
+                              const srcBadge = windowSourceBadge(w.source);
+                              return (
+                                <div key={w.window_id} className="space-y-1">
+                                  <div className="flex items-center justify-between gap-2 text-[12px] tabular-nums">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <span className="font-medium truncate">{w.label}</span>
+                                      <span
+                                        className="px-1.5 py-0.5 text-[10px] rounded-md shrink-0"
+                                        style={{
+                                          backgroundColor: 'var(--bg-elevated)',
+                                          border: '1px solid var(--border-hairline)',
+                                          color: srcBadge.color,
+                                        }}
+                                      >
+                                        {srcBadge.label}
+                                      </span>
+                                    </div>
+                                    <div className="shrink-0">
+                                      <span style={{ color: 'var(--text-secondary)' }}>
+                                        {usedStr} / {limitStr}
+                                      </span>
+                                      <span className="ml-2 font-semibold">
+                                        {w.used_percent.toFixed(1)}%
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <InlineProgressBar
+                                    percent={w.used_percent}
+                                    alertLevel={w.alert_level}
+                                    heightPx={6}
+                                  />
+                                </div>
+                              );
+                            })}
+                            <div
+                              className="pt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] tabular-nums"
+                              style={{ color: 'var(--text-muted)' }}
+                            >
+                              <span>
+                                今日等效{' '}
+                                {formatCost(status.today_cost_micro_usd, currency, usdToCnyRate)}
+                              </span>
+                              <span>
+                                近 7d{' '}
+                                {formatCost(status.week_cost_micro_usd, currency, usdToCnyRate)}
+                              </span>
+                              <span>
+                                本月等效价值{' '}
+                                {formatCost(status.month_cost_micro_usd, currency, usdToCnyRate)}（
+                                {formatTokens(status.month_tokens)} Tokens）
+                              </span>
+                              {hasFee && (
+                                <span>
+                                  月费回本率{' '}
+                                  <strong
                                     style={{
-                                      backgroundColor: 'var(--bg-elevated)',
-                                      border: '1px solid var(--border-hairline)',
-                                      color: srcBadge.color,
+                                      color:
+                                        roiRatio >= 1
+                                          ? 'var(--accent-emerald)'
+                                          : 'var(--text-primary)',
                                     }}
                                   >
-                                    {srcBadge.label}
-                                  </span>
-                                </div>
-                                <div className="shrink-0">
-                                  <span style={{ color: 'var(--text-secondary)' }}>
-                                    {usedStr} / {limitStr}
-                                  </span>
-                                  <span className="ml-2 font-semibold">
-                                    {w.used_percent.toFixed(1)}%
-                                  </span>
-                                </div>
-                              </div>
-                              <InlineProgressBar
-                                percent={w.used_percent}
-                                alertLevel={w.alert_level}
-                                heightPx={6}
-                              />
+                                    {roiPct.toFixed(1)}% ({roiRatio.toFixed(2)}x)
+                                  </strong>
+                                </span>
+                              )}
                             </div>
-                          );
-                        })}
+                          </>
+                        ) : (
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 tabular-nums">
+                            <div>
+                              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                                今日等效消耗
+                              </div>
+                              <div className="mt-0.5 text-[14px] font-semibold">
+                                {formatCost(status.today_cost_micro_usd, currency, usdToCnyRate)}
+                              </div>
+                            </div>
+
+                            <div
+                              className="sm:pl-3"
+                              style={{ borderLeft: '1px solid var(--border-hairline)' }}
+                            >
+                              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                                近 7d 等效消耗
+                              </div>
+                              <div className="mt-0.5 text-[14px] font-semibold">
+                                {formatCost(status.week_cost_micro_usd, currency, usdToCnyRate)}
+                              </div>
+                            </div>
+
+                            <div
+                              className="sm:pl-3"
+                              style={{ borderLeft: '1px solid var(--border-hairline)' }}
+                            >
+                              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                                本月等效价值
+                              </div>
+                              <div className="mt-0.5 text-[14px] font-semibold">
+                                {formatCost(status.month_cost_micro_usd, currency, usdToCnyRate)}
+                              </div>
+                              <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                                {formatTokens(status.month_tokens)} Tokens
+                              </div>
+                            </div>
+
+                            <div
+                              className="sm:pl-3"
+                              style={{ borderLeft: '1px solid var(--border-hairline)' }}
+                            >
+                              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                                月费回本率
+                              </div>
+                              <div
+                                className="mt-0.5 text-[14px] font-semibold"
+                                style={{
+                                  color: hasFee
+                                    ? roiRatio >= 1
+                                      ? 'var(--accent-emerald)'
+                                      : 'var(--text-primary)'
+                                    : 'var(--text-muted)',
+                                }}
+                              >
+                                {hasFee ? `${roiPct.toFixed(1)}%` : '—'}
+                              </div>
+                              <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                                {hasFee ? `${roiRatio.toFixed(2)}x 月费` : '未设月费'}
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
 
-                      {/* Right Column: Burn Rate, Reset Countdown, Edit & Delete */}
+                      {/* Right Column: Burn Rate & Reset (Official only) + Edit & Delete */}
                       <div className="col-span-12 lg:col-span-3 flex items-center justify-between gap-3">
-                        <div className="space-y-2 text-[11.5px] tabular-nums">
-                          {windows.map((w) => {
-                            const burnRateStr =
-                              w.unit === 'micro_usd'
-                                ? `${formatCost(w.burn_rate_per_hour, currency, usdToCnyRate)}/h`
-                                : `${formatTokens(w.burn_rate_per_hour)}/h`;
-                            return (
-                              <div key={w.window_id} className="space-y-0.5">
-                                <div style={{ color: 'var(--text-secondary)' }}>
-                                  {w.window_id} 重置:{' '}
-                                  <strong style={{ color: 'var(--text-primary)' }}>
-                                    {formatCountdown(
-                                      computeLiveResetSeconds(w, plansUpdatedAt, nowMs)
-                                    )}
-                                  </strong>
+                        {hasOfficialWindows ? (
+                          <div className="space-y-2 text-[11.5px] tabular-nums">
+                            {windows.map((w) => {
+                              const burnRateStr =
+                                w.unit === 'micro_usd'
+                                  ? `${formatCost(w.burn_rate_per_hour, currency, usdToCnyRate)}/h`
+                                  : `${formatTokens(w.burn_rate_per_hour)}/h`;
+                              return (
+                                <div key={w.window_id} className="space-y-0.5">
+                                  <div style={{ color: 'var(--text-secondary)' }}>
+                                    {w.window_id} 重置:{' '}
+                                    <strong style={{ color: 'var(--text-primary)' }}>
+                                      {formatCountdown(
+                                        computeLiveResetSeconds(w, plansUpdatedAt, nowMs)
+                                      )}
+                                    </strong>
+                                  </div>
+                                  <div style={{ color: 'var(--text-muted)' }}>
+                                    流速 {burnRateStr} ·{' '}
+                                    {w.projected_exhaustion_hours !== null
+                                      ? w.projected_exhaustion_hours <= 0
+                                        ? '已触及上限'
+                                        : `约 ${w.projected_exhaustion_hours.toFixed(1)}h 触顶`
+                                      : '稳定'}
+                                  </div>
                                 </div>
-                                <div style={{ color: 'var(--text-muted)' }}>
-                                  流速 {burnRateStr} ·{' '}
-                                  {w.projected_exhaustion_hours !== null
-                                    ? w.projected_exhaustion_hours <= 0
-                                      ? '已触及上限'
-                                      : `约 ${w.projected_exhaustion_hours.toFixed(1)}h 触顶`
-                                    : '稳定'}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="space-y-0.5 text-[11.5px]">
+                            <div style={{ color: 'var(--text-secondary)' }}>按真实用量追踪</div>
+                            <div style={{ color: 'var(--text-muted)' }}>不显示本地推算限额</div>
+                          </div>
+                        )}
 
                         <div className="flex items-center gap-1.5 shrink-0">
                           {confirmingDelete ? (
@@ -1106,7 +1212,7 @@ export function SubscriptionsPage() {
                                 type="button"
                                 disabled={deletePlanMutation.isPending}
                                 onClick={() => deletePlanMutation.mutate(plan.plan_id)}
-                                className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium cursor-pointer transition-opacity hover:opacity-90 active:scale-[0.985] disabled:opacity-50"
+                                className="btn-danger inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium cursor-pointer disabled:opacity-50"
                                 style={{
                                   backgroundColor: 'var(--accent-rose)',
                                   color: '#ffffff',
@@ -1118,7 +1224,7 @@ export function SubscriptionsPage() {
                               <button
                                 type="button"
                                 onClick={() => setConfirmDeleteId(null)}
-                                className="btn-interactive bg-[var(--bg-elevated)] px-2 py-1 rounded text-[11px] cursor-pointer"
+                                className="btn-interactive bg-[var(--bg-elevated)] px-2 py-1 rounded-lg text-[11px] cursor-pointer"
                                 style={{
                                   border: '1px solid var(--border-subtle)',
                                   color: 'var(--text-secondary)',
@@ -1132,12 +1238,12 @@ export function SubscriptionsPage() {
                               <button
                                 type="button"
                                 onClick={() => openEditDrawer(plan)}
-                                className="btn-interactive bg-[var(--bg-elevated)] p-1.5 rounded cursor-pointer"
+                                className="btn-interactive bg-[var(--bg-elevated)] p-1.5 rounded-lg cursor-pointer"
                                 style={{
                                   border: '1px solid var(--border-subtle)',
                                   color: 'var(--text-secondary)',
                                 }}
-                                title="编辑订阅推算规则"
+                                title="编辑订阅配置"
                                 aria-label={`编辑 ${plan.plan_name}`}
                               >
                                 <Pencil className="w-3.5 h-3.5" />
@@ -1145,7 +1251,7 @@ export function SubscriptionsPage() {
                               <button
                                 type="button"
                                 onClick={() => setConfirmDeleteId(plan.plan_id)}
-                                className="btn-interactive bg-[var(--bg-elevated)] p-1.5 rounded cursor-pointer"
+                                className="btn-danger bg-[var(--bg-elevated)] p-1.5 rounded-lg cursor-pointer"
                                 style={{
                                   border: '1px solid var(--border-subtle)',
                                   color: 'var(--accent-rose)',
@@ -1200,7 +1306,7 @@ export function SubscriptionsPage() {
                       </div>
                       <div className="flex items-center gap-2">
                         <span
-                          className="px-1.5 py-0.5 rounded text-[10.5px]"
+                          className="px-1.5 py-0.5 rounded-md text-[10.5px]"
                           style={{
                             backgroundColor: 'var(--bg-elevated)',
                             border: '1px solid var(--border-hairline)',
@@ -1260,7 +1366,7 @@ export function SubscriptionsPage() {
                       <button
                         type="button"
                         onClick={() => openCreateDrawer(group.provider_id)}
-                        className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1 px-2.5 py-1.5 rounded text-[11.5px] font-medium shrink-0 cursor-pointer"
+                        className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-medium shrink-0 cursor-pointer"
                         style={{
                           border: '1px solid var(--border-strong)',
                           color: 'var(--text-primary)',
@@ -1355,7 +1461,7 @@ export function SubscriptionsPage() {
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="text-[14px] font-semibold">{acc.account_name}</span>
                           <span
-                            className="px-1.5 py-0.5 text-[10px] rounded-full shrink-0"
+                            className="px-1.5 py-0.5 text-[10px] rounded-md shrink-0"
                             style={{
                               backgroundColor: 'var(--bg-elevated)',
                               border: '1px solid var(--border-hairline)',
@@ -1526,7 +1632,7 @@ export function SubscriptionsPage() {
                                 type="button"
                                 disabled={deletePaygMutation.isPending}
                                 onClick={() => deletePaygMutation.mutate(acc.account_id)}
-                                className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50"
+                                className="btn-danger inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium cursor-pointer disabled:opacity-50"
                                 style={{
                                   backgroundColor: 'var(--accent-rose)',
                                   color: '#ffffff',
@@ -1538,7 +1644,7 @@ export function SubscriptionsPage() {
                               <button
                                 type="button"
                                 onClick={() => setConfirmDeletePaygId(null)}
-                                className="btn-interactive bg-[var(--bg-elevated)] px-2 py-1 text-[11px] cursor-pointer"
+                                className="btn-interactive bg-[var(--bg-elevated)] px-2 py-1 rounded-lg text-[11px] cursor-pointer"
                                 style={{
                                   border: '1px solid var(--border-subtle)',
                                   color: 'var(--text-secondary)',
@@ -1552,7 +1658,7 @@ export function SubscriptionsPage() {
                               <button
                                 type="button"
                                 onClick={() => openEditPaygDrawer(status)}
-                                className="btn-interactive bg-[var(--bg-elevated)] p-1.5 cursor-pointer"
+                                className="btn-interactive bg-[var(--bg-elevated)] p-1.5 rounded-lg cursor-pointer"
                                 style={{
                                   border: '1px solid var(--border-subtle)',
                                   color: 'var(--text-secondary)',
@@ -1565,7 +1671,7 @@ export function SubscriptionsPage() {
                               <button
                                 type="button"
                                 onClick={() => setConfirmDeletePaygId(acc.account_id)}
-                                className="btn-interactive bg-[var(--bg-elevated)] p-1.5 cursor-pointer"
+                                className="btn-danger bg-[var(--bg-elevated)] p-1.5 rounded-lg cursor-pointer"
                                 style={{
                                   border: '1px solid var(--border-subtle)',
                                   color: 'var(--accent-rose)',
@@ -1609,7 +1715,7 @@ export function SubscriptionsPage() {
                       <div className="text-[14px] font-semibold">{devGroup.device_display_name}</div>
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span
-                          className="px-1.5 py-0.5 rounded text-[10.5px]"
+                          className="px-1.5 py-0.5 rounded-md text-[10.5px]"
                           style={{
                             backgroundColor: 'var(--bg-elevated)',
                             border: '1px solid var(--border-hairline)',
@@ -1674,9 +1780,10 @@ export function SubscriptionsPage() {
       )}
 
       {/* Create / Edit Subscription Drawer */}
-      {draft && (
-        <div
-          className="drawer-backdrop-enter fixed inset-0 z-50 flex justify-end backdrop-blur-sm"
+      {draft &&
+        createPortal(
+          <div
+            className="drawer-backdrop-enter fixed inset-0 z-50 flex justify-end backdrop-blur-sm"
           style={{ backgroundColor: 'rgba(6, 8, 14, 0.42)' }}
           onClick={(e) => {
             if (e.target === e.currentTarget) {
@@ -1698,13 +1805,13 @@ export function SubscriptionsPage() {
             >
               <div>
                 <h2 className="text-[14.5px] font-semibold">
-                  {draft.mode === 'create' ? '添加我的订阅配置' : '编辑订阅推算规则'}
+                  {draft.mode === 'create' ? '添加我的订阅配置' : '编辑订阅配置'}
                 </h2>
               </div>
               <button
                 type="button"
                 onClick={() => setDraft(null)}
-                className="btn-interactive p-1.5 rounded cursor-pointer"
+                className="btn-interactive p-1.5 rounded-lg cursor-pointer"
                 style={{ color: 'var(--text-secondary)' }}
                 aria-label="关闭抽屉"
               >
@@ -1712,39 +1819,57 @@ export function SubscriptionsPage() {
               </button>
             </div>
 
-            {/* Template Quick-Fill Section */}
+            {/* Template Quick-Fill Section (AI Subscription Catalog) */}
             <div
               className="pb-4 space-y-2.5"
               style={{ borderBottom: '1px solid var(--border-subtle)' }}
             >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-[12px] font-medium">参考模板快速预填（可选）</span>
-                <div className="flex items-center gap-1">
-                  {[{ id: 'all', label: '全部' }, ...PROVIDERS].map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => setTemplateProviderFilter(p.id)}
-                      className="seg-pill px-2 py-0.5 rounded text-[11px] cursor-pointer"
-                      data-active={templateProviderFilter === p.id ? 'true' : 'false'}
-                      style={{
-                        border:
-                          templateProviderFilter === p.id
-                            ? '1px solid var(--border-strong)'
-                            : '1px solid transparent',
-                        color:
-                          templateProviderFilter === p.id
-                            ? 'var(--text-primary)'
-                            : 'var(--text-muted)',
-                      }}
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[12px] font-medium">套餐目录快速预填（可选）</span>
+                <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+                  共 {templates.length} 款
+                </span>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              <input
+                type="search"
+                aria-label="搜索套餐模板"
+                placeholder="搜索套餐名称或提供商（如 Ultra、Max、Cursor、Pro）"
+                value={templateSearch}
+                onChange={(e) => setTemplateSearch(e.target.value)}
+                className="w-full px-2.5 py-1.5 text-[12px] rounded-lg outline-none"
+                style={{
+                  backgroundColor: 'var(--bg-input)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                }}
+              />
+
+              <div className="flex flex-wrap items-center gap-1">
+                {[{ id: 'all', label: '全部' }, ...templateFilterOptions].map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => setTemplateProviderFilter(p.id)}
+                    className="seg-pill px-2 py-0.5 rounded-lg text-[11px] cursor-pointer"
+                    data-active={templateProviderFilter === p.id ? 'true' : 'false'}
+                    style={{
+                      border:
+                        templateProviderFilter === p.id
+                          ? '1px solid var(--border-strong)'
+                          : '1px solid transparent',
+                      color:
+                        templateProviderFilter === p.id
+                          ? 'var(--text-primary)'
+                          : 'var(--text-muted)',
+                    }}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 max-h-60 overflow-y-auto pr-0.5">
                 {visibleTemplates.map((tpl) => {
                   const active = selectedTemplateId === tpl.template_id;
                   return (
@@ -1752,7 +1877,7 @@ export function SubscriptionsPage() {
                       key={tpl.template_id}
                       type="button"
                       onClick={() => applyTemplateToDraft(tpl)}
-                      className={`btn-interactive text-left px-2.5 py-2 rounded space-y-0.5 cursor-pointer ${
+                      className={`btn-interactive text-left px-2.5 py-2 rounded-lg space-y-0.5 cursor-pointer ${
                         active ? 'bg-[var(--bg-hover)]' : 'bg-[var(--bg-elevated)]'
                       }`}
                       style={{
@@ -1772,17 +1897,29 @@ export function SubscriptionsPage() {
                       </div>
                       <div className="text-[10.5px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
                         {providerDisplayName(tpl.provider_id)} ·{' '}
-                        {formatCost(tpl.monthly_fee_micro_usd, currency, usdToCnyRate)}/月
+                        {tpl.monthly_fee_micro_usd > 0
+                          ? `${formatCost(tpl.monthly_fee_micro_usd, currency, usdToCnyRate)}/月`
+                          : '免费 / 按量'}
                       </div>
-                      {tpl.live_windows && tpl.live_windows.length > 0 && (
+                      {tpl.live_windows && tpl.live_windows.length > 0 ? (
                         <div
                           className="text-[10px] tabular-nums truncate"
-                          style={{ color: 'var(--text-secondary)' }}
+                          style={{ color: 'var(--accent-emerald)' }}
                         >
                           {tpl.live_windows
                             .map((w) => `${w.window_id} ${w.used_percent.toFixed(1)}%`)
                             .join(' · ')}
                         </div>
+                      ) : (
+                        tpl.description && (
+                          <div
+                            className="text-[10px] truncate"
+                            style={{ color: 'var(--text-muted)' }}
+                            title={tpl.description}
+                          >
+                            {tpl.description}
+                          </div>
+                        )
                       )}
                     </button>
                   );
@@ -1791,7 +1928,7 @@ export function SubscriptionsPage() {
                 <button
                   type="button"
                   onClick={applyCustomTemplateToDraft}
-                  className={`btn-interactive text-left px-2.5 py-2 rounded space-y-0.5 cursor-pointer ${
+                  className={`btn-interactive text-left px-2.5 py-2 rounded-lg space-y-0.5 cursor-pointer ${
                     selectedTemplateId === 'custom'
                       ? 'bg-[var(--bg-hover)]'
                       : 'bg-[var(--bg-elevated)]'
@@ -1805,7 +1942,7 @@ export function SubscriptionsPage() {
                 >
                   <div className="text-[11.5px] font-medium">自定义订阅</div>
                   <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
-                    手填名称、月费（可为 0）与窗口额度
+                    手填名称与月费（可为 0）
                   </div>
                 </button>
               </div>
@@ -1825,14 +1962,14 @@ export function SubscriptionsPage() {
                     aria-label="所属模型提供商"
                     value={draft.provider_id}
                     onChange={(e) => setDraft({ ...draft, provider_id: e.target.value })}
-                    className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none cursor-pointer"
+                    className="w-full px-2.5 py-1.5 text-[12px] rounded-lg outline-none cursor-pointer"
                     style={{
                       backgroundColor: 'var(--bg-input)',
                       border: '1px solid var(--border-subtle)',
                       color: 'var(--text-primary)',
                     }}
                   >
-                    {PROVIDERS.map((p) => (
+                    {dynamicProviders.map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.label}
                       </option>
@@ -1852,7 +1989,7 @@ export function SubscriptionsPage() {
                     placeholder="例如 Claude Max 5x 或 Google AI Ultra"
                     value={draft.plan_name}
                     onChange={(e) => setDraft({ ...draft, plan_name: e.target.value })}
-                    className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none"
+                    className="w-full px-2.5 py-1.5 text-[12px] rounded-lg outline-none"
                     style={{
                       backgroundColor: 'var(--bg-input)',
                       border: '1px solid var(--border-subtle)',
@@ -1878,7 +2015,7 @@ export function SubscriptionsPage() {
                     placeholder="0"
                     value={draft.monthly_fee_input}
                     onChange={(e) => setDraft({ ...draft, monthly_fee_input: e.target.value })}
-                    className="w-36 px-2.5 py-1.5 text-[12px] rounded tabular-nums outline-none"
+                    className="w-36 px-2.5 py-1.5 text-[12px] rounded-lg tabular-nums outline-none"
                     style={{
                       backgroundColor: 'var(--bg-input)',
                       border: '1px solid var(--border-subtle)',
@@ -1893,149 +2030,20 @@ export function SubscriptionsPage() {
                 </div>
               </div>
 
-              {/* Rolling Windows */}
-              {draft.windows.map((win, idx) => (
-                <div
-                  key={`${win.window_id}-${idx}`}
-                  className="pt-3.5 space-y-2.5"
-                  style={{ borderTop: '1px solid var(--border-subtle)' }}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[12.5px] font-medium">
-                      窗口 #{idx + 1} · {win.label}
-                    </span>
-                    <select
-                      aria-label={`窗口 ${idx + 1} 计量单位`}
-                      value={win.unit}
-                      onChange={(e) => {
-                        const nextUnit = e.target.value as QuotaUnit;
-                        const nextWindows = [...draft.windows];
-                        nextWindows[idx] = {
-                          ...win,
-                          unit: nextUnit,
-                          limit_input:
-                            nextUnit === 'micro_usd'
-                              ? microUsdToCurrencyInput(20_000_000, currency, usdToCnyRate)
-                              : '5000000',
-                        };
-                        setDraft({ ...draft, windows: nextWindows });
-                      }}
-                      className="px-2 py-0.5 text-[11px] rounded outline-none cursor-pointer"
-                      style={{
-                        backgroundColor: 'var(--bg-input)',
-                        border: '1px solid var(--border-subtle)',
-                        color: 'var(--text-secondary)',
-                      }}
-                    >
-                      <option value="micro_usd">等效金额 ({currency})</option>
-                      <option value="tokens">Token 用量</option>
-                    </select>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2.5">
-                    <div>
-                      <label className="block text-[11px] mb-1" style={{ color: 'var(--text-muted)' }}>
-                        周期时长 (小时)
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        value={win.duration_hours}
-                        onChange={(e) => {
-                          const next = [...draft.windows];
-                          next[idx] = { ...win, duration_hours: e.target.value };
-                          setDraft({ ...draft, windows: next });
-                        }}
-                        className="w-full px-2 py-1 text-[12px] rounded tabular-nums outline-none"
-                        style={{
-                          backgroundColor: 'var(--bg-input)',
-                          border: '1px solid var(--border-subtle)',
-                          color: 'var(--text-primary)',
-                        }}
-                      />
-                    </div>
-
-                    <div>
-                      <label
-                        htmlFor={`sub-win-limit-${idx}`}
-                        className="block text-[11px] mb-1"
-                        style={{ color: 'var(--text-muted)' }}
-                      >
-                        {win.unit === 'micro_usd'
-                          ? `估算等效额度 (${currency})`
-                          : '估算额度 (Tokens)'}
-                      </label>
-                      <input
-                        id={`sub-win-limit-${idx}`}
-                        type="text"
-                        inputMode="decimal"
-                        value={win.limit_input}
-                        onChange={(e) => {
-                          const next = [...draft.windows];
-                          next[idx] = { ...win, limit_input: e.target.value };
-                          setDraft({ ...draft, windows: next });
-                        }}
-                        className="w-full px-2 py-1 text-[12px] rounded tabular-nums outline-none"
-                        style={{
-                          backgroundColor: 'var(--bg-input)',
-                          border: '1px solid var(--border-subtle)',
-                          color: 'var(--text-primary)',
-                        }}
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] mb-1" style={{ color: 'var(--text-muted)' }}>
-                        警告阈值 (%)
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        max={99}
-                        value={win.warning_percent}
-                        onChange={(e) => {
-                          const next = [...draft.windows];
-                          next[idx] = { ...win, warning_percent: e.target.value };
-                          setDraft({ ...draft, windows: next });
-                        }}
-                        className="w-full px-2 py-1 text-[12px] rounded tabular-nums outline-none"
-                        style={{
-                          backgroundColor: 'var(--bg-input)',
-                          border: '1px solid var(--border-subtle)',
-                          color: 'var(--text-primary)',
-                        }}
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] mb-1" style={{ color: 'var(--text-muted)' }}>
-                        严重预警阈值 (%)
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        max={100}
-                        value={win.critical_percent}
-                        onChange={(e) => {
-                          const next = [...draft.windows];
-                          next[idx] = { ...win, critical_percent: e.target.value };
-                          setDraft({ ...draft, windows: next });
-                        }}
-                        className="w-full px-2 py-1 text-[12px] rounded tabular-nums outline-none"
-                        style={{
-                          backgroundColor: 'var(--bg-input)',
-                          border: '1px solid var(--border-subtle)',
-                          color: 'var(--text-primary)',
-                        }}
-                      />
-                    </div>
-                  </div>
-                </div>
-              ))}
+              <div
+                className="px-3 py-2.5 rounded-lg text-[11.5px] leading-relaxed"
+                style={{
+                  backgroundColor: 'var(--bg-elevated)',
+                  border: '1px solid var(--border-hairline)',
+                  color: 'var(--text-secondary)',
+                }}
+              >
+                配额进度仅在数据源产生官方实测窗口（如 Codex 日志限额快照、Kimi / MiniMax / QCode 官方 API）时自动匹配显示；对于未开放配额接口的订阅，界面仅基于真实 Token 用量统计今日 / 近 7d / 本月等效消耗与月费回本率，不展示估算百分比。
+              </div>
 
               {formError && (
                 <div
-                  className="px-3 py-2 rounded text-[11.5px]"
+                  className="px-3 py-2 rounded-lg text-[11.5px]"
                   style={{
                     backgroundColor: 'var(--bg-elevated)',
                     border: '1px solid var(--accent-rose)',
@@ -2054,7 +2062,7 @@ export function SubscriptionsPage() {
                   type="button"
                   disabled={savePlanMutation.isPending}
                   onClick={handleSaveDraft}
-                  className="btn-primary px-3.5 py-1.5 text-[12px] font-medium rounded cursor-pointer disabled:opacity-50"
+                  className="btn-primary px-3.5 py-1.5 text-[12px] font-medium rounded-lg cursor-pointer disabled:opacity-50"
                   style={{
                     backgroundColor: 'var(--accent-primary)',
                     color: '#ffffff',
@@ -2065,7 +2073,7 @@ export function SubscriptionsPage() {
                 <button
                   type="button"
                   onClick={() => setDraft(null)}
-                  className="btn-interactive bg-[var(--bg-elevated)] px-3 py-1.5 text-[12px] rounded cursor-pointer"
+                  className="btn-interactive bg-[var(--bg-elevated)] px-3 py-1.5 text-[12px] rounded-lg cursor-pointer"
                   style={{
                     border: '1px solid var(--border-subtle)',
                     color: 'var(--text-secondary)',
@@ -2076,13 +2084,15 @@ export function SubscriptionsPage() {
               </div>
             </div>
           </div>
-        </div>
-      )}
+        </div>,
+          document.body
+        )}
 
       {/* Create / Edit Pay-As-You-Go Drawer */}
-      {paygDraft && (
-        <div
-          className="drawer-backdrop-enter fixed inset-0 z-50 flex justify-end backdrop-blur-sm"
+      {paygDraft &&
+        createPortal(
+          <div
+            className="drawer-backdrop-enter fixed inset-0 z-50 flex justify-end backdrop-blur-sm"
           style={{ backgroundColor: 'rgba(6, 8, 14, 0.42)' }}
           onClick={(e) => {
             if (e.target === e.currentTarget) {
@@ -2294,7 +2304,7 @@ export function SubscriptionsPage() {
                   type="button"
                   disabled={savePaygMutation.isPending}
                   onClick={handleSavePaygDraft}
-                  className="btn-primary px-3.5 py-1.5 text-[12px] font-medium cursor-pointer disabled:opacity-50"
+                  className="btn-primary px-3.5 py-1.5 rounded-lg text-[12px] font-medium cursor-pointer disabled:opacity-50"
                   style={{
                     backgroundColor: 'var(--accent-primary)',
                     color: '#ffffff',
@@ -2305,7 +2315,7 @@ export function SubscriptionsPage() {
                 <button
                   type="button"
                   onClick={() => setPaygDraft(null)}
-                  className="btn-interactive bg-[var(--bg-elevated)] px-3 py-1.5 text-[12px] cursor-pointer"
+                  className="btn-interactive bg-[var(--bg-elevated)] px-3 py-1.5 rounded-lg text-[12px] cursor-pointer"
                   style={{
                     border: '1px solid var(--border-subtle)',
                     color: 'var(--text-secondary)',
@@ -2316,8 +2326,9 @@ export function SubscriptionsPage() {
               </div>
             </div>
           </div>
-        </div>
-      )}
+        </div>,
+          document.body
+        )}
     </div>
   );
 }

@@ -11,8 +11,8 @@ use crate::domain::{
     IngestionCursor, ModelPricingEntry, NormalizedUsageEvent, ObservedRateLimitWindow, PaygAccount,
     PaygAccountStatus, ProviderBalanceSnapshot, ProviderConfig, QuotaUnit,
     RemoteSubscriptionSnapshot, RemoteSyncApplyResult, SessionTitleRecord, SubscriptionPlan,
-    SubscriptionWindowRule, SyncConfigState, SyncEnvelopeV1, SyncHourlyDelta,
-    SyncSubscriptionSnapshot, MAX_VALID_OUTPUT_TPS, MIN_VALID_TPS_DURATION_MS,
+    SubscriptionPlanTemplate, SubscriptionWindowRule, SyncConfigState, SyncEnvelopeV1,
+    SyncHourlyDelta, SyncSubscriptionSnapshot, MAX_VALID_OUTPUT_TPS, MIN_VALID_TPS_DURATION_MS,
     MIN_VALID_TPS_OUTPUT_TOKENS,
 };
 use crate::error::{CoreError, CoreResult};
@@ -22,7 +22,8 @@ use crate::pricing::{
 };
 use crate::storage::migrations::run_migrations;
 use crate::subscription::{
-    evaluate_subscription_plan, subscription_plan_templates, WindowUsageSample,
+    compute_subscription_catalog_hash, evaluate_subscription_plan, subscription_plan_templates,
+    WindowUsageSample,
 };
 
 pub const HOUR_MS: i64 = 3_600_000;
@@ -383,7 +384,11 @@ impl Storage {
                             + ev.cache_read_tokens
                             + ev.cache_write_tokens
                             + ev.reasoning_tokens;
+                        let model_upgraded = old_model == "codex-unknown"
+                            && ev.model_id != "codex-unknown"
+                            && !ev.model_id.trim().is_empty();
                         let should_upgrade = new_total > old_total
+                            || model_upgraded
                             || (new_total == old_total && ev.output_tokens > old_out)
                             || (new_total == old_total
                                 && ev.duration_ms.is_some()
@@ -882,6 +887,107 @@ impl Storage {
             };
 
             Ok((true, total_models, recomputed))
+        })
+    }
+
+    /// Replace the synced `AI Subscription Catalog` template table atomically and refresh any
+    /// untouched auto-discovered subscription rows if their catalog tier name or fee changed.
+    /// Returns `(catalog_updated, synced_plans_count)`.
+    pub fn apply_synced_subscription_catalog(
+        &self,
+        remote_templates: &[SubscriptionPlanTemplate],
+        synced_at_ms: i64,
+    ) -> CoreResult<(bool, usize)> {
+        if remote_templates.is_empty() {
+            return Err(CoreError::Validation(
+                "Synced subscription catalog cannot be empty".to_string(),
+            ));
+        }
+
+        let new_hash = compute_subscription_catalog_hash(remote_templates);
+        let plan_count = remote_templates.len();
+
+        self.with_conn_mut(|conn| {
+            let existing_hash: Option<String> = conn
+                .query_row(
+                    "SELECT subscription_catalog_hash FROM app_preferences WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            let existing_rows: i64 =
+                conn.query_row("SELECT COUNT(*) FROM subscription_catalog", [], |r| {
+                    r.get(0)
+                })?;
+
+            if existing_hash.as_deref() == Some(new_hash.as_str()) && existing_rows > 0 {
+                conn.execute(
+                    "UPDATE app_preferences SET last_subscription_sync_at_ms = ?1, updated_at_ms = ?1 WHERE id = 1",
+                    params![synced_at_ms],
+                )?;
+                return Ok((false, existing_rows as usize));
+            }
+
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute("DELETE FROM subscription_catalog", [])?;
+
+            {
+                let mut stmt = tx.prepare(
+                    r#"
+                    INSERT INTO subscription_catalog (
+                        template_id, provider_id, plan_name, monthly_fee_micro_usd,
+                        windows_json, description, sort_order, updated_at_ms
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                    "#,
+                )?;
+
+                for (idx, tpl) in remote_templates.iter().enumerate() {
+                    let windows_json = serde_json::to_string(&tpl.windows)?;
+                    stmt.execute(params![
+                        tpl.template_id,
+                        tpl.provider_id,
+                        tpl.plan_name,
+                        tpl.monthly_fee_micro_usd,
+                        windows_json,
+                        tpl.description,
+                        idx as i64,
+                        synced_at_ms,
+                    ])?;
+                }
+            }
+
+            tx.execute(
+                r#"
+                UPDATE app_preferences
+                SET last_subscription_sync_at_ms = ?1,
+                    subscription_catalog_hash = ?2,
+                    updated_at_ms = ?1
+                WHERE id = 1
+                "#,
+                params![synced_at_ms, new_hash],
+            )?;
+
+            let auto_providers: Vec<String> = {
+                let mut stmt = tx.prepare(
+                    r#"
+                    SELECT DISTINCT provider_id
+                    FROM subscription_plans
+                    WHERE (plan_id LIKE 'auto_%' OR auto_source IS NOT NULL)
+                      AND user_customized = 0
+                      AND user_dismissed = 0
+                    "#,
+                )?;
+                let mapped = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                mapped.collect::<Result<Vec<_>, _>>()?
+            };
+
+            for pid in auto_providers {
+                sync_auto_subscription_for_provider_conn(&tx, &pid, synced_at_ms)?;
+            }
+
+            tx.commit()?;
+            Ok((true, plan_count))
         })
     }
 
@@ -2841,10 +2947,16 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    let templates = subscription_plan_templates();
+    let templates = load_subscription_catalog_templates(conn)?;
     let preferred_tpl = templates.iter().find(|tpl| {
         tpl.provider_id == trimmed
             && match trimmed {
+                provider_ids::CODEX if hint_lower.contains("pro") && hint_lower.contains("100") => {
+                    tpl.template_id == "codex_pro_100"
+                }
+                provider_ids::CODEX if hint_lower.contains("pro") && hint_lower.contains("500") => {
+                    tpl.template_id == "codex_pro_500"
+                }
                 provider_ids::CODEX if hint_lower.contains("pro") => tpl.template_id == "codex_pro",
                 provider_ids::CODEX if hint_lower.contains("team") => {
                     tpl.template_id == "codex_team"
@@ -2915,42 +3027,11 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
         rules_by_id.entry(rule.window_id.clone()).or_insert(rule);
     }
 
-    // Ensure Kimi Code plans always include the 30d monthly limit window alongside 5h/7d windows.
-    if trimmed == provider_ids::KIMI_CODE && !rules_by_id.is_empty() {
-        if let Some(monthly_rule) = tpl_windows.iter().find(|w| w.window_id == "30d") {
-            rules_by_id
-                .entry("30d".to_string())
-                .or_insert_with(|| monthly_rule.clone());
-        } else {
-            rules_by_id
-                .entry("30d".to_string())
-                .or_insert(SubscriptionWindowRule {
-                    window_id: "30d".to_string(),
-                    label: "30d 月度限额".to_string(),
-                    duration_hours: 720,
-                    rolling: false,
-                    unit: QuotaUnit::MicroUsd,
-                    limit_value: 120_000_000,
-                    warning_percent: 80,
-                    critical_percent: 95,
-                });
-        }
-    }
-
-    let mut windows: Vec<SubscriptionWindowRule> = if rules_by_id.is_empty() {
-        if matches!(
-            trimmed,
-            provider_ids::ANTIGRAVITY | provider_ids::KIMI_CODE
-        ) {
-            tpl_windows
-        } else {
-            Vec::new()
-        }
-    } else {
-        rules_by_id.into_values().collect()
-    };
+    // Only keep windows backed by actual authoritative observations (never fabricate unverified
+    // local_estimation windows for Antigravity or unreturned monthly windows).
+    let mut windows: Vec<SubscriptionWindowRule> = rules_by_id.into_values().collect();
     windows.sort_by_key(|w| w.duration_hours);
-    if windows.is_empty() {
+    if windows.is_empty() && trimmed != provider_ids::ANTIGRAVITY {
         return Ok(());
     }
 
@@ -2969,7 +3050,25 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
             }
         }
         provider_ids::CODEX => {
-            if hint_lower.contains("pro") {
+            if hint_lower.contains("pro") && hint_lower.contains("500") {
+                (
+                    preferred_tpl
+                        .map(|t| t.plan_name.clone())
+                        .unwrap_or_else(|| "ChatGPT Pro ($500) / Codex".to_string()),
+                    preferred_tpl
+                        .map(|t| t.monthly_fee_micro_usd)
+                        .unwrap_or(500_000_000),
+                )
+            } else if hint_lower.contains("pro") && hint_lower.contains("100") {
+                (
+                    preferred_tpl
+                        .map(|t| t.plan_name.clone())
+                        .unwrap_or_else(|| "ChatGPT Pro ($100) / Codex".to_string()),
+                    preferred_tpl
+                        .map(|t| t.monthly_fee_micro_usd)
+                        .unwrap_or(100_000_000),
+                )
+            } else if hint_lower.contains("pro") {
                 ("ChatGPT Pro / Codex".to_string(), 200_000_000)
             } else if hint_lower.contains("team") {
                 ("ChatGPT Team / Codex".to_string(), 25_000_000)
@@ -2989,19 +3088,47 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
             if hint_lower.contains("ultra")
                 && (hint_lower.contains("5x") || hint_lower.contains("99"))
             {
-                ("Google AI Ultra 5x".to_string(), 99_990_000)
+                (
+                    preferred_tpl
+                        .map(|t| t.plan_name.clone())
+                        .unwrap_or_else(|| "Google AI Ultra 5x".to_string()),
+                    preferred_tpl
+                        .map(|t| t.monthly_fee_micro_usd)
+                        .unwrap_or(99_990_000),
+                )
             } else if hint_lower.contains("ultra") && hint_lower.contains("249") {
                 ("Google AI Ultra".to_string(), 249_990_000)
             } else if hint_lower.contains("ultra") {
-                ("Google AI Ultra".to_string(), 199_990_000)
+                (
+                    preferred_tpl
+                        .map(|t| t.plan_name.clone())
+                        .unwrap_or_else(|| "Google AI Ultra".to_string()),
+                    preferred_tpl
+                        .map(|t| t.monthly_fee_micro_usd)
+                        .unwrap_or(199_990_000),
+                )
             } else if hint_lower.contains("enterprise") || hint_lower.contains("business") {
                 ("Gemini Enterprise / Antigravity".to_string(), 30_000_000)
             } else if hint_lower.contains("plus") {
-                ("Google AI Plus".to_string(), 4_990_000)
+                (
+                    preferred_tpl
+                        .map(|t| t.plan_name.clone())
+                        .unwrap_or_else(|| "Google AI Plus".to_string()),
+                    preferred_tpl
+                        .map(|t| t.monthly_fee_micro_usd)
+                        .unwrap_or(4_990_000),
+                )
             } else if hint_lower.contains("free") {
                 ("Google AI Free / Antigravity".to_string(), 0)
             } else {
-                ("Google AI Pro".to_string(), 19_990_000)
+                (
+                    preferred_tpl
+                        .map(|t| t.plan_name.clone())
+                        .unwrap_or_else(|| "Google AI Pro".to_string()),
+                    preferred_tpl
+                        .map(|t| t.monthly_fee_micro_usd)
+                        .unwrap_or(19_990_000),
+                )
             }
         }
         provider_ids::KIMI_CODE => {
@@ -3074,6 +3201,49 @@ pub(crate) fn sync_auto_subscription_for_provider_conn(
     Ok(())
 }
 
+pub(crate) fn load_subscription_catalog_templates(
+    conn: &Connection,
+) -> CoreResult<Vec<SubscriptionPlanTemplate>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT template_id, provider_id, plan_name, monthly_fee_micro_usd, windows_json, description
+        FROM subscription_catalog
+        ORDER BY sort_order ASC, template_id ASC
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let windows_json: String = row.get(4)?;
+        let windows =
+            serde_json::from_str::<Vec<SubscriptionWindowRule>>(&windows_json).unwrap_or_default();
+        Ok(SubscriptionPlanTemplate {
+            template_id: row.get(0)?,
+            provider_id: row.get(1)?,
+            plan_name: row.get(2)?,
+            monthly_fee_micro_usd: row.get(3)?,
+            windows,
+            description: row.get(5)?,
+            live_windows: Vec::new(),
+        })
+    })?;
+    let mut synced = Vec::new();
+    for row in rows {
+        synced.push(row?);
+    }
+
+    let built_in = subscription_plan_templates();
+    if synced.is_empty() {
+        return Ok(built_in);
+    }
+
+    let seen_ids: BTreeSet<String> = synced.iter().map(|t| t.template_id.clone()).collect();
+    for tpl in built_in {
+        if !seen_ids.contains(&tpl.template_id) {
+            synced.push(tpl);
+        }
+    }
+    Ok(synced)
+}
+
 pub(crate) fn upsert_session_titles_conn(
     conn: &Connection,
     session_titles: &[SessionTitleRecord],
@@ -3089,35 +3259,46 @@ pub(crate) fn upsert_session_titles_conn(
             title = excluded.title,
             source = excluded.source,
             updated_at_ms = excluded.updated_at_ms
-        WHERE (excluded.source = 'explicit' AND (
-                session_titles.source != 'explicit'
-                OR excluded.updated_at_ms >= session_titles.updated_at_ms
-            ))
-           OR (excluded.source = 'user_prompt' AND (
-                session_titles.source = 'derived'
-                OR (session_titles.source = 'user_prompt' AND (
+        WHERE excluded.source = 'background'
+           OR (session_titles.source != 'background' AND (
+                (excluded.source = 'explicit' AND (
+                    session_titles.source != 'explicit'
+                    OR excluded.updated_at_ms >= session_titles.updated_at_ms
+                ))
+               OR (excluded.source = 'user_prompt' AND (
+                    session_titles.source = 'derived'
+                    OR (session_titles.source = 'user_prompt' AND (
+                        excluded.updated_at_ms < session_titles.updated_at_ms
+                        OR LENGTH(TRIM(session_titles.title)) = 0
+                    ))
+                ))
+               OR (excluded.source = 'derived' AND session_titles.source = 'derived' AND (
                     excluded.updated_at_ms < session_titles.updated_at_ms
                     OR LENGTH(TRIM(session_titles.title)) = 0
                 ))
-            ))
-           OR (excluded.source = 'derived' AND session_titles.source = 'derived' AND (
-                excluded.updated_at_ms < session_titles.updated_at_ms
-                OR LENGTH(TRIM(session_titles.title)) = 0
-            ))
+           ))
         "#,
     )?;
     let mut affected = 0usize;
     for rec in session_titles {
-        if let Some(clean_title) = sanitize_session_title(&rec.title) {
-            let source = match rec.source.as_str() {
-                "explicit" => "explicit",
-                "user_prompt" => "user_prompt",
-                _ => "derived",
-            };
+        let source = match rec.source.as_str() {
+            "background" => "background",
+            "explicit" => "explicit",
+            "user_prompt" => "user_prompt",
+            _ => "derived",
+        };
+        let clean_title = sanitize_session_title(&rec.title).or_else(|| {
+            if source == "background" {
+                Some("后台会话".to_string())
+            } else {
+                None
+            }
+        });
+        if let Some(title) = clean_title {
             affected += stmt.execute(params![
                 rec.session_key,
                 rec.provider_id,
-                clean_title,
+                title,
                 source,
                 rec.updated_at_ms,
             ])?;
@@ -3194,6 +3375,7 @@ pub(crate) fn load_preferences(conn: &Connection) -> CoreResult<AppPreferences> 
                otlp_enabled, otlp_port, device_display_name,
                bg_mode, bg_image_path, bg_preset_id, bg_opacity, bg_blur_px,
                auto_sync_pricing, exchange_rate_auto, last_rate_sync_at_ms, last_pricing_sync_at_ms,
+               last_subscription_sync_at_ms,
                auto_check_updates, floating_window_enabled, updated_at_ms
         FROM app_preferences
         WHERE id = 1
@@ -3219,9 +3401,10 @@ pub(crate) fn load_preferences(conn: &Connection) -> CoreResult<AppPreferences> 
                 exchange_rate_auto: row.get::<_, i64>(14)? != 0,
                 last_rate_sync_at_ms: row.get(15)?,
                 last_pricing_sync_at_ms: row.get(16)?,
-                auto_check_updates: row.get::<_, i64>(17)? != 0,
-                floating_window_enabled: row.get::<_, i64>(18)? != 0,
-                updated_at_ms: row.get(19)?,
+                last_subscription_sync_at_ms: row.get(17)?,
+                auto_check_updates: row.get::<_, i64>(18)? != 0,
+                floating_window_enabled: row.get::<_, i64>(19)? != 0,
+                updated_at_ms: row.get(20)?,
             })
         },
     )
@@ -4030,11 +4213,12 @@ mod tests {
         assert_eq!(subs[0].plan.plan_id, "auto_kimi_code");
         assert_eq!(subs[0].plan.auto_source.as_deref(), Some("official_api"));
         assert_eq!(subs[0].plan.plan_name, "Kimi Code Allegretto");
-        assert_eq!(subs[0].windows.len(), 3);
+        // Only the 2 API-returned windows (5h, 7d) are shown; no fake local 30d estimate is synthesized.
+        assert_eq!(subs[0].windows.len(), 2);
         assert_eq!(subs[0].windows[0].source, "official_api");
         assert!((subs[0].windows[0].used_percent - 25.0).abs() < 0.01);
-        assert_eq!(subs[0].windows[2].window_id, "30d");
-        assert_eq!(subs[0].windows[2].label, "30d 月度限额");
+        assert_eq!(subs[0].windows[1].window_id, "7d");
+        assert_eq!(subs[0].windows[1].source, "official_api");
 
         // 3. Deleting an auto-discovered plan soft-dismisses it so future polls do not resurrect it.
         storage
@@ -4304,10 +4488,12 @@ mod tests {
         assert_eq!(subs[0].plan.plan_name, "Google AI Ultra 5x");
         assert_eq!(subs[0].plan.monthly_fee_micro_usd, 99_990_000);
         assert_eq!(subs[0].plan.auto_source.as_deref(), Some("local_log"));
-        assert_eq!(subs[0].windows.len(), 2);
-        // 1M input ($2.00) + 100k output ($1.20) = $3.20 used out of $100 5h window = 3.2%
-        assert_eq!(subs[0].windows[0].used_value, 3_200_000);
-        assert!((subs[0].windows[0].used_percent - 3.2).abs() < 0.01);
+        // Antigravity has no official quota API, so misleading local_estimation windows must be empty.
+        // Instead, factual API-equivalent spend ($3.20) is reported accurately.
+        assert!(subs[0].windows.is_empty());
+        assert_eq!(subs[0].today_cost_micro_usd, 3_200_000);
+        assert_eq!(subs[0].month_cost_micro_usd, 3_200_000);
+        assert_eq!(subs[0].month_tokens, 1_100_000);
     }
 
     #[test]
@@ -4513,6 +4699,114 @@ mod tests {
                 .as_ref()
                 .and_then(|b| b.total_balance_micro),
             Some(766_760_000)
+        );
+    }
+
+    #[test]
+    fn v10_migration_and_subscription_catalog_sync_work_end_to_end() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("v9_to_v10.sqlite");
+        let now_ms = 1_795_000_000_000i64;
+
+        let storage = Storage::open_file(&db_path).expect("seed base db");
+        let dev = storage.local_device().expect("device").device_id;
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    r#"
+                    INSERT INTO usage_events (
+                        event_id, device_id, provider_id, session_id, project_label,
+                        model_id, timestamp_ms, input_tokens, output_tokens,
+                        cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                        observable_only, duration_ms, ttft_ms, output_tps,
+                        estimated_cost_micro_usd, cache_saved_micro_usd
+                    ) VALUES (
+                        'stale-codex-ev', ?1, 'codex', 's-real', 'proj',
+                        'gpt-5-codex', ?2, 1000, 100, 0, 0, 0, 0, NULL, NULL, NULL, 5000, 0
+                    )
+                    "#,
+                    params![dev, now_ms],
+                )?;
+                conn.execute(
+                    r#"
+                    INSERT INTO ingestion_cursors (
+                        source_path, provider_id, file_identity, byte_offset, last_line_hash, updated_at_ms
+                    ) VALUES ('C:/tmp/rollout-1.jsonl', 'codex', 'id-1', 1234, 'abc', ?1)
+                    "#,
+                    params![now_ms],
+                )?;
+                conn.execute(
+                    r#"
+                    INSERT INTO session_titles (session_key, provider_id, title, source, updated_at_ms)
+                    VALUES ('codex:s-bg', 'codex', 'Guardian review', 'explicit', ?1)
+                    "#,
+                    params![now_ms],
+                )?;
+                conn.execute("DELETE FROM schema_migrations WHERE version = 10", [])?;
+                Ok(())
+            })
+            .expect("inject pre-v10 data");
+        drop(storage);
+
+        let reopened = Storage::open_file(&db_path).expect("run v10 migration");
+        reopened
+            .with_conn(|conn| {
+                let stale_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM usage_events WHERE event_id = 'stale-codex-ev'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(stale_count, 0);
+
+                let cursor_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM ingestion_cursors WHERE provider_id = 'codex'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(cursor_count, 0);
+
+                let bg_source: String = conn.query_row(
+                    "SELECT source FROM session_titles WHERE session_key = 'codex:s-bg'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(bg_source, "background");
+                Ok(())
+            })
+            .expect("verify v10 migration");
+
+        let mut synced = subscription_plan_templates();
+        synced.push(SubscriptionPlanTemplate {
+            template_id: "cursor_pro_plus".to_string(),
+            provider_id: provider_ids::CURSOR.to_string(),
+            plan_name: "Cursor Pro+".to_string(),
+            monthly_fee_micro_usd: 60_000_000,
+            windows: Vec::new(),
+            description: "Cursor Pro+ 60 USD".to_string(),
+            live_windows: Vec::new(),
+        });
+        let (changed, count) = reopened
+            .apply_synced_subscription_catalog(&synced, now_ms + 1_000)
+            .expect("sync sub catalog");
+        assert!(changed);
+        assert_eq!(count, synced.len());
+
+        // Second identical catalog sync short-circuits with changed = false
+        let (changed_again, _) = reopened
+            .apply_synced_subscription_catalog(&synced, now_ms + 2_000)
+            .expect("idempotent sub catalog");
+        assert!(!changed_again);
+
+        let templates = reopened
+            .query_subscription_templates(now_ms + 3_000)
+            .expect("templates include synced cursor_pro_plus");
+        assert!(templates.iter().any(|t| t.template_id == "cursor_pro_plus"));
+        assert_eq!(
+            reopened
+                .get_preferences()
+                .expect("prefs")
+                .last_subscription_sync_at_ms,
+            Some(now_ms + 2_000)
         );
     }
 }

@@ -12,6 +12,9 @@ pub mod provider_ids {
     pub const DEEPSEEK_HARNESS: &str = "deepseek_harness";
     pub const QCODE: &str = "qcode";
     pub const MINIMAX_CODE: &str = "minimax_code";
+    pub const CURSOR: &str = "cursor";
+    pub const GITHUB_COPILOT: &str = "github_copilot";
+    pub const WINDSURF: &str = "windsurf";
 
     pub const ALL: [&str; 8] = [
         CLAUDE_CODE,
@@ -34,6 +37,9 @@ pub mod provider_ids {
             DEEPSEEK_HARNESS => "DeepSeek Harness",
             QCODE => "QCode",
             MINIMAX_CODE => "MiniMax Code",
+            CURSOR => "Cursor",
+            GITHUB_COPILOT => "GitHub Copilot",
+            WINDSURF => "Windsurf",
             other => other,
         }
     }
@@ -403,6 +409,8 @@ pub struct AppPreferences {
     pub last_rate_sync_at_ms: Option<i64>,
     #[serde(default)]
     pub last_pricing_sync_at_ms: Option<i64>,
+    #[serde(default)]
+    pub last_subscription_sync_at_ms: Option<i64>,
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
     #[serde(default)]
@@ -430,6 +438,7 @@ impl Default for AppPreferences {
             exchange_rate_auto: true,
             last_rate_sync_at_ms: None,
             last_pricing_sync_at_ms: None,
+            last_subscription_sync_at_ms: None,
             auto_check_updates: true,
             floating_window_enabled: false,
             updated_at_ms: 0,
@@ -715,7 +724,8 @@ pub struct CustomRuleTestResult {
     pub diagnostic: String,
 }
 
-/// Result summary returned after synchronizing remote USD->CNY rate and public model pricing.
+/// Result summary returned after synchronizing remote USD->CNY rate, public model pricing,
+/// and AI Subscription Catalog templates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogSyncResult {
     pub rate_updated: bool,
@@ -726,6 +736,12 @@ pub struct CatalogSyncResult {
     pub synced_at_ms: i64,
     pub rate_source: Option<String>,
     pub pricing_source: Option<String>,
+    #[serde(default)]
+    pub subscriptions_updated: bool,
+    #[serde(default)]
+    pub synced_plans_count: usize,
+    #[serde(default)]
+    pub subscription_source: Option<String>,
     pub warning: Option<String>,
 }
 

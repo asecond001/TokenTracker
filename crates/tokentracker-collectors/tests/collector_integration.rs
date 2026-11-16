@@ -447,9 +447,40 @@ async fn catalog_sync_handles_primary_fallback_offline_and_locks() {
     })
     .to_string();
 
+    let mut sample_sub_plans: Vec<serde_json::Value> =
+        tokentracker_core::subscription::subscription_plan_templates()
+            .into_iter()
+            .take(12)
+            .map(|mut t| {
+                if t.template_id == "google_ai_ultra" {
+                    t.plan_name = "Google AI Ultra 20x".to_string();
+                }
+                let mut v = serde_json::to_value(&t).expect("json");
+                v.as_object_mut()
+                    .expect("obj")
+                    .insert("status".to_string(), serde_json::json!("active"));
+                v
+            })
+            .collect();
+    sample_sub_plans.push(serde_json::json!({
+        "template_id": "cursor_plus",
+        "provider_id": "cursor",
+        "plan_name": "Cursor Plus",
+        "monthly_fee_micro_usd": 20000000,
+        "windows": [],
+        "description": "Cursor Plus plan",
+        "status": "active"
+    }));
+    let sample_sub_catalog = serde_json::json!({
+        "schema_version": "1.0.0",
+        "plans": sample_sub_plans
+    })
+    .to_string();
+
     struct MockHttpFetcher {
         models_dev_body: String,
         litellm_body: String,
+        sub_catalog_body: String,
         requests: Mutex<Vec<String>>,
     }
 
@@ -467,6 +498,8 @@ async fn catalog_sync_handles_primary_fallback_offline_and_locks() {
                 }
                 "https://mock.local/models-dev" => Ok(self.models_dev_body.clone()),
                 "https://mock.local/litellm" => Ok(self.litellm_body.clone()),
+                "https://mock.local/sub-pages.github.io"
+                | "https://cdn.jsdelivr.net/mock-sub" => Ok(self.sub_catalog_body.clone()),
                 _ => Err("HTTP 500".to_string()),
             };
             Box::pin(async move { res })
@@ -476,6 +509,7 @@ async fn catalog_sync_handles_primary_fallback_offline_and_locks() {
     let fetcher = MockHttpFetcher {
         models_dev_body: sample_models_dev,
         litellm_body: sample_litellm,
+        sub_catalog_body: sample_sub_catalog,
         requests: Mutex::new(Vec::new()),
     };
 
@@ -515,6 +549,10 @@ async fn catalog_sync_handles_primary_fallback_offline_and_locks() {
         open_er_url: "https://mock.local/open-er".to_string(),
         models_dev_url: "https://mock.local/models-dev".to_string(),
         litellm_url: "https://mock.local/litellm".to_string(),
+        subscription_catalog_urls: vec![
+            "https://mock.local/sub-pages.github.io".to_string(),
+            "https://cdn.jsdelivr.net/mock-sub".to_string(),
+        ],
     };
     let res1 = sync_catalog_and_rate_with_fetcher(&storage, true, &primary_endpoints, &fetcher)
         .await
@@ -525,7 +563,18 @@ async fn catalog_sync_handles_primary_fallback_offline_and_locks() {
     assert_eq!(res1.recomputed_events_count, 1);
     assert_eq!(res1.rate_source.as_deref(), Some("frankfurter.dev"));
     assert_eq!(res1.pricing_source.as_deref(), Some("models.dev"));
+    assert!(res1.subscriptions_updated);
+    assert_eq!(res1.synced_plans_count, 13);
+    assert_eq!(res1.subscription_source.as_deref(), Some("github-pages"));
     assert!(res1.warning.is_none());
+
+    let synced_templates = storage.query_subscription_templates(ts).expect("templates");
+    assert!(synced_templates.iter().any(|t| t.template_id == "cursor_plus"));
+    let ultra_tpl = synced_templates
+        .iter()
+        .find(|t| t.template_id == "google_ai_ultra")
+        .expect("ultra");
+    assert_eq!(ultra_tpl.plan_name, "Google AI Ultra");
 
     // Subsequent non-forced call within 12h/24h TTL makes ZERO HTTP requests
     let calls_before = fetcher.requests.lock().expect("lock").len();
@@ -534,14 +583,19 @@ async fn catalog_sync_handles_primary_fallback_offline_and_locks() {
         .expect("ttl skip");
     assert!(!res_ttl.rate_updated);
     assert!(!res_ttl.pricing_updated);
+    assert!(!res_ttl.subscriptions_updated);
     assert_eq!(fetcher.requests.lock().expect("lock").len(), calls_before);
 
-    // Scenario 2: Primary HTTP 500 -> automatic fallback to open.er-api + litellm
+    // Scenario 2: Primary HTTP 500 -> automatic fallback to open.er-api + litellm + jsdelivr
     let fallback_endpoints = CatalogSyncEndpoints {
         frankfurter_url: "https://mock.local/fail".to_string(),
         open_er_url: "https://mock.local/open-er".to_string(),
         models_dev_url: "https://mock.local/fail".to_string(),
         litellm_url: "https://mock.local/litellm".to_string(),
+        subscription_catalog_urls: vec![
+            "https://mock.local/fail".to_string(),
+            "https://cdn.jsdelivr.net/mock-sub".to_string(),
+        ],
     };
     let res2 = sync_catalog_and_rate_with_fetcher(&storage, true, &fallback_endpoints, &fetcher)
         .await
@@ -551,6 +605,7 @@ async fn catalog_sync_handles_primary_fallback_offline_and_locks() {
     assert!(res2.pricing_updated);
     assert_eq!(res2.rate_source.as_deref(), Some("open.er-api.com"));
     assert_eq!(res2.pricing_source.as_deref(), Some("litellm"));
+    assert_eq!(res2.subscription_source.as_deref(), Some("jsdelivr"));
     assert!(res2.warning.is_none());
 
     // Scenario 3: Both endpoints fail -> graceful offline fallback with warning, cached data intact
@@ -559,12 +614,14 @@ async fn catalog_sync_handles_primary_fallback_offline_and_locks() {
         open_er_url: "https://mock.local/fail".to_string(),
         models_dev_url: "https://mock.local/fail".to_string(),
         litellm_url: "https://mock.local/fail".to_string(),
+        subscription_catalog_urls: vec!["https://mock.local/fail".to_string()],
     };
     let res3 = sync_catalog_and_rate_with_fetcher(&storage, true, &offline_endpoints, &fetcher)
         .await
         .expect("offline fallback");
     assert!(!res3.rate_updated);
     assert!(!res3.pricing_updated);
+    assert!(!res3.subscriptions_updated);
     assert_eq!(res3.usd_to_cny_rate, "7.21");
     assert!(res3.warning.is_some());
 
@@ -1299,6 +1356,18 @@ async fn cloud_sync_client_supports_plaintext_e2ee_and_realtime_sse() {
             }],
         })
         .expect("upsert plan a");
+    storage_a
+        .upsert_observed_rate_limits(&[tokentracker_core::domain::ObservedRateLimitWindow {
+            provider_id: provider_ids::CLAUDE_CODE.to_string(),
+            window_name: "5h".to_string(),
+            used_percent: 32.0,
+            window_minutes: Some(300),
+            resets_at_ms: Some(now_ms + 3_600_000),
+            observed_at_ms: now_ms,
+            source: Some("official_api".to_string()),
+            plan_hint: Some("pro".to_string()),
+        }])
+        .expect("upsert authoritative observed snapshot");
 
     let creds_a = MemoryCredentialStore::new();
     set_sync_credentials(&creds_a, Some("sync-test-secret"), None).expect("creds a");
@@ -1706,5 +1775,78 @@ async fn kimi_coding_usages_api_and_qcode_auto_materialize_subscriptions() {
     assert_eq!(qcode_sub.plan.plan_id, "auto_qcode");
     assert_eq!(qcode_sub.windows[0].limit_value, 10_000_000);
     assert!((qcode_sub.windows[0].used_percent - 30.0).abs() < 0.01);
+}
+
+#[test]
+fn incremental_tailing_past_large_gap_preserves_codex_model_switches_without_gpt5_codex_fallback() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rollout_path = dir.path().join("rollout-large-gap.jsonl");
+    let storage = Storage::open_in_memory().expect("db");
+    let dev = storage.local_device().expect("dev").device_id;
+    let parser = CodexParser::new();
+
+    // 1. Write session_meta (no model), user_message, initial turn_context (gpt-5.3-codex),
+    //    >80KB of bulky tool output lines + mid-file turn_context switch to gpt-5.4.
+    let mut initial_content = String::new();
+    initial_content.push_str(
+        r#"{"timestamp":"2026-11-16T05:00:00.000Z","type":"session_meta","payload":{"id":"codex-gap-s1","cwd":"C:/Projects/TokenTracker"}}"#,
+    );
+    initial_content.push('\n');
+    initial_content.push_str(
+        r#"{"timestamp":"2026-11-16T05:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"Inspect tailer model switch"}}"#,
+    );
+    initial_content.push('\n');
+    initial_content.push_str(
+        r#"{"timestamp":"2026-11-16T05:00:02.000Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+    );
+    initial_content.push('\n');
+    let big_pad = "x".repeat(4_096);
+    for idx in 0..10 {
+        initial_content.push_str(&format!(
+            r#"{{"timestamp":"2026-11-16T05:00:03.000Z","type":"response_item","payload":{{"role":"assistant","content":"step-{idx}-{big_pad}"}}}}"#
+        ));
+        initial_content.push('\n');
+    }
+    initial_content.push_str(
+        r#"{"timestamp":"2026-11-16T05:01:00.000Z","type":"turn_context","payload":{"collaboration_mode":{"settings":{"model":"gpt-5.4"}}}}"#,
+    );
+    initial_content.push('\n');
+    for idx in 10..32 {
+        initial_content.push_str(&format!(
+            r#"{{"timestamp":"2026-11-16T05:01:05.000Z","type":"response_item","payload":{{"role":"assistant","content":"post-{idx}-{big_pad}"}}}}"#
+        ));
+        initial_content.push('\n');
+    }
+    std::fs::write(&rollout_path, &initial_content).expect("write initial");
+
+    // Advance cursor past 100KB with zero token_count events yet
+    let first_pass =
+        tail_file_incremental(&storage, &parser, &rollout_path, &dev).expect("initial tail");
+    assert_eq!(first_pass.events_inserted, 0);
+
+    // Append token_count event AFTER >90KB gap since gpt-5.4 turn_context
+    let mut updated = initial_content;
+    updated.push_str(
+        r#"{"timestamp":"2026-11-16T05:02:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":300,"reasoning_output_tokens":50},"total_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":300,"reasoning_output_tokens":50}}}}"#,
+    );
+    updated.push('\n');
+    std::fs::write(&rollout_path, updated).expect("append token_count");
+
+    let second_pass =
+        tail_file_incremental(&storage, &parser, &rollout_path, &dev).expect("second tail");
+    assert_eq!(second_pass.events_inserted, 1);
+
+    let report = storage
+        .query_models_pricing(&AnalyticsFilter {
+            start_ms: 0,
+            end_ms: i64::MAX / 2,
+            provider_id: Some("codex".to_string()),
+            device_id: None,
+            tz_offset_minutes: 480,
+            all_time: true,
+        })
+        .expect("query models");
+    assert_eq!(report.rows.len(), 1);
+    assert_eq!(report.rows[0].model_id, "gpt-5.4");
 }
 

@@ -62,6 +62,7 @@ export interface AppPreferences {
   floating_window_enabled: boolean;
   last_rate_sync_at_ms: number | null;
   last_pricing_sync_at_ms: number | null;
+  last_subscription_sync_at_ms: number | null;
   updated_at_ms: number;
 }
 
@@ -372,6 +373,10 @@ export interface SubscriptionWindowStatus {
 export interface SubscriptionPlanStatus {
   plan: SubscriptionPlan;
   windows: SubscriptionWindowStatus[];
+  today_cost_micro_usd: number;
+  week_cost_micro_usd: number;
+  month_cost_micro_usd: number;
+  month_tokens: number;
 }
 
 export interface ModelSpeedStats {
@@ -485,9 +490,12 @@ export interface CatalogSyncResult {
   pricing_updated: boolean;
   synced_models_count: number;
   recomputed_events_count: number;
+  subscriptions_updated: boolean;
+  synced_plans_count: number;
   synced_at_ms: number;
   rate_source: string | null;
   pricing_source: string | null;
+  subscription_source: string | null;
   warning: string | null;
 }
 

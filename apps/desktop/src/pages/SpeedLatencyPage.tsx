@@ -386,7 +386,7 @@ export function SpeedLatencyPage() {
                 <h2 className="text-[13.5px] font-semibold">模型提供商维度速度与延迟总览</h2>
                 {data?.from_hourly_rollups && (
                   <span
-                    className="px-1.5 py-0.5 text-[10.5px] rounded-[2px]"
+                    className="px-1.5 py-0.5 text-[10.5px] rounded-md"
                     style={{
                       color: 'var(--text-muted)',
                       border: '1px solid var(--border-hairline)',
@@ -482,10 +482,10 @@ export function SpeedLatencyPage() {
 
                 {/* Group Mode Segmented Switch */}
                 <div
-                  className="flex items-center p-0.5 rounded"
+                  className="seg-group"
                   style={{
                     backgroundColor: 'var(--bg-sidebar)',
-                    border: '1px solid var(--border-hairline)',
+                    borderColor: 'var(--border-hairline)',
                   }}
                 >
                   {(
@@ -501,7 +501,7 @@ export function SpeedLatencyPage() {
                         type="button"
                         data-active={active}
                         onClick={() => setGroupMode(option.id)}
-                        className="seg-pill px-2.5 py-0.5 text-[11.5px] rounded-sm cursor-pointer"
+                        className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer"
                         style={{
                           color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
                           fontWeight: active ? 500 : 400,

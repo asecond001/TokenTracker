@@ -257,12 +257,12 @@ pub async fn run_catalog_sync_shared(
 ) -> CoreResult<CatalogSyncResult> {
     let _guard = lock.lock().await;
     let res = sync_catalog_and_rate(storage, force).await?;
-    if res.rate_updated {
+    if res.rate_updated || res.subscriptions_updated {
         if let Ok(prefs) = storage.get_preferences() {
             let _ = app.emit("preferences-updated", &prefs);
         }
     }
-    if res.rate_updated || res.pricing_updated {
+    if res.rate_updated || res.pricing_updated || res.subscriptions_updated {
         let _ = app.emit("usage-updated", &res);
     }
     Ok(res)

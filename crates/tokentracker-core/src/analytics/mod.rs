@@ -1,23 +1,26 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use chrono::{Datelike, FixedOffset, NaiveDate, TimeZone, Utc};
+use chrono::{Datelike, FixedOffset, Local, NaiveDate, TimeZone, Utc};
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::domain::{
     compute_ewma_tps, compute_iqr_upper_fence, provider_ids, sanitize_session_title, CurrencyCode,
-    ModelPricingEntry, ObservedRateLimitWindow, MAX_VALID_OUTPUT_TPS, MIN_VALID_TPS_DURATION_MS,
-    MIN_VALID_TPS_OUTPUT_TOKENS,
+    ModelPricingEntry, ObservedRateLimitWindow, SubscriptionPlan, MAX_VALID_OUTPUT_TPS,
+    MIN_VALID_TPS_DURATION_MS, MIN_VALID_TPS_OUTPUT_TOKENS,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::pricing::resolve_pricing;
 use crate::storage::repository::{
-    load_observed_rate_limits, load_preferences, load_pricing_catalog, load_subscription_plans,
-    load_window_samples_map, DAY_MS, HOUR_MS,
+    load_observed_rate_limits, load_preferences, load_pricing_catalog,
+    load_subscription_catalog_templates, load_subscription_plans, load_window_samples_map, DAY_MS,
+    HOUR_MS,
 };
 use crate::storage::Storage;
-use crate::subscription::{evaluate_subscription_plan, SubscriptionPlanStatus};
+use crate::subscription::{
+    evaluate_subscription_plan, evaluate_subscription_templates_from_list, SubscriptionPlanStatus,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalyticsFilter {
@@ -678,6 +681,13 @@ pub(crate) fn query_latest_tps_with_model(
         r#"
         SELECT output_tps, model_id, provider_id FROM usage_events
         WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2{where_and}
+          AND LOWER(model_id) NOT LIKE '%auto-review%'
+          AND LOWER(model_id) NOT LIKE '%auto_review%'
+          AND NOT EXISTS (
+              SELECT 1 FROM session_titles st
+              WHERE st.session_key = usage_events.provider_id || ':' || usage_events.session_id
+                AND st.source = 'background'
+          )
           AND output_tps IS NOT NULL
           AND output_tps > 0.0
           AND output_tps <= {MAX_VALID_OUTPUT_TPS}
@@ -718,6 +728,8 @@ pub(crate) fn query_latest_tps_with_model(
         SELECT tps_sum / tps_sample_count AS avg_tps, model_id, provider_id
         FROM usage_hourly_rollups
         WHERE bucket_start_ms >= ?1 AND bucket_start_ms <= ?2{where_and}
+          AND LOWER(model_id) NOT LIKE '%auto-review%'
+          AND LOWER(model_id) NOT LIKE '%auto_review%'
           AND tps_sample_count > 0
           AND tps_sum > 0.0
         ORDER BY bucket_start_ms DESC, updated_at_ms DESC, rowid DESC
@@ -912,6 +924,92 @@ fn query_top_model_shares(
     Ok(out)
 }
 
+fn is_background_session_marker(
+    session_id: &str,
+    model_id: &str,
+    stored_title: Option<&str>,
+    stored_source: Option<&str>,
+) -> bool {
+    if stored_source == Some("background") {
+        return true;
+    }
+    let sid_lower = session_id.to_ascii_lowercase();
+    if sid_lower.contains("/subagents/") || sid_lower.contains("\\subagents\\") {
+        return true;
+    }
+    let model_lower = model_id.to_ascii_lowercase();
+    if model_lower.contains("auto-review") || model_lower.contains("auto_review") {
+        return true;
+    }
+    if let Some(title) = stored_title {
+        let title_lower = title.trim().to_ascii_lowercase();
+        if matches!(
+            title_lower.as_str(),
+            "guardian review" | "codex-auto-review" | "auto-review" | "auto review"
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+fn evaluate_subscriptions_with_spend(
+    conn: &Connection,
+    plans: Vec<SubscriptionPlan>,
+    now_ms: i64,
+    tz_offset_minutes: i32,
+    include_disabled: bool,
+) -> CoreResult<Vec<SubscriptionPlanStatus>> {
+    let filtered_plans: Vec<SubscriptionPlan> = plans
+        .into_iter()
+        .filter(|p| p.is_user_configured && (include_disabled || p.enabled))
+        .collect();
+    let observed = load_observed_rate_limits(conn)?;
+    let samples_map = load_window_samples_map(conn, now_ms)?;
+    let (today_start_ms, month_start_ms) = local_day_bounds_ms(now_ms, tz_offset_minutes);
+    let week_start_ms = now_ms.saturating_sub(7 * DAY_MS);
+
+    let mut spend_cache: HashMap<String, (i64, i64, i64, i64)> = HashMap::new();
+    let mut out = Vec::with_capacity(filtered_plans.len());
+
+    for plan in filtered_plans {
+        let samples = samples_map
+            .get(&plan.provider_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let mut status = evaluate_subscription_plan(&plan, samples, &observed, now_ms);
+
+        let spend_key = plan.provider_id.to_ascii_lowercase();
+        let (today_cost, week_cost, month_cost, month_tokens) =
+            if let Some(&cached) = spend_cache.get(&spend_key) {
+                cached
+            } else {
+                let today_t =
+                    query_period_totals(conn, today_start_ms, now_ms, Some(&plan.provider_id), None)?;
+                let week_t =
+                    query_period_totals(conn, week_start_ms, now_ms, Some(&plan.provider_id), None)?;
+                let month_t =
+                    query_period_totals(conn, month_start_ms, now_ms, Some(&plan.provider_id), None)?;
+                let tuple = (
+                    today_t.cost_micro_usd,
+                    week_t.cost_micro_usd,
+                    month_t.cost_micro_usd,
+                    month_t.total_tokens(),
+                );
+                spend_cache.insert(spend_key, tuple);
+                tuple
+            };
+
+        status.today_cost_micro_usd = today_cost;
+        status.week_cost_micro_usd = week_cost;
+        status.month_cost_micro_usd = month_cost;
+        status.month_tokens = month_tokens;
+        out.push(status);
+    }
+
+    Ok(out)
+}
+
 fn query_active_sessions(
     conn: &Connection,
     now_ms: i64,
@@ -943,6 +1041,8 @@ fn query_active_sessions(
                SUM(estimated_cost_micro_usd)
         FROM usage_events
         WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2{where_and}
+          AND LOWER(model_id) NOT LIKE '%auto-review%'
+          AND LOWER(model_id) NOT LIKE '%auto_review%'
         GROUP BY provider_id, session_id
         HAVING MAX(timestamp_ms) >= ?{cutoff_idx}
         ORDER BY last_active_at_ms DESC, request_count DESC
@@ -951,9 +1051,10 @@ fn query_active_sessions(
         where_and = scope.sql_and
     );
 
+    let fetch_limit = (limit.max(1) * 4).min(128) as i64;
     let mut bound = bound_range_params(day_start_ms, now_ms, &scope.params);
     bound.push(Value::Integer(recent_cutoff_ms));
-    bound.push(Value::Integer(limit as i64));
+    bound.push(Value::Integer(fetch_limit));
 
     #[allow(clippy::type_complexity)]
     struct SessionGroupRow {
@@ -1027,9 +1128,9 @@ fn query_active_sessions(
     let mut meta_stmt = conn.prepare(&latest_meta_sql)?;
     let mut tps_stmt = conn.prepare(&latest_tps_sql)?;
     let mut title_stmt =
-        conn.prepare("SELECT title FROM session_titles WHERE session_key = ?1 LIMIT 1")?;
+        conn.prepare("SELECT title, source FROM session_titles WHERE session_key = ?1 LIMIT 1")?;
 
-    let mut out = Vec::with_capacity(groups.len());
+    let mut out = Vec::with_capacity(limit);
     for g in groups {
         let mut p = vec![
             Value::Integer(day_start_ms),
@@ -1052,6 +1153,28 @@ fn query_active_sessions(
             Err(e) => return Err(CoreError::from(e)),
         };
 
+        let canonical_key = format!("{}:{}", g.provider_id, g.session_id);
+        let mut stored_entry: Option<(String, String)> = title_stmt
+            .query_row(params![canonical_key], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .optional()?;
+        if stored_entry.is_none() {
+            if let Some((base_sid, _)) = g.session_id.split_once('/') {
+                let base_key = format!("{}:{}", g.provider_id, base_sid);
+                stored_entry = title_stmt
+                    .query_row(params![base_key], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    })
+                    .optional()?;
+            }
+        }
+        let stored_title = stored_entry.as_ref().map(|(t, _)| t.as_str());
+        let stored_source = stored_entry.as_ref().map(|(_, s)| s.as_str());
+        if is_background_session_marker(&g.session_id, &model_id, stored_title, stored_source) {
+            continue;
+        }
+
         let mut session_tps_desc: Vec<f64> = tps_stmt
             .query_map(params_from_iter(p), |r| r.get::<_, f64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1070,19 +1193,7 @@ fn query_active_sessions(
             + g.cache_write_tokens
             + g.reasoning_tokens;
 
-        let canonical_key = format!("{}:{}", g.provider_id, g.session_id);
-        let mut stored_title: Option<String> = title_stmt
-            .query_row(params![canonical_key], |r| r.get::<_, String>(0))
-            .optional()?;
-        if stored_title.is_none() {
-            if let Some((base_sid, _)) = g.session_id.split_once('/') {
-                let base_key = format!("{}:{}", g.provider_id, base_sid);
-                stored_title = title_stmt
-                    .query_row(params![base_key], |r| r.get::<_, String>(0))
-                    .optional()?;
-            }
-        }
-        let session_title = stored_title.or_else(|| {
+        let session_title = stored_entry.map(|(t, _)| t).or_else(|| {
             let trimmed = g.session_id.trim();
             let lower = trimmed.to_ascii_lowercase();
             let looks_synthetic_id = lower.is_empty()
@@ -1121,6 +1232,9 @@ fn query_active_sessions(
             estimated_cost_micro_usd: g.estimated_cost_micro_usd,
             latest_output_tps,
         });
+        if out.len() >= limit {
+            break;
+        }
     }
 
     Ok(out)
@@ -1916,23 +2030,18 @@ impl Storage {
     }
 
     pub fn query_subscriptions(&self, now_ms: i64) -> CoreResult<Vec<SubscriptionPlanStatus>> {
-        self.with_conn(|conn| {
-            let plans: Vec<_> = load_subscription_plans(conn)?
-                .into_iter()
-                .filter(|p| p.is_user_configured)
-                .collect();
-            let observed = load_observed_rate_limits(conn)?;
-            let samples_map = load_window_samples_map(conn, now_ms)?;
+        let tz_offset_minutes = Local::now().offset().local_minus_utc() / 60;
+        self.query_subscriptions_with_tz(now_ms, tz_offset_minutes)
+    }
 
-            let mut out = Vec::with_capacity(plans.len());
-            for plan in plans {
-                let samples = samples_map
-                    .get(&plan.provider_id)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                out.push(evaluate_subscription_plan(&plan, samples, &observed, now_ms));
-            }
-            Ok(out)
+    pub fn query_subscriptions_with_tz(
+        &self,
+        now_ms: i64,
+        tz_offset_minutes: i32,
+    ) -> CoreResult<Vec<SubscriptionPlanStatus>> {
+        self.with_conn(|conn| {
+            let plans = load_subscription_plans(conn)?;
+            evaluate_subscriptions_with_spend(conn, plans, now_ms, tz_offset_minutes, true)
         })
     }
 
@@ -1943,7 +2052,9 @@ impl Storage {
         self.with_conn(|conn| {
             let observed = load_observed_rate_limits(conn)?;
             let samples_map = load_window_samples_map(conn, now_ms)?;
-            Ok(crate::subscription::evaluate_subscription_templates(
+            let templates = load_subscription_catalog_templates(conn)?;
+            Ok(evaluate_subscription_templates_from_list(
+                templates,
                 &samples_map,
                 &observed,
                 now_ms,
@@ -2186,20 +2297,13 @@ impl Storage {
             let prefs = load_preferences(conn)?;
 
             let plans = load_subscription_plans(conn)?;
-            let observed = load_observed_rate_limits(conn)?;
-            let samples_map = load_window_samples_map(conn, now_ms)?;
-
-            let subscriptions = plans
-                .into_iter()
-                .filter(|p| p.enabled && p.is_user_configured)
-                .map(|plan| {
-                    let samples = samples_map
-                        .get(&plan.provider_id)
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[]);
-                    evaluate_subscription_plan(&plan, samples, &observed, now_ms)
-                })
-                .collect();
+            let subscriptions = evaluate_subscriptions_with_spend(
+                conn,
+                plans,
+                now_ms,
+                tz_offset_minutes,
+                false,
+            )?;
 
             let provider_shares = query_provider_shares(conn, today_start_ms, now_ms, None, None)?;
             let active_sessions = query_active_sessions(conn, now_ms, None, None, 8)?;
@@ -3540,5 +3644,99 @@ mod tests {
             ov.active_sessions[0].session_title.as_deref(),
             Some("Refactor Chart Stacking")
         );
+    }
+
+    #[test]
+    fn active_sessions_and_live_tps_exclude_background_guardian_review_sessions() {
+        let storage = Storage::open_in_memory().expect("in-memory");
+        let dev_id = storage.local_device().expect("device").device_id;
+        let now_ms = 1_794_830_400_000i64;
+
+        let events = vec![
+            NormalizedUsageEvent {
+                event_id: compute_event_id("codex", "sess-user-real", "step-1", now_ms - 15_000),
+                device_id: dev_id.clone(),
+                provider_id: "codex".to_string(),
+                session_id: "sess-user-real".to_string(),
+                project_label: "TokenTracker".to_string(),
+                model_id: "gpt-5.4".to_string(),
+                timestamp_ms: now_ms - 15_000,
+                input_tokens: 2_000,
+                output_tokens: 300,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(3_000),
+                ttft_ms: None,
+                output_tps: Some(100.0),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+            // Background Guardian auto-review event (newer timestamp, high token rate)
+            NormalizedUsageEvent {
+                event_id: compute_event_id("codex", "sess-guardian-bg", "step-bg", now_ms - 2_000),
+                device_id: dev_id,
+                provider_id: "codex".to_string(),
+                session_id: "sess-guardian-bg".to_string(),
+                project_label: "TokenTracker".to_string(),
+                model_id: "codex-auto-review".to_string(),
+                timestamp_ms: now_ms - 2_000,
+                input_tokens: 1_500,
+                output_tokens: 250,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: Some(1_000),
+                ttft_ms: None,
+                output_tps: Some(250.0),
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            },
+        ];
+        let titles = vec![
+            crate::domain::SessionTitleRecord {
+                session_key: "codex:sess-user-real".to_string(),
+                provider_id: "codex".to_string(),
+                title: "Implement v0.2.6 features".to_string(),
+                source: "user_prompt".to_string(),
+                updated_at_ms: now_ms - 15_000,
+            },
+            crate::domain::SessionTitleRecord {
+                session_key: "codex:sess-guardian-bg".to_string(),
+                provider_id: "codex".to_string(),
+                title: "Guardian review".to_string(),
+                source: "background".to_string(),
+                updated_at_ms: now_ms - 2_000,
+            },
+        ];
+        storage
+            .ingest_events_with_cursor_and_titles(&events, None, &[], &titles)
+            .expect("ingest");
+
+        let ov = storage
+            .query_overview(
+                &AnalyticsFilter {
+                    start_ms: now_ms - HOUR_MS,
+                    end_ms: now_ms,
+                    provider_id: None,
+                    device_id: None,
+                    tz_offset_minutes: 480,
+                    all_time: false,
+                },
+                now_ms,
+            )
+            .expect("overview");
+
+        assert_eq!(ov.active_sessions.len(), 1);
+        assert_eq!(
+            ov.active_sessions[0].session_title.as_deref(),
+            Some("Implement v0.2.6 features")
+        );
+        assert_eq!(ov.active_sessions[0].model_id, "gpt-5.4");
+        // Live TPS fallback & active speed must reflect user session (100 tok/s), NOT 250 tok/s auto-review.
+        assert_eq!(ov.latest_output_tps, Some(100.0));
+        assert!(!ov.live_model_speeds.iter().any(|s| s.model_id == "codex-auto-review"));
     }
 }

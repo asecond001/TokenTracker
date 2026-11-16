@@ -311,16 +311,16 @@ export function MonthlyPage() {
 
         <div className="flex items-center gap-3">
           <div
-            className="flex items-center rounded"
+            className="seg-group"
             style={{
               backgroundColor: 'var(--bg-sidebar)',
-              border: '1px solid var(--border-hairline)',
+              borderColor: 'var(--border-hairline)',
             }}
           >
             <button
               type="button"
               onClick={() => shiftMonth(-1)}
-              className="btn-interactive p-1.5 rounded-l cursor-pointer"
+              className="btn-interactive p-1.5 rounded-lg cursor-pointer"
               aria-label="上一个月"
             >
               <ChevronLeft className="w-3.5 h-3.5" />
@@ -331,7 +331,7 @@ export function MonthlyPage() {
             <button
               type="button"
               onClick={() => shiftMonth(1)}
-              className="btn-interactive p-1.5 rounded-r cursor-pointer"
+              className="btn-interactive p-1.5 rounded-lg cursor-pointer"
               aria-label="下一个月"
             >
               <ChevronRight className="w-3.5 h-3.5" />
@@ -341,7 +341,7 @@ export function MonthlyPage() {
           <button
             type="button"
             onClick={() => void handleExport('csv')}
-            className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] rounded cursor-pointer"
+            className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] rounded-lg cursor-pointer"
             style={{
               border: '1px solid var(--border-hairline)',
               color: 'var(--text-primary)',
@@ -353,7 +353,7 @@ export function MonthlyPage() {
           <button
             type="button"
             onClick={() => void handleExport('json')}
-            className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] rounded cursor-pointer"
+            className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] rounded-lg cursor-pointer"
             style={{
               border: '1px solid var(--border-hairline)',
               color: 'var(--text-primary)',
@@ -367,7 +367,7 @@ export function MonthlyPage() {
 
       {exportNotice && (
         <div
-          className="px-3 py-2 text-[12px] rounded"
+          className="px-3 py-2 text-[12px] rounded-lg"
           style={{
             backgroundColor: 'var(--bg-elevated)',
             border: '1px solid var(--accent-emerald)',
@@ -570,7 +570,7 @@ export function MonthlyPage() {
           <button
             type="button"
             onClick={() => setRoiExpanded((prev) => !prev)}
-            className="row-interactive w-full flex items-center justify-between py-2 px-1 rounded cursor-pointer text-left"
+            className="row-interactive w-full flex items-center justify-between py-2 px-1 rounded-lg cursor-pointer text-left"
           >
             <div className="flex items-center gap-2">
               {roiExpanded ? (

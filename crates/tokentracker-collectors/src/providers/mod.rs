@@ -57,11 +57,14 @@ pub struct FileParseContext {
     pub lock_non_explicit_title: bool,
     pub session_title_dirty: bool,
     pub last_emitted_title_session_id: Option<String>,
+    /// True when log metadata/model indicates an automated background session (e.g. `codex-auto-review` / Guardian).
+    pub is_background_session: bool,
     pub line_number: u64,
 }
 
 fn title_source_priority(source: &str) -> u8 {
     match source {
+        "background" => 4,
         "explicit" => 3,
         "user_prompt" => 2,
         _ => 1,
@@ -108,18 +111,32 @@ impl FileParseContext {
         turn
     }
 
-    /// Record a candidate session title (`explicit` > `user_prompt` > `derived`;
+    /// Mark the current file's session as an automated background session (e.g. Guardian review).
+    pub fn mark_background_session(&mut self, label: &str, ts_ms: i64) {
+        self.is_background_session = true;
+        let _ = self.record_session_title(label, "background", ts_ms);
+    }
+
+    /// Record a candidate session title (`background` > `explicit` > `user_prompt` > `derived`;
     /// within non-explicit tiers, the earliest user prompt observed in the session wins).
     pub fn record_session_title(&mut self, raw_title: &str, source: &str, ts_ms: i64) -> bool {
         let norm_source = match source {
+            "background" => "background",
             "explicit" => "explicit",
             "user_prompt" => "user_prompt",
             _ => "derived",
         };
-        if norm_source != "explicit" && self.lock_non_explicit_title {
+        if !matches!(norm_source, "explicit" | "background") && self.lock_non_explicit_title {
             return false;
         }
-        let Some(clean) = sanitize_session_title(raw_title) else {
+        let clean = sanitize_session_title(raw_title).or_else(|| {
+            if norm_source == "background" {
+                Some("后台会话".to_string())
+            } else {
+                None
+            }
+        });
+        let Some(clean) = clean else {
             return false;
         };
         let new_prio = title_source_priority(norm_source);
@@ -128,7 +145,7 @@ impl FileParseContext {
             Some((_, prev_source, prev_ts)) => {
                 let prev_prio = title_source_priority(prev_source);
                 new_prio > prev_prio
-                    || (new_prio == prev_prio && (new_prio == 3 || ts_ms < *prev_ts))
+                    || (new_prio == prev_prio && (new_prio >= 3 || ts_ms < *prev_ts))
             }
         };
         if should_replace {

@@ -446,7 +446,7 @@ export function DataSourcesPage() {
           type="button"
           onClick={() => scanMutation.mutate()}
           disabled={scanMutation.isPending}
-          className="btn-primary flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] font-medium cursor-pointer disabled:opacity-50"
+          className="btn-primary flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium cursor-pointer disabled:opacity-50"
           style={{
             backgroundColor: 'var(--accent-primary)',
             color: '#ffffff',
@@ -461,7 +461,7 @@ export function DataSourcesPage() {
 
       {notice && (
         <div
-          className="px-3 py-2 text-[12px] rounded flex items-center justify-between"
+          className="px-3 py-2 text-[12px] rounded-lg flex items-center justify-between"
           style={{
             border: '1px solid var(--border-subtle)',
             backgroundColor: 'var(--bg-elevated)',
@@ -472,7 +472,7 @@ export function DataSourcesPage() {
           <button
             type="button"
             onClick={() => setNotice(null)}
-            className="btn-interactive px-1.5 py-0.5 rounded text-[11px] cursor-pointer"
+            className="btn-interactive px-1.5 py-0.5 rounded-lg text-[11px] cursor-pointer"
             style={{ color: 'var(--text-muted)' }}
           >
             关闭
@@ -482,7 +482,7 @@ export function DataSourcesPage() {
 
       {errorMsg && (
         <div
-          className="px-3 py-2 text-[12px] rounded flex items-center justify-between"
+          className="px-3 py-2 text-[12px] rounded-lg flex items-center justify-between"
           style={{
             border: '1px solid var(--accent-rose)',
             backgroundColor: 'var(--bg-elevated)',
@@ -493,7 +493,7 @@ export function DataSourcesPage() {
           <button
             type="button"
             onClick={() => setErrorMsg(null)}
-            className="btn-interactive px-1.5 py-0.5 rounded text-[11px] cursor-pointer"
+            className="btn-interactive px-1.5 py-0.5 rounded-lg text-[11px] cursor-pointer"
             style={{ color: 'var(--text-muted)' }}
           >
             关闭
@@ -536,7 +536,7 @@ export function DataSourcesPage() {
                       {providerDisplayName(cfg.provider_id)}
                     </span>
                     <span
-                      className="text-[11px] px-1.5 py-0.5 rounded tabular-nums"
+                      className="text-[11px] px-1.5 py-0.5 rounded-md tabular-nums"
                       style={{
                         backgroundColor: 'var(--bg-hover)',
                         border: '1px solid var(--border-hairline)',
@@ -563,7 +563,7 @@ export function DataSourcesPage() {
                           collection_mode: e.target.value as CollectionMode,
                         })
                       }
-                      className="px-2 py-1 text-[11.5px] rounded outline-none cursor-pointer"
+                      className="px-2 py-1 text-[11.5px] rounded-lg outline-none cursor-pointer"
                       style={{
                         backgroundColor: 'var(--bg-input)',
                         border: '1px solid var(--border-subtle)',
@@ -612,7 +612,7 @@ export function DataSourcesPage() {
                       {cfg.custom_log_paths.map((customPath) => (
                         <div
                           key={customPath}
-                          className="flex items-center justify-between gap-2 px-2.5 py-1 rounded text-[11.5px]"
+                          className="flex items-center justify-between gap-2 px-2.5 py-1 rounded-lg text-[11.5px]"
                           style={{
                             backgroundColor: 'var(--bg-elevated)',
                             border: '1px solid var(--border-subtle)',
@@ -622,7 +622,7 @@ export function DataSourcesPage() {
                           <button
                             type="button"
                             onClick={() => handleRemoveCustomPath(cfg, customPath)}
-                            className="btn-interactive inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] shrink-0 cursor-pointer"
+                            className="btn-danger inline-flex items-center gap-1 px-1.5 py-0.5 rounded-lg text-[11px] shrink-0 cursor-pointer"
                             style={{ color: 'var(--accent-rose)' }}
                           >
                             <Trash2 className="w-3 h-3" />
@@ -650,7 +650,7 @@ export function DataSourcesPage() {
                           handleAddCustomPath(cfg, pathDrafts[cfg.provider_id] ?? '');
                         }
                       }}
-                      className="flex-1 min-w-[260px] px-2.5 py-1 text-[11.5px] rounded outline-none"
+                      className="flex-1 min-w-[260px] px-2.5 py-1 text-[11.5px] rounded-lg outline-none"
                       style={{
                         backgroundColor: 'var(--bg-input)',
                         border: '1px solid var(--border-subtle)',
@@ -662,7 +662,7 @@ export function DataSourcesPage() {
                       onClick={() =>
                         handleAddCustomPath(cfg, pathDrafts[cfg.provider_id] ?? '')
                       }
-                      className="btn-interactive bg-[var(--bg-elevated)] px-2.5 py-1 text-[11.5px] rounded cursor-pointer"
+                      className="btn-interactive bg-[var(--bg-elevated)] px-2.5 py-1 text-[11.5px] rounded-lg cursor-pointer"
                       style={{
                         color: 'var(--text-primary)',
                         border: '1px solid var(--border-subtle)',
@@ -673,7 +673,7 @@ export function DataSourcesPage() {
                     <button
                       type="button"
                       onClick={() => handleBrowseFolder(cfg)}
-                      className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1 px-2.5 py-1 text-[11.5px] rounded cursor-pointer"
+                      className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1 px-2.5 py-1 text-[11.5px] rounded-lg cursor-pointer"
                       style={{
                         color: 'var(--text-primary)',
                         border: '1px solid var(--border-subtle)',
@@ -701,7 +701,7 @@ export function DataSourcesPage() {
                           : balanceApiMeta?.label}
                       </span>
                       <span
-                        className="px-1.5 py-0.5 rounded text-[10.5px]"
+                        className="px-1.5 py-0.5 rounded-md text-[10.5px]"
                         style={{
                           backgroundColor: 'var(--bg-hover)',
                           border: '1px solid var(--border-hairline)',
@@ -733,7 +733,7 @@ export function DataSourcesPage() {
                             [cfg.provider_id]: e.target.value,
                           }))
                         }
-                        className="w-56 px-2 py-1 text-[11.5px] rounded outline-none"
+                        className="w-56 px-2 py-1 text-[11.5px] rounded-lg outline-none"
                         style={{
                           backgroundColor: 'var(--bg-input)',
                           border: '1px solid var(--border-subtle)',
@@ -749,7 +749,7 @@ export function DataSourcesPage() {
                           })
                         }
                         disabled={saveApiKeyMutation.isPending}
-                        className="btn-interactive bg-[var(--bg-elevated)] px-2.5 py-1 rounded cursor-pointer disabled:opacity-50"
+                        className="btn-interactive bg-[var(--bg-elevated)] px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
                         style={{
                           color: 'var(--text-primary)',
                           border: '1px solid var(--border-subtle)',
@@ -764,7 +764,7 @@ export function DataSourcesPage() {
                               type="button"
                               onClick={() => reconcileMutation.mutate(cfg.provider_id)}
                               disabled={reconcileMutation.isPending}
-                              className="btn-primary px-2.5 py-1 rounded cursor-pointer disabled:opacity-50"
+                              className="btn-primary px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
                               style={{
                                 backgroundColor: 'var(--accent-primary)',
                                 color: '#ffffff',
@@ -777,7 +777,7 @@ export function DataSourcesPage() {
                               type="button"
                               onClick={() => refreshBalanceMutation.mutate(cfg.provider_id)}
                               disabled={refreshBalanceMutation.isPending}
-                              className="btn-primary px-2.5 py-1 rounded cursor-pointer disabled:opacity-50"
+                              className="btn-primary px-2.5 py-1 rounded-lg cursor-pointer disabled:opacity-50"
                               style={{
                                 backgroundColor: 'var(--accent-primary)',
                                 color: '#ffffff',
@@ -790,7 +790,7 @@ export function DataSourcesPage() {
                             type="button"
                             disabled={deleteApiKeyMutation.isPending}
                             onClick={() => deleteApiKeyMutation.mutate(cfg.provider_id)}
-                            className="btn-interactive px-2 py-1 rounded cursor-pointer disabled:opacity-50"
+                            className="btn-danger px-2 py-1 rounded-lg cursor-pointer disabled:opacity-50"
                             style={{ color: 'var(--accent-rose)' }}
                           >
                             清除密钥
@@ -801,7 +801,7 @@ export function DataSourcesPage() {
 
                     {reconcile && (
                       <div
-                        className="w-full px-2.5 py-1.5 rounded text-[11px] tabular-nums flex flex-wrap items-center gap-4"
+                        className="w-full px-2.5 py-1.5 rounded-lg text-[11px] tabular-nums flex flex-wrap items-center gap-4"
                         style={{
                           backgroundColor: 'var(--bg-elevated)',
                           border: '1px solid var(--border-hairline)',
@@ -820,7 +820,7 @@ export function DataSourcesPage() {
 
                     {balanceSnap && (
                       <div
-                        className="w-full px-2.5 py-1.5 rounded text-[11px] tabular-nums flex flex-wrap items-center gap-4"
+                        className="w-full px-2.5 py-1.5 rounded-lg text-[11px] tabular-nums flex flex-wrap items-center gap-4"
                         style={{
                           backgroundColor: 'var(--bg-elevated)',
                           border: '1px solid var(--border-hairline)',
@@ -923,7 +923,7 @@ export function DataSourcesPage() {
                 本地回环 OTLP 遥测接收器（127.0.0.1）
               </h2>
               <span
-                className="text-[11px] px-1.5 py-0.5 rounded tabular-nums"
+                className="text-[11px] px-1.5 py-0.5 rounded-md tabular-nums"
                 style={{
                   backgroundColor: 'var(--bg-hover)',
                   border: '1px solid var(--border-hairline)',
@@ -948,7 +948,7 @@ export function DataSourcesPage() {
                 max={65535}
                 value={activeOtlpPort}
                 onChange={(e) => setOtlpPortDraft(e.target.value)}
-                className="w-20 px-2 py-1 text-[12px] rounded outline-none tabular-nums"
+                className="w-20 px-2 py-1 text-[12px] rounded-lg outline-none tabular-nums"
                 style={{
                   backgroundColor: 'var(--bg-input)',
                   border: '1px solid var(--border-subtle)',
@@ -961,7 +961,7 @@ export function DataSourcesPage() {
                 type="button"
                 onClick={() => handleToggleOtlp(false)}
                 disabled={updateOtlpPrefsMutation.isPending}
-                className="btn-interactive bg-[var(--bg-elevated)] px-3 py-1 rounded text-[12px] font-medium cursor-pointer disabled:opacity-50"
+                className="btn-danger bg-[var(--bg-elevated)] px-3 py-1 rounded-lg text-[12px] font-medium cursor-pointer disabled:opacity-50"
                 style={{
                   color: 'var(--accent-rose)',
                   border: '1px solid var(--border-subtle)',
@@ -974,7 +974,7 @@ export function DataSourcesPage() {
                 type="button"
                 onClick={() => handleToggleOtlp(true)}
                 disabled={updateOtlpPrefsMutation.isPending}
-                className="btn-primary px-3 py-1 rounded text-[12px] font-medium cursor-pointer disabled:opacity-50"
+                className="btn-primary px-3 py-1 rounded-lg text-[12px] font-medium cursor-pointer disabled:opacity-50"
                 style={{
                   backgroundColor: 'var(--accent-primary)',
                   color: '#ffffff',
@@ -987,7 +987,7 @@ export function DataSourcesPage() {
         </div>
 
         <div
-          className="p-3 rounded flex items-start justify-between gap-4"
+          className="p-3 rounded-lg flex items-start justify-between gap-4"
           style={{
             backgroundColor: 'var(--bg-elevated)',
             border: '1px solid var(--border-subtle)',
@@ -1002,7 +1002,7 @@ export function DataSourcesPage() {
           <button
             type="button"
             onClick={handleCopyOtlpSnippet}
-            className="btn-interactive bg-[var(--bg-canvas)] inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded shrink-0 cursor-pointer"
+            className="btn-interactive bg-[var(--bg-canvas)] inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded-lg shrink-0 cursor-pointer"
             style={{
               color: 'var(--text-primary)',
               border: '1px solid var(--border-subtle)',
@@ -1036,7 +1036,7 @@ export function DataSourcesPage() {
               setExtTextDraft('jsonl, json');
               setSampleTestResult(null);
             }}
-            className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1 px-2.5 py-1 text-[11.5px] rounded cursor-pointer"
+            className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1 px-2.5 py-1 text-[11.5px] rounded-lg cursor-pointer"
             style={{
               color: 'var(--text-primary)',
               border: '1px solid var(--border-subtle)',
@@ -1082,7 +1082,7 @@ export function DataSourcesPage() {
                         {rule.rule_id} → {targetProviderId}
                       </code>
                       <span
-                        className="px-1.5 py-0.5 rounded text-[10.5px]"
+                        className="px-1.5 py-0.5 rounded-md text-[10.5px]"
                         style={{
                           backgroundColor: 'var(--bg-hover)',
                           border: '1px solid var(--border-hairline)',
@@ -1126,7 +1126,7 @@ export function DataSourcesPage() {
                         );
                         setSampleTestResult(null);
                       }}
-                      className="btn-interactive bg-[var(--bg-elevated)] px-2 py-1 text-[11px] rounded cursor-pointer"
+                      className="btn-interactive bg-[var(--bg-elevated)] px-2 py-1 text-[11px] rounded-lg cursor-pointer"
                       style={{
                         border: '1px solid var(--border-subtle)',
                         color: 'var(--text-primary)',
@@ -1138,7 +1138,7 @@ export function DataSourcesPage() {
                       type="button"
                       aria-label={`删除自定义规则 ${rule.rule_id}`}
                       onClick={() => deleteCustomRuleMutation.mutate(rule.rule_id)}
-                      className="btn-interactive inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded cursor-pointer"
+                      className="btn-danger inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded-lg cursor-pointer"
                       style={{ color: 'var(--accent-rose)' }}
                     >
                       <Trash2 className="w-3 h-3" />
@@ -1168,7 +1168,7 @@ export function DataSourcesPage() {
                 onChange={(e) =>
                   setRuleDraft((prev) => ({ ...prev, rule_id: e.target.value }))
                 }
-                className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none"
+                className="w-full px-2.5 py-1.5 text-[12px] rounded-lg outline-none"
                 style={{
                   backgroundColor: 'var(--bg-input)',
                   border: '1px solid var(--border-subtle)',
@@ -1189,7 +1189,7 @@ export function DataSourcesPage() {
                 onChange={(e) =>
                   setRuleDraft((prev) => ({ ...prev, display_name: e.target.value }))
                 }
-                className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none"
+                className="w-full px-2.5 py-1.5 text-[12px] rounded-lg outline-none"
                 style={{
                   backgroundColor: 'var(--bg-input)',
                   border: '1px solid var(--border-subtle)',
@@ -1211,7 +1211,7 @@ export function DataSourcesPage() {
                     protocol_kind: e.target.value as CustomProtocolKind,
                   }))
                 }
-                className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none cursor-pointer"
+                className="w-full px-2.5 py-1.5 text-[12px] rounded-lg outline-none cursor-pointer"
                 style={{
                   backgroundColor: 'var(--bg-input)',
                   border: '1px solid var(--border-subtle)',
@@ -1235,7 +1235,7 @@ export function DataSourcesPage() {
                 placeholder="jsonl, json"
                 value={extTextDraft}
                 onChange={(e) => setExtTextDraft(e.target.value)}
-                className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none"
+                className="w-full px-2.5 py-1.5 text-[12px] rounded-lg outline-none"
                 style={{
                   backgroundColor: 'var(--bg-input)',
                   border: '1px solid var(--border-subtle)',
@@ -1255,7 +1255,7 @@ export function DataSourcesPage() {
                 placeholder="~/.my-cli/logs"
                 value={rootsTextDraft}
                 onChange={(e) => setRootsTextDraft(e.target.value)}
-                className="w-full px-2.5 py-1.5 text-[11.5px] font-mono rounded outline-none"
+                className="w-full px-2.5 py-1.5 text-[11.5px] font-mono rounded-lg outline-none"
                 style={{
                   backgroundColor: 'var(--bg-input)',
                   border: '1px solid var(--border-subtle)',
@@ -1281,7 +1281,7 @@ export function DataSourcesPage() {
                     },
                   }))
                 }
-                className="w-full px-2.5 py-1.5 text-[12px] rounded outline-none"
+                className="w-full px-2.5 py-1.5 text-[12px] rounded-lg outline-none"
                 style={{
                   backgroundColor: 'var(--bg-input)',
                   border: '1px solid var(--border-subtle)',
@@ -1321,7 +1321,7 @@ export function DataSourcesPage() {
                         },
                       }))
                     }
-                    className="w-full px-2 py-1 text-[11px] font-mono rounded outline-none"
+                    className="w-full px-2 py-1 text-[11px] font-mono rounded-lg outline-none"
                     style={{
                       backgroundColor: 'var(--bg-input)',
                       border: '1px solid var(--border-subtle)',
@@ -1348,7 +1348,7 @@ export function DataSourcesPage() {
                       sampleLine: sampleLineDraft,
                     })
                   }
-                  className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1.5 px-2.5 py-1 text-[11.5px] rounded cursor-pointer disabled:opacity-50"
+                  className="btn-interactive bg-[var(--bg-elevated)] inline-flex items-center gap-1.5 px-2.5 py-1 text-[11.5px] rounded-lg cursor-pointer disabled:opacity-50"
                   style={{
                     color: 'var(--text-primary)',
                     border: '1px solid var(--border-subtle)',
@@ -1363,7 +1363,7 @@ export function DataSourcesPage() {
                   onClick={() =>
                     upsertCustomRuleMutation.mutate(buildNormalizedDraftRule(ruleDraft))
                   }
-                  className="btn-primary px-3 py-1 text-[11.5px] font-medium rounded cursor-pointer disabled:opacity-50"
+                  className="btn-primary px-3 py-1 text-[11.5px] font-medium rounded-lg cursor-pointer disabled:opacity-50"
                   style={{
                     backgroundColor: 'var(--accent-primary)',
                     color: '#ffffff',
@@ -1379,7 +1379,7 @@ export function DataSourcesPage() {
               aria-label="脱敏 JSONL 样本行"
               value={sampleLineDraft}
               onChange={(e) => setSampleLineDraft(e.target.value)}
-              className="w-full px-2.5 py-1.5 text-[11px] font-mono rounded outline-none"
+              className="w-full px-2.5 py-1.5 text-[11px] font-mono rounded-lg outline-none"
               style={{
                 backgroundColor: 'var(--bg-input)',
                 border: '1px solid var(--border-subtle)',
@@ -1389,7 +1389,7 @@ export function DataSourcesPage() {
 
             {sampleTestResult && (
               <div
-                className="px-3 py-2 rounded text-[11.5px] tabular-nums flex flex-wrap items-center gap-4"
+                className="px-3 py-2 rounded-lg text-[11.5px] tabular-nums flex flex-wrap items-center gap-4"
                 style={{
                   backgroundColor: 'var(--bg-elevated)',
                   border: '1px solid var(--border-hairline)',

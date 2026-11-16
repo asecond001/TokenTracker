@@ -72,6 +72,7 @@ function defaultPreviewPreferences(now: number): AppPreferences {
     floating_window_enabled: previewFloatingVisible,
     last_rate_sync_at_ms: null,
     last_pricing_sync_at_ms: null,
+    last_subscription_sync_at_ms: null,
     updated_at_ms: now,
   };
 }
@@ -233,6 +234,33 @@ function previewSubscriptionTemplates(): SubscriptionPlanTemplate[] {
           critical_percent: 95,
         },
       ],
+      live_windows: [],
+    },
+    {
+      template_id: 'cursor_pro',
+      provider_id: 'cursor',
+      plan_name: 'Cursor Pro',
+      monthly_fee_micro_usd: 20_000_000,
+      description: 'Cursor Pro 月度订阅（USD 20/月，来自 AI Subscription Catalog）',
+      windows: [],
+      live_windows: [],
+    },
+    {
+      template_id: 'github_copilot_pro',
+      provider_id: 'github_copilot',
+      plan_name: 'GitHub Copilot Pro',
+      monthly_fee_micro_usd: 10_000_000,
+      description: 'GitHub Copilot Pro 月度订阅（USD 10/月，来自 AI Subscription Catalog）',
+      windows: [],
+      live_windows: [],
+    },
+    {
+      template_id: 'windsurf_pro',
+      provider_id: 'windsurf',
+      plan_name: 'Windsurf Pro',
+      monthly_fee_micro_usd: 15_000_000,
+      description: 'Windsurf Pro 月度订阅（USD 15/月，来自 AI Subscription Catalog）',
+      windows: [],
       live_windows: [],
     },
   ];
@@ -501,9 +529,12 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
         pricing_updated: false,
         synced_models_count: 0,
         recomputed_events_count: 0,
+        subscriptions_updated: false,
+        synced_plans_count: 0,
         synced_at_ms: now,
         rate_source: null,
         pricing_source: null,
+        subscription_source: null,
         warning: null,
       } as T;
     case 'preview_sync_envelope_v1':

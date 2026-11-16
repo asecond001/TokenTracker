@@ -29,10 +29,10 @@ export function TimeRangeControl({ className = '' }: TimeRangeControlProps) {
     <div
       data-testid="time-range-control"
       aria-label="时间范围选择"
-      className={`relative inline-flex items-center p-0.5 rounded-full ${className}`.trim()}
+      className={`seg-group relative ${className}`.trim()}
       style={{
         backgroundColor: 'var(--surface-glass)',
-        border: '1px solid var(--border-hairline)',
+        borderColor: 'var(--border-hairline)',
         boxShadow: 'var(--border-specular)',
       }}
     >
@@ -72,7 +72,7 @@ export function TimeRangeControl({ className = '' }: TimeRangeControlProps) {
             aria-label="开始日期"
             value={customStartDate}
             onChange={(e) => setCustomDateRange(e.target.value, customEndDate)}
-            className="px-2 py-1 text-[11.5px] rounded tabular-nums"
+            className="px-2 py-1 text-[11.5px] rounded-lg tabular-nums"
             style={{
               backgroundColor: 'var(--bg-input)',
               border: '1px solid var(--border-subtle)',
@@ -85,7 +85,7 @@ export function TimeRangeControl({ className = '' }: TimeRangeControlProps) {
             aria-label="结束日期"
             value={customEndDate}
             onChange={(e) => setCustomDateRange(customStartDate, e.target.value)}
-            className="px-2 py-1 text-[11.5px] rounded tabular-nums"
+            className="px-2 py-1 text-[11.5px] rounded-lg tabular-nums"
             style={{
               backgroundColor: 'var(--bg-input)',
               border: '1px solid var(--border-subtle)',
@@ -95,7 +95,7 @@ export function TimeRangeControl({ className = '' }: TimeRangeControlProps) {
           <button
             type="button"
             onClick={() => setShowCustomPopover(false)}
-            className="btn-interactive px-2 py-1 text-[11.5px] rounded cursor-pointer"
+            className="btn-primary px-2.5 py-1 text-[11.5px] rounded-lg cursor-pointer"
             style={{
               backgroundColor: 'var(--accent-primary)',
               color: '#ffffff',

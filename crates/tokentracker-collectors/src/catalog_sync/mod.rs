@@ -3,11 +3,12 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use chrono::Utc;
-use tokentracker_core::domain::CatalogSyncResult;
+use tokentracker_core::domain::{CatalogSyncResult, SubscriptionPlanTemplate};
 use tokentracker_core::pricing::{
     format_exchange_rate, parse_litellm_catalog, parse_models_dev_catalog,
     parse_remote_exchange_rate_json,
 };
+use tokentracker_core::subscription::parse_subscription_catalog_json;
 use tokentracker_core::{CoreResult, Storage};
 
 pub const DEFAULT_FRANKFURTER_URL: &str = "https://api.frankfurter.dev/v1/latest?base=USD&symbols=CNY";
@@ -15,20 +16,29 @@ pub const DEFAULT_OPEN_ER_URL: &str = "https://open.er-api.com/v6/latest/USD";
 pub const DEFAULT_MODELS_DEV_URL: &str = "https://models.dev/api.json";
 pub const DEFAULT_LITELLM_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+pub const DEFAULT_SUBSCRIPTION_CATALOG_PAGES_URL: &str =
+    "https://asecond001.github.io/ai-subscription-catalog/v1/plans.json";
+pub const DEFAULT_SUBSCRIPTION_CATALOG_JSDELIVR_URL: &str =
+    "https://cdn.jsdelivr.net/gh/asecond001/ai-subscription-catalog@main/catalog/subscription-plans.json";
+pub const DEFAULT_SUBSCRIPTION_CATALOG_RAW_URL: &str =
+    "https://raw.githubusercontent.com/asecond001/ai-subscription-catalog/main/catalog/subscription-plans.json";
 
 pub const RATE_SYNC_TTL_MS: i64 = 12 * 3_600_000;
 pub const PRICING_SYNC_TTL_MS: i64 = 24 * 3_600_000;
+pub const SUBSCRIPTION_SYNC_TTL_MS: i64 = 24 * 3_600_000;
 const CONNECT_TIMEOUT_SECS: u64 = 5;
 const REQUEST_TIMEOUT_SECS: u64 = 12;
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
-/// Configurable public unauthenticated HTTPS endpoints for USD->CNY rates & model pricing catalogs.
+/// Configurable public unauthenticated HTTPS endpoints for USD->CNY rates,
+/// model pricing catalogs, and `AI Subscription Catalog` templates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogSyncEndpoints {
     pub frankfurter_url: String,
     pub open_er_url: String,
     pub models_dev_url: String,
     pub litellm_url: String,
+    pub subscription_catalog_urls: Vec<String>,
 }
 
 impl Default for CatalogSyncEndpoints {
@@ -38,6 +48,11 @@ impl Default for CatalogSyncEndpoints {
             open_er_url: DEFAULT_OPEN_ER_URL.to_string(),
             models_dev_url: DEFAULT_MODELS_DEV_URL.to_string(),
             litellm_url: DEFAULT_LITELLM_URL.to_string(),
+            subscription_catalog_urls: vec![
+                DEFAULT_SUBSCRIPTION_CATALOG_PAGES_URL.to_string(),
+                DEFAULT_SUBSCRIPTION_CATALOG_JSDELIVR_URL.to_string(),
+                DEFAULT_SUBSCRIPTION_CATALOG_RAW_URL.to_string(),
+            ],
         }
     }
 }
@@ -114,12 +129,22 @@ pub async fn sync_catalog_and_rate_with_fetcher(
                 .last_pricing_sync_at_ms
                 .is_none_or(|ts| now_ms.saturating_sub(ts) >= PRICING_SYNC_TTL_MS));
 
+    let should_sync_subscriptions = !endpoints.subscription_catalog_urls.is_empty()
+        && (force
+            || (prefs.auto_sync_pricing
+                && prefs
+                    .last_subscription_sync_at_ms
+                    .is_none_or(|ts| now_ms.saturating_sub(ts) >= SUBSCRIPTION_SYNC_TTL_MS)));
+
     let mut rate_updated = false;
     let mut pricing_updated = false;
     let mut synced_models_count = 0usize;
     let mut recomputed_events_count = 0usize;
     let mut rate_source: Option<String> = None;
     let mut pricing_source: Option<String> = None;
+    let mut subscriptions_updated = false;
+    let mut synced_plans_count = 0usize;
+    let mut subscription_source: Option<String> = None;
     let mut warnings: Vec<String> = Vec::new();
 
     if should_sync_rate {
@@ -153,8 +178,29 @@ pub async fn sync_catalog_and_rate_with_fetcher(
         }
     }
 
+    if should_sync_subscriptions {
+        match fetch_subscription_catalog_with_fallback(fetcher, &endpoints.subscription_catalog_urls)
+            .await
+        {
+            Ok((templates, source)) => {
+                let (changed, count) =
+                    storage.apply_synced_subscription_catalog(&templates, now_ms)?;
+                subscriptions_updated = changed;
+                synced_plans_count = count;
+                subscription_source = Some(source);
+            }
+            Err(err) => {
+                tracing::warn!("AI Subscription Catalog sync failed (offline fallback): {err}");
+                warnings.push(format!("订阅套餐目录同步失败，已沿用本地目录 ({err})"));
+            }
+        }
+    }
+
     if synced_models_count == 0 {
         synced_models_count = storage.list_model_pricing()?.len();
+    }
+    if synced_plans_count == 0 {
+        synced_plans_count = storage.query_subscription_templates(now_ms)?.len();
     }
 
     let latest_prefs = storage.get_preferences()?;
@@ -173,8 +219,54 @@ pub async fn sync_catalog_and_rate_with_fetcher(
         synced_at_ms: now_ms,
         rate_source,
         pricing_source,
+        subscriptions_updated,
+        synced_plans_count,
+        subscription_source,
         warning,
     })
+}
+
+fn source_label_for_catalog_url(url: &str) -> String {
+    if url.contains("github.io") {
+        "github-pages".to_string()
+    } else if url.contains("jsdelivr.net") {
+        "jsdelivr".to_string()
+    } else if url.contains("raw.githubusercontent.com") {
+        "github-raw".to_string()
+    } else {
+        url.split("://")
+            .nth(1)
+            .and_then(|s| s.split('/').next())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("custom")
+            .to_string()
+    }
+}
+
+async fn fetch_subscription_catalog_with_fallback(
+    fetcher: &dyn TextHttpFetcher,
+    urls: &[String],
+) -> Result<(Vec<SubscriptionPlanTemplate>, String), String> {
+    let mut errors: Vec<String> = Vec::new();
+    for url in urls {
+        let trimmed = url.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let label = source_label_for_catalog_url(trimmed);
+        match fetcher.fetch_text(trimmed).await {
+            Ok(body) => match parse_subscription_catalog_json(&body) {
+                Ok(templates) => return Ok((templates, label)),
+                Err(e) => errors.push(format!("{label} parse error: {e}")),
+            },
+            Err(e) => errors.push(format!("{label} fetch error: {e}")),
+        }
+    }
+    if errors.is_empty() {
+        Err("no subscription catalog URLs configured".to_string())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 async fn fetch_exchange_rate_with_fallback(
