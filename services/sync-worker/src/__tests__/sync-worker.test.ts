@@ -295,4 +295,90 @@ describe('tokenvane-sync-worker SQLite Durable Object hub', () => {
     await reader!.cancel();
     expect(hub.activeSseCount).toBe(0);
   });
+
+  it('pre-compiled bundle/index.js serves /healthz and handles push/pull identically to TS source', async () => {
+    const bundleUrl = new URL('../../bundle/index.js', import.meta.url).href;
+    const bundleMod = (await import(bundleUrl)) as {
+      default: {
+        fetch: (request: Request, env: WorkerEnv, ctx: CfExecutionContext) => Promise<Response>;
+      };
+      SyncHubDO: new (
+        state: CfDurableObjectState,
+        env: WorkerEnv
+      ) => {
+        fetch: (request: Request) => Promise<Response>;
+      };
+    };
+
+    const adapter = new NodeSqliteAdapter(db);
+    const bundledDo = new bundleMod.SyncHubDO(
+      {
+        storage: {
+          sql: {
+            exec: <T extends Record<string, unknown>>(
+              query: string,
+              ...bindings: Array<string | number | null>
+            ) => ({
+              toArray: () => adapter.exec<T>(query, ...bindings),
+            }),
+          },
+        },
+      },
+      {} as WorkerEnv
+    );
+    const bundledEnv: WorkerEnv = {
+      SYNC_TOKEN: 'bundle-test-token',
+      SYNC_HUB: {
+        idFromName: (name: string) => ({ toString: () => name }),
+        get: () => ({
+          fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+            const req = input instanceof Request ? input : new Request(input, init);
+            return bundledDo.fetch(req);
+          },
+        }),
+      },
+    };
+    const dummyCtx: CfExecutionContext = {
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+    };
+
+    const healthRes = await bundleMod.default.fetch(
+      new Request('https://bundle.example.workers.dev/healthz'),
+      bundledEnv,
+      dummyCtx
+    );
+    expect(healthRes.status).toBe(200);
+    const health = (await healthRes.json()) as { ok: boolean; service: string; protocol_version: number };
+    expect(health).toEqual({ ok: true, service: 'tokenvane-sync-worker', protocol_version: 1 });
+
+    const pushRes = await bundleMod.default.fetch(
+      new Request('https://bundle.example.workers.dev/v1/sync/push', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer bundle-test-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          mode: 'plaintext',
+          envelope: makeEnvelope('dev-bundle-a', 'Bundle PC', 2400),
+        }),
+      }),
+      bundledEnv,
+      dummyCtx
+    );
+    expect(pushRes.status).toBe(200);
+
+    const pullRes = await bundleMod.default.fetch(
+      new Request('https://bundle.example.workers.dev/v1/sync/pull?since=0&exclude_device=dev-bundle-b', {
+        headers: { Authorization: 'Bearer bundle-test-token' },
+      }),
+      bundledEnv,
+      dummyCtx
+    );
+    expect(pullRes.status).toBe(200);
+    const pullBody = (await pullRes.json()) as SyncPullResponseV1;
+    expect(pullBody.items).toHaveLength(1);
+    expect(pullBody.items[0].envelope?.hourly_deltas[0].input_tokens).toBe(2400);
+  });
 });

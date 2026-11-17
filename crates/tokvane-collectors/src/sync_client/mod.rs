@@ -18,6 +18,7 @@ use crate::error::{CollectorError, CollectorResult};
 
 pub const SYNC_BEARER_TOKEN_KEY: &str = "__cloud_sync_bearer_token__";
 pub const SYNC_E2EE_PASSPHRASE_KEY: &str = "__cloud_sync_e2ee_passphrase__";
+pub const SYNC_CF_API_TOKEN_KEY: &str = "__cloud_sync_cf_api_token__";
 
 const PUSH_DEBOUNCE_SECS: u64 = 3;
 const SSE_BACKOFF_SECS: [u64; 4] = [2, 5, 15, 60];
@@ -163,6 +164,8 @@ pub struct SyncStatusView {
     pub e2ee_kdf_salt_hex: Option<String>,
     pub has_bearer_token: bool,
     pub has_e2ee_passphrase: bool,
+    #[serde(default)]
+    pub has_cf_api_token: bool,
     pub sse_connected: bool,
     pub last_push_watermark_ms: i64,
     pub last_pull_watermark_ms: i64,
@@ -240,10 +243,11 @@ pub fn set_sync_credentials(
     Ok(())
 }
 
-/// Remove cloud sync Bearer token and E2EE passphrase from the OS credential store.
+/// Remove cloud sync Bearer token, E2EE passphrase, and Cloudflare API token from the OS credential store.
 pub fn clear_sync_credentials(credentials: &dyn CredentialManager) -> CollectorResult<()> {
     credentials.delete_api_key(SYNC_BEARER_TOKEN_KEY)?;
     credentials.delete_api_key(SYNC_E2EE_PASSPHRASE_KEY)?;
+    credentials.delete_api_key(SYNC_CF_API_TOKEN_KEY)?;
     Ok(())
 }
 
@@ -953,6 +957,9 @@ pub fn read_sync_status_view(
     let cfg = storage.get_sync_config_state()?;
     let (has_bearer_token, has_e2ee_passphrase) =
         has_sync_credentials(credentials).unwrap_or((false, false));
+    let has_cf_api_token = credentials
+        .has_api_key(SYNC_CF_API_TOKEN_KEY)
+        .unwrap_or(false);
     Ok(SyncStatusView {
         enabled: cfg.enabled,
         worker_url: cfg.worker_url,
@@ -960,6 +967,7 @@ pub fn read_sync_status_view(
         e2ee_kdf_salt_hex: cfg.e2ee_kdf_salt_hex,
         has_bearer_token,
         has_e2ee_passphrase,
+        has_cf_api_token,
         sse_connected,
         last_push_watermark_ms: cfg.last_push_watermark_ms,
         last_pull_watermark_ms: cfg.last_pull_watermark_ms,

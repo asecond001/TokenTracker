@@ -6,6 +6,7 @@ pub mod error;
 pub mod otlp;
 pub mod providers;
 pub mod sync_client;
+pub mod sync_provision;
 pub mod watcher;
 
 pub use catalog_sync::{
@@ -25,6 +26,10 @@ pub use sync_client::{
     read_sync_status_view, run_sync_cycle_once, run_sync_cycle_with_transport,
     set_sync_credentials, ReqwestSyncTransport, SseByteStream, SyncBoxFuture, SyncClientHandle,
     SyncHttpTransport, SyncRunReport, SyncStatusView, SYNC_BEARER_TOKEN_KEY,
-    SYNC_E2EE_PASSPHRASE_KEY,
+    SYNC_CF_API_TOKEN_KEY, SYNC_E2EE_PASSPHRASE_KEY,
+};
+pub use sync_provision::{
+    provision_worker, provision_worker_with, CloudSyncProvisionRequest, CloudflareApiTransport,
+    ProvisionMode, ProvisionedWorkerArtifacts, WranglerCliRunner, WranglerCmdOutput,
 };
 pub use watcher::{CollectorCoordinator, ScanReport};

@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "./bundle",
+    "rootDir": "./src",
+    "removeComments": true,
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["src/index.ts", "src/hub.ts", "src/cloudflare-types.d.ts"]
+}

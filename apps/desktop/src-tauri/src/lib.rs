@@ -97,6 +97,7 @@ pub fn run() {
             commands::get_sync_status,
             commands::update_sync_config,
             commands::save_cloud_sync_setup,
+            commands::provision_cloud_sync_worker,
             commands::get_sync_pairing_bundle,
             commands::set_sync_credentials,
             commands::clear_sync_credentials,

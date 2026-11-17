@@ -602,12 +602,36 @@ export interface SyncStatusView {
   e2ee_kdf_salt_hex: string | null;
   has_bearer_token: boolean;
   has_e2ee_passphrase: boolean;
+  has_cf_api_token?: boolean;
   sse_connected: boolean;
   last_push_watermark_ms: number;
   last_pull_watermark_ms: number;
   last_sync_at_ms: number | null;
   last_sync_error: string | null;
   updated_at_ms: number;
+}
+
+export type CloudSyncDeployMode = 'wrangler_cli' | 'cloudflare_api';
+
+export interface CloudSyncProvisionInput {
+  mode: CloudSyncDeployMode;
+  worker_name: string | null;
+  bearer_token: string | null;
+  e2ee_enabled: boolean;
+  e2ee_passphrase: string | null;
+  cf_api_token: string | null;
+  cf_account_id: string | null;
+}
+
+export interface CloudSyncProvisionResult {
+  mode: CloudSyncDeployMode;
+  worker_name: string;
+  worker_url: string;
+  bearer_token: string;
+  e2ee_passphrase: string | null;
+  initial_sync_ok: boolean;
+  status: SyncStatusView;
+  pairing: SyncPairingBundle;
 }
 
 export interface SyncPairingBundle {

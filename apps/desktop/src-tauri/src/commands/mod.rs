@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 use tokvane_collectors::providers::official_api::{
@@ -10,10 +10,10 @@ use tokvane_collectors::providers::official_api::{
 };
 use tokvane_collectors::{
     build_sync_pairing_uri, clear_sync_credentials as clear_sync_creds, has_sync_credentials,
-    normalize_worker_url, refresh_provider_balance as collect_provider_balance,
+    normalize_worker_url, provision_worker, refresh_provider_balance as collect_provider_balance,
     refresh_provider_balance_force as collect_provider_balance_force,
-    set_sync_credentials as set_sync_creds, BalanceRefreshOutcome, ScanReport, SyncRunReport,
-    SyncStatusView, SYNC_BEARER_TOKEN_KEY, SYNC_E2EE_PASSPHRASE_KEY,
+    set_sync_credentials as set_sync_creds, BalanceRefreshOutcome, CloudSyncProvisionRequest,
+    ScanReport, SyncRunReport, SyncStatusView, SYNC_BEARER_TOKEN_KEY, SYNC_E2EE_PASSPHRASE_KEY,
 };
 use tokvane_core::analytics::{
     export_monthly_csv, export_monthly_json, AnalyticsFilter, ModelStatsReport, MonthlyQuery,
@@ -28,7 +28,7 @@ use tokvane_core::domain::{
 };
 use tokvane_core::subscription::SubscriptionPlanStatus;
 use tokvane_core::sync_crypto::generate_kdf_salt_hex;
-use tokvane_core::CoreError;
+use tokvane_core::{CoreError, Storage};
 
 use crate::state::AppState;
 use crate::tray::{
@@ -932,6 +932,27 @@ pub fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatusView, Ipc
     state.sync_client.status_view().map_err(IpcError::from)
 }
 
+fn resolve_missing_e2ee_salt(
+    storage: &Storage,
+    e2ee_enabled: bool,
+) -> Result<Option<String>, IpcError> {
+    if !e2ee_enabled {
+        return Ok(None);
+    }
+    let current = storage.get_sync_config_state().map_err(IpcError::from)?;
+    if current
+        .e2ee_kdf_salt_hex
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        Ok(Some(generate_kdf_salt_hex().map_err(IpcError::from)?))
+    } else {
+        Ok(None)
+    }
+}
+
 #[tauri::command]
 pub fn update_sync_config(
     state: State<'_, AppState>,
@@ -939,22 +960,7 @@ pub fn update_sync_config(
     worker_url: Option<String>,
     e2ee_enabled: bool,
 ) -> Result<SyncStatusView, IpcError> {
-    let current = state
-        .storage
-        .get_sync_config_state()
-        .map_err(IpcError::from)?;
-    let salt = if e2ee_enabled
-        && current
-            .e2ee_kdf_salt_hex
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_none()
-    {
-        Some(generate_kdf_salt_hex().map_err(IpcError::from)?)
-    } else {
-        None
-    };
+    let salt = resolve_missing_e2ee_salt(&state.storage, e2ee_enabled)?;
 
     state
         .storage
@@ -976,6 +982,29 @@ pub struct SyncPairingBundle {
     pub worker_url: String,
     pub e2ee_enabled: bool,
     pub includes_passphrase: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CloudSyncProvisionInput {
+    pub mode: String,
+    pub worker_name: Option<String>,
+    pub bearer_token: Option<String>,
+    pub e2ee_enabled: bool,
+    pub e2ee_passphrase: Option<String>,
+    pub cf_api_token: Option<String>,
+    pub cf_account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CloudSyncProvisionResult {
+    pub mode: String,
+    pub worker_name: String,
+    pub worker_url: String,
+    pub bearer_token: String,
+    pub e2ee_passphrase: Option<String>,
+    pub initial_sync_ok: bool,
+    pub status: SyncStatusView,
+    pub pairing: SyncPairingBundle,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1032,22 +1061,7 @@ pub fn save_cloud_sync_setup(
         ));
     }
 
-    let current = state
-        .storage
-        .get_sync_config_state()
-        .map_err(IpcError::from)?;
-    let salt = if e2ee_enabled
-        && current
-            .e2ee_kdf_salt_hex
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_none()
-    {
-        Some(generate_kdf_salt_hex().map_err(IpcError::from)?)
-    } else {
-        None
-    };
+    let salt = resolve_missing_e2ee_salt(&state.storage, e2ee_enabled)?;
 
     state
         .storage
@@ -1062,9 +1076,8 @@ pub fn save_cloud_sync_setup(
     state.sync_client.status_view().map_err(IpcError::from)
 }
 
-#[tauri::command]
-pub fn get_sync_pairing_bundle(
-    state: State<'_, AppState>,
+fn build_sync_pairing_bundle(
+    state: &AppState,
     include_passphrase: bool,
 ) -> Result<SyncPairingBundle, IpcError> {
     let cfg = state
@@ -1117,6 +1130,87 @@ pub fn get_sync_pairing_bundle(
         worker_url,
         e2ee_enabled: cfg.e2ee_enabled,
         includes_passphrase,
+    })
+}
+
+#[tauri::command]
+pub fn get_sync_pairing_bundle(
+    state: State<'_, AppState>,
+    include_passphrase: bool,
+) -> Result<SyncPairingBundle, IpcError> {
+    build_sync_pairing_bundle(&state, include_passphrase)
+}
+
+#[tauri::command]
+pub async fn provision_cloud_sync_worker(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: CloudSyncProvisionInput,
+) -> Result<CloudSyncProvisionResult, IpcError> {
+    let req = CloudSyncProvisionRequest {
+        mode: input.mode,
+        worker_name: input.worker_name,
+        bearer_token: input.bearer_token,
+        e2ee_enabled: input.e2ee_enabled,
+        e2ee_passphrase: input.e2ee_passphrase,
+        cf_api_token: input.cf_api_token,
+        cf_account_id: input.cf_account_id,
+    };
+    let artifacts = provision_worker(state.credentials.as_ref(), &req)
+        .await
+        .map_err(IpcError::from)?;
+
+    set_sync_creds(
+        state.credentials.as_ref(),
+        Some(&artifacts.bearer_token),
+        artifacts.e2ee_passphrase.as_deref(),
+    )
+    .map_err(IpcError::from)?;
+
+    let salt = resolve_missing_e2ee_salt(&state.storage, req.e2ee_enabled)?;
+    state
+        .storage
+        .update_sync_config_state(
+            true,
+            Some(&artifacts.worker_url),
+            req.e2ee_enabled,
+            salt.as_deref(),
+        )
+        .map_err(IpcError::from)?;
+    state.sync_client.reconfigure();
+
+    // New workers.dev subdomains can take a moment for global edge routing propagation.
+    let mut initial_sync_ok = false;
+    for backoff_ms in [0u64, 700, 1400] {
+        if backoff_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+        }
+        if let Ok(report) = state.sync_client.trigger_now().await {
+            initial_sync_ok = true;
+            if report.applied_hourly_buckets > 0 || report.applied_subscriptions > 0 {
+                let _ = app.emit("usage-updated", &report);
+            }
+            break;
+        }
+    }
+    if !initial_sync_ok {
+        let _ = state
+            .storage
+            .record_sync_error(None, Utc::now().timestamp_millis());
+    }
+
+    let status = state.sync_client.status_view().map_err(IpcError::from)?;
+    let pairing = build_sync_pairing_bundle(&state, req.e2ee_enabled)?;
+
+    Ok(CloudSyncProvisionResult {
+        mode: artifacts.mode,
+        worker_name: artifacts.worker_name,
+        worker_url: artifacts.worker_url,
+        bearer_token: artifacts.bearer_token,
+        e2ee_passphrase: artifacts.e2ee_passphrase,
+        initial_sync_ok,
+        status,
+        pairing,
     })
 }
 

@@ -32,6 +32,7 @@ import type {
   BalanceRefreshOutcome,
   BootstrapState,
   CatalogSyncResult,
+  CloudSyncProvisionResult,
   CustomRuleTestResult,
   DeviceRecord,
   ModelStatsReport,
@@ -1843,7 +1844,7 @@ describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sy
     const passInput = screen.getByLabelText('E2EE 同步口令') as HTMLInputElement;
     fireEvent.change(tokenInput, { target: { value: 'tok-secret-123' } });
     fireEvent.change(passInput, { target: { value: 'e2ee-pass-999' } });
-    fireEvent.click(screen.getByRole('button', { name: '一键配置并连接' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存并连接' }));
 
     await waitFor(() => {
       expect(saveSetupSpy).toHaveBeenCalledWith(
@@ -1897,6 +1898,149 @@ describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sy
     expect(screen.getByText('MacBookPro')).toBeInTheDocument();
     expect(screen.getByText('只读远端快照')).toBeInTheDocument();
     expect(screen.getByText('已用 42.5%')).toBeInTheDocument();
+  });
+
+  it('one-click provisions Cloudflare Worker via Wrangler or API token, auto-fills fields, and opens mobile pairing QR', async () => {
+    const now = Date.now();
+    let currentSyncStatus: SyncStatusView = {
+      enabled: false,
+      worker_url: null,
+      e2ee_enabled: false,
+      e2ee_kdf_salt_hex: null,
+      has_bearer_token: false,
+      has_e2ee_passphrase: false,
+      has_cf_api_token: false,
+      sse_connected: false,
+      last_push_watermark_ms: 0,
+      last_pull_watermark_ms: 0,
+      last_sync_at_ms: null,
+      last_sync_error: null,
+      updated_at_ms: now,
+    };
+    vi.spyOn(ipc, 'getPreferences').mockResolvedValue(makePreferences());
+    vi.spyOn(ipc, 'getBootstrapState').mockResolvedValue(makeBootstrap());
+    vi.spyOn(ipc, 'getSyncStatus').mockImplementation(async () => currentSyncStatus);
+
+    const provisionSpy = vi
+      .spyOn(ipc, 'provisionCloudSyncWorker')
+      .mockImplementation(async (input) => {
+        const workerUrl =
+          input.mode === 'wrangler_cli'
+            ? 'https://tokenvane-sync-worker.demo.workers.dev'
+            : 'https://custom-sync-hub.api-edge.workers.dev';
+        const bearer = input.mode === 'wrangler_cli' ? 'auto-wrangler-token-48' : 'auto-api-token-48';
+        const passphrase = input.e2ee_enabled ? 'auto-e2ee-pass-32' : null;
+        currentSyncStatus = {
+          ...currentSyncStatus,
+          enabled: true,
+          worker_url: workerUrl,
+          e2ee_enabled: input.e2ee_enabled,
+          e2ee_kdf_salt_hex: input.e2ee_enabled ? '00112233445566778899aabbccddeeff' : null,
+          has_bearer_token: true,
+          has_e2ee_passphrase: Boolean(passphrase),
+          has_cf_api_token: input.mode === 'cloudflare_api',
+          sse_connected: true,
+          last_sync_at_ms: now,
+        };
+        const params = new URLSearchParams({
+          v: '1',
+          url: workerUrl,
+          token: bearer,
+          e2ee: input.e2ee_enabled ? '1' : '0',
+        });
+        if (passphrase) {
+          params.set('key', passphrase);
+        }
+        const result: CloudSyncProvisionResult = {
+          mode: input.mode,
+          worker_name: input.worker_name ?? 'tokenvane-sync-worker',
+          worker_url: workerUrl,
+          bearer_token: bearer,
+          e2ee_passphrase: passphrase,
+          initial_sync_ok: true,
+          status: currentSyncStatus,
+          pairing: {
+            pairing_uri: `tokenvane://pair?${params.toString()}`,
+            pairing_json: JSON.stringify({
+              v: 1,
+              url: workerUrl,
+              token: bearer,
+              e2ee: input.e2ee_enabled,
+              ...(passphrase ? { key: passphrase } : {}),
+            }),
+            worker_url: workerUrl,
+            e2ee_enabled: input.e2ee_enabled,
+            includes_passphrase: Boolean(passphrase),
+          },
+        };
+        return result;
+      });
+
+    renderWithQuery(<PreferencesPage />);
+
+    // 1. Default Wrangler CLI mode: click 一键配置 without manual URL or token
+    expect(await screen.findByRole('button', { name: 'Wrangler 浏览器授权' })).toHaveAttribute(
+      'data-active',
+      'true'
+    );
+    fireEvent.click(screen.getByRole('button', { name: '一键配置' }));
+
+    await waitFor(() => {
+      expect(provisionSpy).toHaveBeenCalledWith({
+        mode: 'wrangler_cli',
+        worker_name: 'tokenvane-sync-worker',
+        bearer_token: null,
+        e2ee_enabled: false,
+        e2ee_passphrase: null,
+        cf_api_token: null,
+        cf_account_id: null,
+      });
+    });
+
+    expect((screen.getByLabelText('启用云端同步') as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByLabelText('Worker 服务地址')).toHaveValue(
+      'https://tokenvane-sync-worker.demo.workers.dev'
+    );
+    expect(screen.getByLabelText('Sync Bearer Token')).toHaveValue('auto-wrangler-token-48');
+    expect(await screen.findByTestId('mobile-pairing-panel')).toBeInTheDocument();
+    expect(screen.getByTestId('sync-pairing-qr')).toBeInTheDocument();
+    expect(screen.getByLabelText('移动端配对链接')).toHaveValue(
+      'tokenvane://pair?v=1&url=https%3A%2F%2Ftokenvane-sync-worker.demo.workers.dev&token=auto-wrangler-token-48&e2ee=0'
+    );
+
+    // 2. Switch to Cloudflare API 令牌 mode with custom worker name + E2EE
+    fireEvent.click(screen.getByRole('button', { name: 'Cloudflare API 令牌' }));
+    const cfTokenInput = screen.getByLabelText('Cloudflare API 令牌') as HTMLInputElement;
+    fireEvent.change(cfTokenInput, { target: { value: 'cf-pat-secret-xyz' } });
+    fireEvent.change(screen.getByLabelText('Worker 名称'), {
+      target: { value: 'custom-sync-hub' },
+    });
+    fireEvent.change(screen.getByLabelText('Sync Bearer Token'), { target: { value: '' } });
+    fireEvent.click(screen.getByLabelText(/端到端加密/));
+    fireEvent.click(screen.getByRole('button', { name: '一键配置' }));
+
+    await waitFor(() => {
+      expect(provisionSpy).toHaveBeenLastCalledWith({
+        mode: 'cloudflare_api',
+        worker_name: 'custom-sync-hub',
+        bearer_token: null,
+        e2ee_enabled: true,
+        e2ee_passphrase: null,
+        cf_api_token: 'cf-pat-secret-xyz',
+        cf_account_id: null,
+      });
+    });
+
+    expect(cfTokenInput.value).toBe('');
+    expect(screen.getByLabelText('Worker 服务地址')).toHaveValue(
+      'https://custom-sync-hub.api-edge.workers.dev'
+    );
+    expect(screen.getByLabelText('Sync Bearer Token')).toHaveValue('auto-api-token-48');
+    expect(screen.getByLabelText('E2EE 同步口令')).toHaveValue('auto-e2ee-pass-32');
+    expect((screen.getByLabelText('配对码包含口令') as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByLabelText('移动端配对链接')).toHaveValue(
+      'tokenvane://pair?v=1&url=https%3A%2F%2Fcustom-sync-hub.api-edge.workers.dev&token=auto-api-token-48&e2ee=1&key=auto-e2ee-pass-32'
+    );
   });
 });
 

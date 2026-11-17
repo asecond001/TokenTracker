@@ -5,6 +5,8 @@ import type {
   BalanceRefreshOutcome,
   BootstrapState,
   CatalogSyncResult,
+  CloudSyncProvisionInput,
+  CloudSyncProvisionResult,
   CustomProviderRule,
   CustomRuleTestResult,
   DeviceRecord,
@@ -668,6 +670,62 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
       };
       return bundle as T;
     }
+    case 'provision_cloud_sync_worker': {
+      const input = args?.input as CloudSyncProvisionInput | undefined;
+      const workerName = input?.worker_name?.trim() || 'tokenvane-sync-worker';
+      const workerUrl = `https://${workerName}.preview.workers.dev`;
+      const bearerToken = input?.bearer_token?.trim() || 'preview-generated-sync-token';
+      const e2eeEnabled = Boolean(input?.e2ee_enabled);
+      const passphrase = e2eeEnabled
+        ? input?.e2ee_passphrase?.trim() || 'preview-generated-e2ee-key'
+        : null;
+      const params = new URLSearchParams({
+        v: '1',
+        url: workerUrl,
+        token: bearerToken,
+        e2ee: e2eeEnabled ? '1' : '0',
+      });
+      if (e2eeEnabled && passphrase) {
+        params.set('key', passphrase);
+      }
+      const result: CloudSyncProvisionResult = {
+        mode: input?.mode ?? 'wrangler_cli',
+        worker_name: workerName,
+        worker_url: workerUrl,
+        bearer_token: bearerToken,
+        e2ee_passphrase: passphrase,
+        initial_sync_ok: true,
+        status: {
+          enabled: true,
+          worker_url: workerUrl,
+          e2ee_enabled: e2eeEnabled,
+          e2ee_kdf_salt_hex: e2eeEnabled ? 'preview-salt' : null,
+          has_bearer_token: true,
+          has_e2ee_passphrase: Boolean(passphrase),
+          has_cf_api_token: Boolean(input?.cf_api_token) || input?.mode === 'cloudflare_api',
+          sse_connected: true,
+          last_push_watermark_ms: now,
+          last_pull_watermark_ms: now,
+          last_sync_at_ms: now,
+          last_sync_error: null,
+          updated_at_ms: now,
+        },
+        pairing: {
+          pairing_uri: `tokenvane://pair?${params.toString()}`,
+          pairing_json: JSON.stringify({
+            v: 1,
+            url: workerUrl,
+            token: bearerToken,
+            e2ee: e2eeEnabled,
+            ...(passphrase ? { key: passphrase } : {}),
+          }),
+          worker_url: workerUrl,
+          e2ee_enabled: e2eeEnabled,
+          includes_passphrase: Boolean(passphrase),
+        },
+      };
+      return result as T;
+    }
     case 'trigger_cloud_sync_now':
       return {
         pushed_hourly_deltas: 0,
@@ -877,6 +935,11 @@ export const ipc = {
       e2eeEnabled,
       e2eePassphrase,
     }),
+
+  provisionCloudSyncWorker: (
+    input: CloudSyncProvisionInput
+  ): Promise<CloudSyncProvisionResult> =>
+    callIpc('provision_cloud_sync_worker', { input }),
 
   getSyncPairingBundle: (includePassphrase: boolean): Promise<SyncPairingBundle> =>
     callIpc('get_sync_pairing_bundle', { includePassphrase }),
