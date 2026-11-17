@@ -165,6 +165,23 @@ impl From<tokvane_collectors::CollectorError> for IpcError {
     }
 }
 
+/// Run a storage closure on Tauri's blocking thread pool.
+///
+/// Synchronous `#[tauri::command]` handlers execute on the main (UI) thread, so
+/// any SQLite work there stalls window dragging, tray menus and repaints while a
+/// query runs or waits on the writer lock. Every storage-backed command routes
+/// through this helper instead.
+async fn run_storage<T, F>(state: &AppState, f: F) -> Result<T, IpcError>
+where
+    T: Send + 'static,
+    F: FnOnce(&Storage) -> Result<T, IpcError> + Send + 'static,
+{
+    let storage = state.storage.clone();
+    tauri::async_runtime::spawn_blocking(move || f(&storage))
+        .await
+        .map_err(|e| IpcError::new("TASK_JOIN_ERROR", e.to_string()))?
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BootstrapState {
     pub db_path: String,
@@ -185,10 +202,13 @@ pub struct ExportReportResult {
 }
 
 #[tauri::command]
-pub fn get_bootstrap_state(state: State<'_, AppState>) -> Result<BootstrapState, IpcError> {
-    let device = state.storage.local_device()?;
-    let preferences = state.storage.get_preferences()?;
-    let providers = state.storage.list_provider_configs()?;
+pub async fn get_bootstrap_state(
+    state: State<'_, AppState>,
+) -> Result<BootstrapState, IpcError> {
+    let (device, preferences, providers) = run_storage(&state, |s| {
+        Ok((s.local_device()?, s.get_preferences()?, s.list_provider_configs()?))
+    })
+    .await?;
     let (otlp_running, otlp_port) = state.otlp_status();
 
     Ok(BootstrapState {
@@ -204,85 +224,76 @@ pub fn get_bootstrap_state(state: State<'_, AppState>) -> Result<BootstrapState,
 }
 
 #[tauri::command]
-pub fn get_overview(
+pub async fn get_overview(
     state: State<'_, AppState>,
     filter: AnalyticsFilter,
 ) -> Result<OverviewReport, IpcError> {
     let now_ms = Utc::now().timestamp_millis();
-    state
-        .storage
-        .query_overview(&filter, now_ms)
-        .map_err(IpcError::from)
+    run_storage(&state, move |s| Ok(s.query_overview(&filter, now_ms)?)).await
 }
 
 #[tauri::command]
-pub fn get_trends(
+pub async fn get_trends(
     state: State<'_, AppState>,
     query: TrendsQuery,
 ) -> Result<TrendsReport, IpcError> {
-    state.storage.query_trends(&query).map_err(IpcError::from)
+    run_storage(&state, move |s| Ok(s.query_trends(&query)?)).await
 }
 
 #[tauri::command]
-pub fn get_monthly(
+pub async fn get_monthly(
     state: State<'_, AppState>,
     query: MonthlyQuery,
 ) -> Result<MonthlyReport, IpcError> {
-    state.storage.query_monthly(&query).map_err(IpcError::from)
+    run_storage(&state, move |s| Ok(s.query_monthly(&query)?)).await
 }
 
 #[tauri::command]
-pub fn get_models_pricing(
+pub async fn get_models_pricing(
     state: State<'_, AppState>,
     filter: AnalyticsFilter,
 ) -> Result<ModelStatsReport, IpcError> {
-    state
-        .storage
-        .query_models_pricing(&filter)
-        .map_err(IpcError::from)
+    run_storage(&state, move |s| Ok(s.query_models_pricing(&filter)?)).await
 }
 
 #[tauri::command]
-pub fn upsert_model_pricing_override(
+pub async fn upsert_model_pricing_override(
     state: State<'_, AppState>,
     mut entry: ModelPricingEntry,
     recompute_history: bool,
 ) -> Result<usize, IpcError> {
     entry.is_user_override = true;
-    state.storage.upsert_model_pricing(&entry)?;
-    if recompute_history {
-        state
-            .storage
-            .recompute_all_costs_and_rollups()
-            .map_err(IpcError::from)
-    } else {
-        Ok(0)
-    }
+    run_storage(&state, move |s| {
+        s.upsert_model_pricing(&entry)?;
+        if recompute_history {
+            Ok(s.recompute_all_costs_and_rollups()?)
+        } else {
+            Ok(0)
+        }
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn delete_model_pricing_override(
+pub async fn delete_model_pricing_override(
     state: State<'_, AppState>,
     model_pattern: String,
     recompute_history: bool,
 ) -> Result<usize, IpcError> {
-    state.storage.delete_model_pricing_override(&model_pattern)?;
-    if recompute_history {
-        state
-            .storage
-            .recompute_all_costs_and_rollups()
-            .map_err(IpcError::from)
-    } else {
-        Ok(0)
-    }
+    run_storage(&state, move |s| {
+        s.delete_model_pricing_override(&model_pattern)?;
+        if recompute_history {
+            Ok(s.recompute_all_costs_and_rollups()?)
+        } else {
+            Ok(0)
+        }
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn recompute_all_costs(state: State<'_, AppState>) -> Result<usize, IpcError> {
-    state
-        .storage
-        .recompute_all_costs_and_rollups()
-        .map_err(IpcError::from)
+pub async fn recompute_all_costs(state: State<'_, AppState>) -> Result<usize, IpcError> {
+    run_storage(&state, |s| Ok(s.recompute_all_costs_and_rollups()?)).await
 }
 
 #[tauri::command]
@@ -298,14 +309,11 @@ pub async fn sync_pricing_and_rate(
 }
 
 #[tauri::command]
-pub fn get_subscriptions(
+pub async fn get_subscriptions(
     state: State<'_, AppState>,
 ) -> Result<Vec<SubscriptionPlanStatus>, IpcError> {
     let now_ms = Utc::now().timestamp_millis();
-    state
-        .storage
-        .query_subscriptions(now_ms)
-        .map_err(IpcError::from)
+    run_storage(&state, move |s| Ok(s.query_subscriptions(now_ms)?)).await
 }
 
 #[tauri::command]
@@ -335,55 +343,45 @@ pub fn delete_subscription_plan(
 }
 
 #[tauri::command]
-pub fn get_subscription_templates(
+pub async fn get_subscription_templates(
     state: State<'_, AppState>,
 ) -> Result<Vec<SubscriptionPlanTemplate>, IpcError> {
     let now_ms = Utc::now().timestamp_millis();
-    state
-        .storage
-        .query_subscription_templates(now_ms)
-        .map_err(IpcError::from)
+    run_storage(&state, move |s| Ok(s.query_subscription_templates(now_ms)?)).await
 }
 
 #[tauri::command]
-pub fn get_observed_rate_limits(
+pub async fn get_observed_rate_limits(
     state: State<'_, AppState>,
 ) -> Result<Vec<ObservedRateLimitWindow>, IpcError> {
-    state
-        .storage
-        .list_observed_rate_limits()
-        .map_err(IpcError::from)
+    run_storage(&state, |s| Ok(s.list_observed_rate_limits()?)).await
 }
 
 #[tauri::command]
-pub fn get_speed_latency(
+pub async fn get_speed_latency(
     state: State<'_, AppState>,
     filter: AnalyticsFilter,
 ) -> Result<SpeedLatencyReport, IpcError> {
-    state
-        .storage
-        .query_speed_latency(&filter)
-        .map_err(IpcError::from)
+    run_storage(&state, move |s| Ok(s.query_speed_latency(&filter)?)).await
 }
 
 #[tauri::command]
-pub fn get_tray_summary(
+pub async fn get_tray_summary(
     state: State<'_, AppState>,
     tz_offset_minutes: i32,
 ) -> Result<TraySummary, IpcError> {
     let now_ms = Utc::now().timestamp_millis();
-    state
-        .storage
-        .query_tray_summary(now_ms, tz_offset_minutes)
-        .map_err(IpcError::from)
+    run_storage(&state, move |s| {
+        Ok(s.query_tray_summary(now_ms, tz_offset_minutes)?)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn get_provider_configs(state: State<'_, AppState>) -> Result<Vec<ProviderConfig>, IpcError> {
-    state
-        .storage
-        .list_provider_configs()
-        .map_err(IpcError::from)
+pub async fn get_provider_configs(
+    state: State<'_, AppState>,
+) -> Result<Vec<ProviderConfig>, IpcError> {
+    run_storage(&state, |s| Ok(s.list_provider_configs()?)).await
 }
 
 #[tauri::command]
@@ -398,8 +396,10 @@ pub fn update_provider_config(
 }
 
 #[tauri::command]
-pub fn get_ingestion_cursors(state: State<'_, AppState>) -> Result<Vec<IngestionCursor>, IpcError> {
-    state.storage.list_cursors().map_err(IpcError::from)
+pub async fn get_ingestion_cursors(
+    state: State<'_, AppState>,
+) -> Result<Vec<IngestionCursor>, IpcError> {
+    run_storage(&state, |s| Ok(s.list_cursors()?)).await
 }
 
 #[tauri::command]
@@ -498,8 +498,8 @@ pub async fn reconcile_provider_official_api(
 }
 
 #[tauri::command]
-pub fn get_preferences(state: State<'_, AppState>) -> Result<AppPreferences, IpcError> {
-    state.storage.get_preferences().map_err(IpcError::from)
+pub async fn get_preferences(state: State<'_, AppState>) -> Result<AppPreferences, IpcError> {
+    run_storage(&state, |s| Ok(s.get_preferences()?)).await
 }
 
 #[tauri::command]
@@ -682,13 +682,25 @@ pub fn get_background_image_data_url(
 }
 
 #[tauri::command]
-pub fn export_monthly_report(
+pub async fn export_monthly_report(
     state: State<'_, AppState>,
     query: MonthlyQuery,
     format: String,
     save_path: Option<String>,
 ) -> Result<ExportReportResult, IpcError> {
-    let report = state.storage.query_monthly(&query)?;
+    run_storage(&state, move |s| {
+        export_monthly_report_blocking(s, &query, &format, save_path)
+    })
+    .await
+}
+
+fn export_monthly_report_blocking(
+    storage: &Storage,
+    query: &MonthlyQuery,
+    format: &str,
+    save_path: Option<String>,
+) -> Result<ExportReportResult, IpcError> {
+    let report = storage.query_monthly(query)?;
     let content = if format.eq_ignore_ascii_case("json") {
         export_monthly_json(&report)?
     } else {
@@ -709,25 +721,22 @@ pub fn export_monthly_report(
 }
 
 #[tauri::command]
-pub fn preview_sync_envelope_v1(
+pub async fn preview_sync_envelope_v1(
     state: State<'_, AppState>,
     since_watermark_ms: i64,
 ) -> Result<SyncEnvelopeV1, IpcError> {
     let now_ms = Utc::now().timestamp_millis();
-    state
-        .storage
-        .build_sync_envelope_v1(since_watermark_ms, now_ms)
-        .map_err(IpcError::from)
+    run_storage(&state, move |s| {
+        Ok(s.build_sync_envelope_v1(since_watermark_ms, now_ms)?)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn list_custom_provider_rules(
+pub async fn list_custom_provider_rules(
     state: State<'_, AppState>,
 ) -> Result<Vec<CustomProviderRule>, IpcError> {
-    state
-        .storage
-        .list_custom_provider_rules()
-        .map_err(IpcError::from)
+    run_storage(&state, |s| Ok(s.list_custom_provider_rules()?)).await
 }
 
 #[tauri::command]
@@ -765,25 +774,20 @@ pub fn test_custom_provider_sample_line(
 }
 
 #[tauri::command]
-pub fn get_provider_balances(
+pub async fn get_provider_balances(
     state: State<'_, AppState>,
 ) -> Result<Vec<ProviderBalanceSnapshot>, IpcError> {
-    state
-        .storage
-        .list_provider_balances()
-        .map_err(IpcError::from)
+    run_storage(&state, |s| Ok(s.list_provider_balances()?)).await
 }
 
 #[tauri::command]
-pub fn get_payg_accounts(
+pub async fn get_payg_accounts(
     state: State<'_, AppState>,
     tz_offset_minutes: Option<i32>,
 ) -> Result<Vec<PaygAccountStatus>, IpcError> {
     let now_ms = Utc::now().timestamp_millis();
-    state
-        .storage
-        .query_payg_accounts(now_ms, tz_offset_minutes.unwrap_or(480))
-        .map_err(IpcError::from)
+    let tz = tz_offset_minutes.unwrap_or(480);
+    run_storage(&state, move |s| Ok(s.query_payg_accounts(now_ms, tz)?)).await
 }
 
 #[tauri::command]
@@ -923,8 +927,8 @@ pub fn launch_provider_cli_login(
 }
 
 #[tauri::command]
-pub fn list_devices(state: State<'_, AppState>) -> Result<Vec<DeviceRecord>, IpcError> {
-    state.storage.list_devices().map_err(IpcError::from)
+pub async fn list_devices(state: State<'_, AppState>) -> Result<Vec<DeviceRecord>, IpcError> {
+    run_storage(&state, |s| Ok(s.list_devices()?)).await
 }
 
 #[tauri::command]
@@ -1254,13 +1258,10 @@ pub async fn trigger_cloud_sync_now(
 }
 
 #[tauri::command]
-pub fn get_remote_subscription_snapshots(
+pub async fn get_remote_subscription_snapshots(
     state: State<'_, AppState>,
 ) -> Result<Vec<RemoteSubscriptionSnapshot>, IpcError> {
-    state
-        .storage
-        .list_remote_subscription_snapshots()
-        .map_err(IpcError::from)
+    run_storage(&state, |s| Ok(s.list_remote_subscription_snapshots()?)).await
 }
 
 #[derive(Debug, Clone, Serialize)]

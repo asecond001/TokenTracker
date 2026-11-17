@@ -235,27 +235,22 @@ fn resolve_wrangler_invocation() -> CollectorResult<WranglerInvocation> {
     ))
 }
 
-fn run_wrangler_blocking(
+/// Build the Wrangler subprocess command.
+///
+/// The resolved program (e.g. `C:\Program Files\nodejs\npx.cmd`) is spawned
+/// directly. Rust's standard library (>= 1.77) wraps `.cmd` / `.bat` targets in
+/// `cmd.exe` with correct quoting and rejects unsafe arguments. Wrapping it
+/// manually as `cmd.exe /d /s /c <program> ...` breaks whenever the program path
+/// contains spaces: `/s` strips the quotes around the path and cmd then tries to
+/// run `C:\Program`.
+fn build_wrangler_command(
+    inv: &WranglerInvocation,
     cwd: &Path,
     args: &[String],
     stdin_data: Option<&[u8]>,
     interactive_login: bool,
-    timeout: Duration,
-) -> CollectorResult<WranglerCmdOutput> {
-    let inv = resolve_wrangler_invocation()?;
-    let is_cmd_wrapper = inv
-        .program
-        .extension()
-        .and_then(|s| s.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
-
-    let mut cmd = if is_cmd_wrapper {
-        let mut c = std::process::Command::new("cmd.exe");
-        c.arg("/d").arg("/s").arg("/c").arg(&inv.program);
-        c
-    } else {
-        std::process::Command::new(&inv.program)
-    };
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(&inv.program);
 
     for prefix in &inv.prefix_args {
         cmd.arg(prefix);
@@ -288,6 +283,18 @@ fn run_wrangler_blocking(
         // CREATE_NO_WINDOW keeps desktop UI free from flashing console windows.
         cmd.creation_flags(0x0800_0000);
     }
+    cmd
+}
+
+fn run_wrangler_blocking(
+    cwd: &Path,
+    args: &[String],
+    stdin_data: Option<&[u8]>,
+    interactive_login: bool,
+    timeout: Duration,
+) -> CollectorResult<WranglerCmdOutput> {
+    let inv = resolve_wrangler_invocation()?;
+    let mut cmd = build_wrangler_command(&inv, cwd, args, stdin_data, interactive_login);
 
     let mut child = cmd
         .spawn()
@@ -1127,6 +1134,25 @@ mod tests {
                 (handler)(&owned_args, owned_stdin.as_deref(), interactive_login)
             })
         }
+    }
+
+    #[test]
+    fn wrangler_command_spawns_cmd_wrapper_directly_without_manual_cmd_exe() {
+        let inv = WranglerInvocation {
+            program: PathBuf::from(r"C:\Program Files\nodejs\npx.cmd"),
+            prefix_args: vec!["--yes", "wrangler@latest"],
+        };
+        let args = vec!["secret".to_string(), "put".to_string(), "SYNC_TOKEN".to_string()];
+        let cmd = build_wrangler_command(&inv, Path::new("."), &args, Some(b"tok"), false);
+
+        // The program path (with spaces) must be the spawned program itself, not an
+        // argument to `cmd.exe /s /c`, which strips its quotes and runs `C:\Program`.
+        assert_eq!(cmd.get_program(), inv.program.as_os_str());
+        let got: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(got, ["--yes", "wrangler@latest", "secret", "put", "SYNC_TOKEN"]);
     }
 
     #[test]

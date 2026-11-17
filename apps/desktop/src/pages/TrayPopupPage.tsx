@@ -16,6 +16,7 @@ import {
 import { ipc } from '../lib/ipc';
 import { syncDocumentAndNativeTheme, useWorkspaceStore } from '../stores/workspaceStore';
 import type { ThemeMode } from '../types/ipc';
+import { CLOCK_REFRESH_MS } from '../lib/liveRefresh';
 
 function normalizeThemeMode(raw: string | undefined | null): ThemeMode {
   return raw === 'light' || raw === 'dark' || raw === 'system' ? raw : 'dark';
@@ -49,7 +50,7 @@ export function TrayPopupPage() {
   const { data: summary } = useQuery({
     queryKey: ['tray_summary', tzOffsetMinutes],
     queryFn: () => ipc.getTraySummary(tzOffsetMinutes),
-    refetchInterval: 10_000,
+    refetchInterval: CLOCK_REFRESH_MS,
   });
 
   const scanMutation = useMutation({

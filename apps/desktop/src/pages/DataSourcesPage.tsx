@@ -33,6 +33,7 @@ import type {
   ProviderBalanceSnapshot,
   ProviderConfig,
 } from '../types/ipc';
+import { CLOCK_REFRESH_MS } from '../lib/liveRefresh';
 
 const DEFAULT_PATH_HINTS: Record<string, string> = {
   claude_code: '~/.claude/projects/ 与 ~/.claude/stats-cache.json',
@@ -116,31 +117,27 @@ export function DataSourcesPage() {
   const { data: bootstrap } = useQuery({
     queryKey: ['bootstrap'],
     queryFn: () => ipc.getBootstrapState(),
-    refetchInterval: 10_000,
+    refetchInterval: CLOCK_REFRESH_MS,
   });
 
   const { data: providers = [] } = useQuery({
     queryKey: ['provider_configs'],
     queryFn: () => ipc.getProviderConfigs(),
-    refetchInterval: 10_000,
   });
 
   const { data: cursors = [] } = useQuery({
     queryKey: ['ingestion_cursors'],
     queryFn: () => ipc.getIngestionCursors(),
-    refetchInterval: 15_000,
   });
 
   const { data: providerBalances = [] } = useQuery({
     queryKey: ['provider-balances'],
     queryFn: () => ipc.getProviderBalances(),
-    refetchInterval: 30_000,
   });
 
   const { data: customRules = [] } = useQuery({
     queryKey: ['custom-provider-rules'],
     queryFn: () => ipc.listCustomProviderRules(),
-    refetchInterval: 30_000,
   });
 
   const { currency, usdToCnyRate } = useWorkspaceStore();

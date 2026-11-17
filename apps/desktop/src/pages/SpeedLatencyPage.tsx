@@ -23,6 +23,7 @@ import {
 import { ipc } from '../lib/ipc';
 import { computeTimeRange, useWorkspaceStore } from '../stores/workspaceStore';
 import type { AnalyticsFilter, ModelSpeedStats } from '../types/ipc';
+import { CLOCK_REFRESH_MS } from '../lib/liveRefresh';
 
 type SpeedGroupMode = 'model' | 'provider';
 type SpeedChartMetric = 'tps' | 'latency';
@@ -102,7 +103,7 @@ export function SpeedLatencyPage() {
       };
       return ipc.getSpeedLatency(filter);
     },
-    refetchInterval: 15_000,
+    refetchInterval: CLOCK_REFRESH_MS,
   });
 
   const providers = data?.providers ?? [];

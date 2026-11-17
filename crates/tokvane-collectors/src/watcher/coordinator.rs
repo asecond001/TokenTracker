@@ -59,6 +59,14 @@ impl CollectorCoordinator {
             Arc::new(QCodeParser::new()),
             Arc::new(MiniMaxCodeParser::new()),
         ];
+        Self::with_parsers(storage, parsers)
+    }
+
+    /// Build a coordinator over an explicit parser set.
+    ///
+    /// Used by tests to keep scans hermetic (parsers whose `default_roots` point
+    /// at the developer's real home directory would otherwise ingest live logs).
+    pub fn with_parsers(storage: Storage, parsers: Vec<Arc<dyn ProviderLogParser>>) -> Self {
         Self {
             storage,
             parsers,

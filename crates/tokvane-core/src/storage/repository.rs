@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 
 use crate::domain::{
     is_valid_tps_sample, provider_ids, sanitize_session_title, AppPreferences, CollectionMode,
@@ -84,10 +85,32 @@ impl RollupDelta {
     }
 }
 
+/// Number of dedicated read-only connections opened for file-backed databases.
+///
+/// WAL mode lets these readers run concurrently with the single writer, so heavy
+/// analytics queries never queue behind ingestion batches.
+const READ_POOL_SIZE: usize = 3;
+
 /// Thread-safe SQLite repository backing all core domain operations.
+///
+/// Writes (and any read that must observe uncommitted state inside the writer)
+/// go through the single `conn`. Pure analytics reads go through `readers`, a
+/// small pool of `SQLITE_OPEN_READ_ONLY` connections. In-memory databases cannot
+/// share state across connections, so they keep `readers` empty and fall back to
+/// the writer connection.
 #[derive(Clone)]
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
+    readers: Arc<Vec<Mutex<Connection>>>,
+    next_reader: Arc<AtomicUsize>,
+    event_count: Arc<Mutex<EventCountCache>>,
+}
+
+/// Cached `usage_events` row count; `epoch` bumps on every committed insert batch.
+#[derive(Debug, Default)]
+struct EventCountCache {
+    epoch: u64,
+    count: Option<i64>,
 }
 
 impl Storage {
@@ -106,8 +129,25 @@ impl Storage {
         let mut conn = Connection::open(path)?;
         configure_connection(&conn, true)?;
         run_migrations(&mut conn)?;
+
+        // Readers are opened after migrations so the WAL/-shm files already exist.
+        let mut readers = Vec::with_capacity(READ_POOL_SIZE);
+        for _ in 0..READ_POOL_SIZE {
+            let reader = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | OpenFlags::SQLITE_OPEN_URI,
+            )?;
+            reader.pragma_update(None, "busy_timeout", 5000i64)?;
+            readers.push(Mutex::new(reader));
+        }
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            readers: Arc::new(readers),
+            next_reader: Arc::new(AtomicUsize::new(0)),
+            event_count: Arc::new(Mutex::new(EventCountCache::default())),
         })
     }
 
@@ -118,7 +158,35 @@ impl Storage {
         run_migrations(&mut conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            readers: Arc::new(Vec::new()),
+            next_reader: Arc::new(AtomicUsize::new(0)),
+            event_count: Arc::new(Mutex::new(EventCountCache::default())),
         })
+    }
+
+    /// Run a pure read query on a read-only pooled connection.
+    ///
+    /// Falls back to the writer connection for in-memory databases. Any write
+    /// attempted through this path fails with `SQLITE_READONLY` on file databases.
+    pub(crate) fn with_read_conn<F, T>(&self, f: F) -> CoreResult<T>
+    where
+        F: FnOnce(&Connection) -> CoreResult<T>,
+    {
+        if self.readers.is_empty() {
+            return self.with_conn(f);
+        }
+        let start = self.next_reader.fetch_add(1, Ordering::Relaxed);
+        let len = self.readers.len();
+        // Prefer an idle reader; otherwise wait on the round-robin slot.
+        for i in 0..len {
+            if let Ok(guard) = self.readers[(start + i) % len].try_lock() {
+                return f(&guard);
+            }
+        }
+        let guard = self.readers[start % len]
+            .lock()
+            .map_err(|_| CoreError::Validation("SQLite reader mutex poisoned".to_string()))?;
+        f(&guard)
     }
 
     pub(crate) fn with_conn<F, T>(&self, f: F) -> CoreResult<T>
@@ -538,12 +606,51 @@ impl Storage {
             }
 
             tx.commit()?;
+            self.note_events_inserted(inserted);
             Ok(IngestOutcome {
                 received: events.len(),
                 inserted,
                 deduplicated: events.len().saturating_sub(inserted),
             })
         })
+    }
+
+    /// Advance the cached `usage_events` row count after a committed ingest batch.
+    fn note_events_inserted(&self, inserted: usize) {
+        if inserted == 0 {
+            return;
+        }
+        if let Ok(mut cache) = self.event_count.lock() {
+            cache.epoch = cache.epoch.wrapping_add(1);
+            if let Some(count) = cache.count.as_mut() {
+                *count += inserted as i64;
+            }
+        }
+    }
+
+    /// Total `usage_events` rows, served from an in-process cache so frequent
+    /// tray refreshes avoid a full-table `COUNT(*)`.
+    ///
+    /// The cache is only seeded when no ingest commit happened while the count
+    /// query ran (epoch check), so a stale snapshot is never persisted.
+    pub(crate) fn total_event_count(&self, conn: &Connection) -> CoreResult<i64> {
+        let epoch_before = {
+            let cache = self
+                .event_count
+                .lock()
+                .map_err(|_| CoreError::Validation("Event count cache poisoned".to_string()))?;
+            if let Some(count) = cache.count {
+                return Ok(count);
+            }
+            cache.epoch
+        };
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))?;
+        if let Ok(mut cache) = self.event_count.lock() {
+            if cache.epoch == epoch_before {
+                cache.count = Some(count);
+            }
+        }
+        Ok(count)
     }
 
     pub fn upsert_session_titles(&self, session_titles: &[SessionTitleRecord]) -> CoreResult<usize> {

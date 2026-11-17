@@ -1289,7 +1289,7 @@ fn query_active_sessions(
 
 impl Storage {
     pub fn query_overview(&self, filter: &AnalyticsFilter, now_ms: i64) -> CoreResult<OverviewReport> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let provider = normalized_optional_filter(&filter.provider_id);
             let device_id = normalized_optional_filter(&filter.device_id);
             let (eff_start_ms, eff_end_ms) =
@@ -1630,7 +1630,7 @@ impl Storage {
     }
 
     pub fn query_trends(&self, query: &TrendsQuery) -> CoreResult<TrendsReport> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let filter = &query.filter;
             let provider = normalized_optional_filter(&filter.provider_id);
             let device_id = normalized_optional_filter(&filter.device_id);
@@ -1890,7 +1890,7 @@ impl Storage {
     }
 
     pub fn query_monthly(&self, query: &MonthlyQuery) -> CoreResult<MonthlyReport> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let offset = local_offset(query.tz_offset_minutes);
             let month_start_date = NaiveDate::from_ymd_opt(query.year, query.month, 1)
                 .ok_or_else(|| CoreError::Validation("Invalid year or month".to_string()))?;
@@ -2129,7 +2129,7 @@ impl Storage {
     }
 
     pub fn query_models_pricing(&self, filter: &AnalyticsFilter) -> CoreResult<ModelStatsReport> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let provider = normalized_optional_filter(&filter.provider_id);
             let device_id = normalized_optional_filter(&filter.device_id);
             let (eff_start_ms, eff_end_ms) = resolve_effective_window(
@@ -2245,7 +2245,7 @@ impl Storage {
         now_ms: i64,
         tz_offset_minutes: i32,
     ) -> CoreResult<Vec<SubscriptionPlanStatus>> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let plans = load_subscription_plans(conn)?;
             evaluate_subscriptions_with_spend(conn, plans, now_ms, tz_offset_minutes, true)
         })
@@ -2255,7 +2255,7 @@ impl Storage {
         &self,
         now_ms: i64,
     ) -> CoreResult<Vec<crate::domain::SubscriptionPlanTemplate>> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let observed = load_observed_rate_limits(conn)?;
             let samples_map = load_window_samples_map(conn, now_ms)?;
             let templates = load_subscription_catalog_templates(conn)?;
@@ -2269,7 +2269,7 @@ impl Storage {
     }
 
     pub fn query_speed_latency(&self, filter: &AnalyticsFilter) -> CoreResult<SpeedLatencyReport> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let provider = normalized_optional_filter(&filter.provider_id);
             let device_id = normalized_optional_filter(&filter.device_id);
             let (eff_start_ms, eff_end_ms) = resolve_effective_window(
@@ -2495,7 +2495,7 @@ impl Storage {
     }
 
     pub fn query_tray_summary(&self, now_ms: i64, tz_offset_minutes: i32) -> CoreResult<TraySummary> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let (today_start_ms, _) = local_day_bounds_ms(now_ms, tz_offset_minutes);
             let today_totals = query_period_totals(conn, today_start_ms, now_ms, None, None)?;
             let fallback_latest =
@@ -2521,8 +2521,7 @@ impl Storage {
                 [],
                 |r| r.get(0),
             )?;
-            let total_ingested_events: i64 =
-                conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))?;
+            let total_ingested_events = self.total_event_count(conn)?;
 
             Ok(TraySummary {
                 today_tokens: today_totals.total_tokens(),
@@ -3075,6 +3074,89 @@ mod tests {
             .ingest_events_with_cursor(&events, None, &[])
             .expect("ingest");
         base_ts
+    }
+
+    /// File-backed storage routes analytics through `SQLITE_OPEN_READ_ONLY`
+    /// pooled connections; any accidental write in a query path would fail here.
+    #[test]
+    fn file_backed_analytics_run_on_read_only_pool() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open_file(&dir.path().join("pool.db")).expect("open db");
+        let base_ts = seed_sample_events(&storage);
+        let now_ms = base_ts + 2 * HOUR_MS;
+        let filter = AnalyticsFilter {
+            start_ms: base_ts - HOUR_MS,
+            end_ms: base_ts + 4 * HOUR_MS,
+            provider_id: None,
+            device_id: None,
+            tz_offset_minutes: 480,
+            all_time: false,
+        };
+
+        // Writes through the read path must be rejected.
+        let write_attempt = storage.with_read_conn(|conn| {
+            conn.execute("DELETE FROM usage_events", [])?;
+            Ok(())
+        });
+        assert!(write_attempt.is_err());
+
+        let ov = storage.query_overview(&filter, now_ms).expect("overview");
+        assert_eq!(ov.total_requests, 2);
+        storage
+            .query_trends(&TrendsQuery {
+                filter: filter.clone(),
+                granularity: TrendGranularity::Auto,
+                dimension: StackDimension::Provider,
+            })
+            .expect("trends");
+        storage
+            .query_monthly(&MonthlyQuery {
+                year: 2026,
+                month: 11,
+                provider_id: None,
+                device_id: None,
+                tz_offset_minutes: 480,
+            })
+            .expect("monthly");
+        storage.query_models_pricing(&filter).expect("models");
+        storage.query_speed_latency(&filter).expect("speed");
+        storage.query_subscriptions_with_tz(now_ms, 480).expect("subs");
+        storage.query_subscription_templates(now_ms).expect("templates");
+
+        // Event count is seeded from COUNT(*) once, then advanced by ingests.
+        let tray = storage.query_tray_summary(now_ms, 480).expect("tray");
+        assert_eq!(tray.total_ingested_events, 2);
+        let dev = storage.local_device().expect("device").device_id;
+        let extra = NormalizedUsageEvent {
+            event_id: compute_event_id("codex", "s3", "m3", base_ts + 2 * HOUR_MS),
+            device_id: dev,
+            provider_id: "codex".to_string(),
+            session_id: "s3".to_string(),
+            project_label: "cli".to_string(),
+            model_id: "gpt-5-codex".to_string(),
+            timestamp_ms: base_ts + 2 * HOUR_MS,
+            input_tokens: 1_000,
+            output_tokens: 100,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            observable_only: false,
+            duration_ms: None,
+            ttft_ms: None,
+            output_tps: None,
+            estimated_cost_micro_usd: 0,
+            cache_saved_micro_usd: 0,
+        };
+        let outcome = storage
+            .ingest_events_with_cursor(&[extra.clone(), extra], None, &[])
+            .expect("ingest extra");
+        assert_eq!(outcome.inserted, 1);
+        let tray = storage.query_tray_summary(now_ms, 480).expect("tray");
+        assert_eq!(tray.total_ingested_events, 3);
+        let actual: i64 = storage
+            .with_read_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))?))
+            .expect("count");
+        assert_eq!(actual, 3);
     }
 
     #[test]

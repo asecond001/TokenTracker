@@ -283,6 +283,42 @@ async fn loopback_otlp_server_receives_and_persists_metrics_and_logs() {
     handle.stop().await;
 }
 
+/// Claude Code parser restricted to configured custom paths: `default_roots` is
+/// emptied so tests never walk the developer's real `~/.claude/projects`.
+struct FixtureOnlyClaudeParser(ClaudeCodeParser);
+
+impl tokvane_collectors::providers::ProviderLogParser for FixtureOnlyClaudeParser {
+    fn provider_id(&self) -> &str {
+        self.0.provider_id()
+    }
+    fn default_roots(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn matches_file(&self, path: &std::path::Path) -> bool {
+        self.0.matches_file(path)
+    }
+    fn init_context(
+        &self,
+        path: &std::path::Path,
+        device_id: &str,
+    ) -> tokvane_collectors::providers::FileParseContext {
+        self.0.init_context(path, device_id)
+    }
+    fn parse_line(
+        &self,
+        line: &str,
+        ctx: &mut tokvane_collectors::providers::FileParseContext,
+    ) -> Option<tokvane_collectors::providers::ParsedLineResult> {
+        self.0.parse_line(line, ctx)
+    }
+    fn finalize_batch(
+        &self,
+        events: Vec<tokvane_core::domain::NormalizedUsageEvent>,
+    ) -> Vec<tokvane_core::domain::NormalizedUsageEvent> {
+        self.0.finalize_batch(events)
+    }
+}
+
 #[test]
 fn background_watcher_spawns_from_non_tokio_main_thread_without_panic() {
     use std::sync::mpsc;
@@ -331,7 +367,11 @@ fn background_watcher_spawns_from_non_tokio_main_thread_without_panic() {
         storage.upsert_provider_config(&cfg).expect("upsert cfg");
     }
 
-    let coord = CollectorCoordinator::new(storage.clone());
+    // Hermetic parser set: only the fixture log is scanned, never real home-directory logs.
+    let coord = CollectorCoordinator::with_parsers(
+        storage.clone(),
+        vec![Arc::new(FixtureOnlyClaudeParser(ClaudeCodeParser::new()))],
+    );
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let rt_handle = rt.handle().clone();
 

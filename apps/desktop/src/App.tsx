@@ -5,6 +5,7 @@ import { Sidebar } from './components/Sidebar';
 import { TitleBar } from './components/TitleBar';
 import { WorkspaceBackdrop } from './components/WorkspaceBackdrop';
 import { ipc, isTauriRuntime } from './lib/ipc';
+import { CLOCK_REFRESH_MS, createUsageRefresher } from './lib/liveRefresh';
 import { checkForUpdates } from './lib/updater';
 import { DataSourcesPage } from './pages/DataSourcesPage';
 import { ModelsPricingPage } from './pages/ModelsPricingPage';
@@ -110,7 +111,7 @@ export function App() {
     queryKey: ['bootstrap'],
     queryFn: () => ipc.getBootstrapState(),
     enabled: !isAuxView,
-    refetchInterval: 20_000,
+    refetchInterval: CLOCK_REFRESH_MS,
   });
 
   const { data: preferences } = useQuery({
@@ -123,7 +124,7 @@ export function App() {
     queryKey: ['tray_summary', tzOffsetMinutes],
     queryFn: () => ipc.getTraySummary(tzOffsetMinutes),
     enabled: !isAuxView,
-    refetchInterval: 10_000,
+    refetchInterval: CLOCK_REFRESH_MS,
   });
 
   // Sync persisted preferences once on bootstrap
@@ -162,12 +163,12 @@ export function App() {
     if (!isTauriRuntime()) return;
     let disposed = false;
     const unlisteners: Array<() => void> = [];
+    const usageRefresher = createUsageRefresher(queryClient);
+    unlisteners.push(usageRefresher.dispose);
 
     void listen('usage-updated', () => {
       setLivePulseSeq((seq) => seq + 1);
-      void queryClient.invalidateQueries({
-        predicate: (query) => query.queryKey[0] !== 'bg-image-data-url',
-      });
+      usageRefresher.schedule();
     })
       .then((unlisten) => {
         if (disposed) {

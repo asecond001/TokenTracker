@@ -20,6 +20,7 @@ import {
   useWorkspaceStore,
 } from '../stores/workspaceStore';
 import type { AnalyticsFilter, StackDimension, TrendGranularity } from '../types/ipc';
+import { CLOCK_REFRESH_MS } from '../lib/liveRefresh';
 
 type TrendMetric = 'tokens' | 'cost' | 'cache_hit' | 'requests';
 type TrendChartStyle = 'bar' | 'line';
@@ -132,7 +133,7 @@ export function TrendsPage() {
       return ipc.getTrends({ filter, granularity, dimension });
     },
     placeholderData: keepPreviousData,
-    refetchInterval: 15_000,
+    refetchInterval: CLOCK_REFRESH_MS,
   });
 
   const isAllTime = timePreset === 'all';

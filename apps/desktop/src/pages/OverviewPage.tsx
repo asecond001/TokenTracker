@@ -26,6 +26,7 @@ import {
   useWorkspaceStore,
 } from '../stores/workspaceStore';
 import type { AnalyticsFilter } from '../types/ipc';
+import { CLOCK_REFRESH_MS } from '../lib/liveRefresh';
 
 function DeltaBadge({ pct, prefix = '较昨日' }: { pct: number | null | undefined; prefix?: string }) {
   if (pct === null || pct === undefined || !Number.isFinite(pct)) {
@@ -76,7 +77,7 @@ export function OverviewPage() {
       return ipc.getOverview(filter);
     },
     placeholderData: keepPreviousData,
-    refetchInterval: 10_000,
+    refetchInterval: CLOCK_REFRESH_MS,
   });
 
   const costFormatter = useCallback(

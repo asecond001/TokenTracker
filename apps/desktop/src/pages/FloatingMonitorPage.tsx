@@ -21,6 +21,7 @@ import {
 import { ipc, isTauriRuntime } from '../lib/ipc';
 import { syncDocumentAndNativeTheme, useWorkspaceStore } from '../stores/workspaceStore';
 import type { ThemeMode } from '../types/ipc';
+import { LIVE_CLOCK_REFRESH_MS } from '../lib/liveRefresh';
 
 function normalizeThemeMode(raw: string | undefined | null): ThemeMode {
   return raw === 'light' || raw === 'dark' || raw === 'system' ? raw : 'dark';
@@ -97,7 +98,6 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
   const { data: prefs } = useQuery({
     queryKey: ['preferences'],
     queryFn: () => ipc.getPreferences(),
-    refetchInterval: 5_000,
   });
 
   useEffect(() => {
@@ -112,7 +112,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
   const { data: summary } = useQuery({
     queryKey: ['tray_summary', tzOffsetMinutes],
     queryFn: () => ipc.getTraySummary(tzOffsetMinutes),
-    refetchInterval: 3_000,
+    refetchInterval: LIVE_CLOCK_REFRESH_MS,
   });
 
   const todayTokens = summary?.today_tokens ?? 0;

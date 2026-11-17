@@ -22,6 +22,7 @@ import type {
   RemoteSubscriptionSnapshot,
   SubscriptionPlanStatus,
 } from '../types/ipc';
+import { CLOCK_REFRESH_MS } from '../lib/liveRefresh';
 
 const API_PROVIDERS: Array<{ id: string; label: string }> = [
   { id: 'deepseek_harness', label: 'DeepSeek Harness' },
@@ -308,19 +309,19 @@ export function SubscriptionsPage() {
   } = useQuery({
     queryKey: ['subscriptions'],
     queryFn: () => ipc.getSubscriptions(),
-    refetchInterval: 10_000,
+    refetchInterval: CLOCK_REFRESH_MS,
   });
 
   const { data: observedRateLimits = [] } = useQuery({
     queryKey: ['observed_rate_limits'],
     queryFn: () => ipc.getObservedRateLimits(),
-    refetchInterval: 10_000,
+    refetchInterval: CLOCK_REFRESH_MS,
   });
 
   const { data: paygAccounts = [] } = useQuery({
     queryKey: ['payg_accounts', tzOffsetMinutes],
     queryFn: () => ipc.getPaygAccounts(tzOffsetMinutes),
-    refetchInterval: 10_000,
+    refetchInterval: CLOCK_REFRESH_MS,
   });
 
   const { data: providerConfigs = [] } = useQuery({
@@ -332,7 +333,6 @@ export function SubscriptionsPage() {
   const { data: remoteSnapshots = [] } = useQuery({
     queryKey: ['remote-subscriptions'],
     queryFn: () => ipc.getRemoteSubscriptionSnapshots(),
-    refetchInterval: 15_000,
   });
 
   const remoteDeviceGroups = useMemo(() => {
