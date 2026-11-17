@@ -5024,6 +5024,51 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_official_cli_usage_auto_seeds_pro_plan_with_live_windows() {
+        let storage = Storage::open_in_memory().expect("in-memory");
+        let now_ms = 1_794_840_000_000i64;
+        let cli_window = |name: &str, pct: f64, mins: i64, reset_in: i64| ObservedRateLimitWindow {
+            provider_id: provider_ids::CLAUDE_CODE.to_string(),
+            window_name: name.to_string(),
+            used_percent: pct,
+            window_minutes: Some(mins),
+            resets_at_ms: Some(now_ms + reset_in),
+            observed_at_ms: now_ms,
+            source: Some("official_cli".to_string()),
+            plan_hint: Some("pro".to_string()),
+        };
+
+        storage
+            .replace_provider_source_rate_limits(
+                provider_ids::CLAUDE_CODE,
+                "official_cli",
+                &[
+                    cli_window("5h", 49.0, 300, 3_600_000),
+                    cli_window("7d", 7.0, 10_080, 5 * 86_400_000),
+                ],
+            )
+            .expect("replace official_cli windows");
+
+        let subs = storage.query_subscriptions(now_ms).expect("subs");
+        let claude: Vec<_> = subs
+            .iter()
+            .filter(|s| s.plan.provider_id == provider_ids::CLAUDE_CODE)
+            .collect();
+        assert_eq!(claude.len(), 1);
+        let plan = &claude[0].plan;
+        assert_eq!(plan.plan_id, "auto_claude_code");
+        assert_eq!(plan.plan_name, "Claude Pro");
+        assert_eq!(plan.monthly_fee_micro_usd, 20_000_000);
+        assert_eq!(plan.auto_source.as_deref(), Some("official_cli"));
+        assert_eq!(claude[0].windows.len(), 2);
+        assert_eq!(claude[0].windows[0].window_id, "5h");
+        assert_eq!(claude[0].windows[0].source, "official_cli");
+        assert!((claude[0].windows[0].used_percent - 49.0).abs() < 1e-9);
+        assert_eq!(claude[0].windows[1].window_id, "7d");
+        assert!((claude[0].windows[1].used_percent - 7.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn antigravity_official_cli_rate_limits_auto_seed_and_upgrade_with_carbon_usage() {
         let storage = Storage::open_in_memory().expect("in-memory");
         let dev = storage.local_device().expect("device").device_id;

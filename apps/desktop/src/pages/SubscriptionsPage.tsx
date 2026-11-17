@@ -54,6 +54,8 @@ const API_KEY_CAPABLE_PROVIDERS = new Set([
 
 const QUOTA_BALANCE_API_PROVIDERS = new Set(['antigravity', 'kimi_code', 'minimax_code', 'qcode']);
 
+const CLI_QUOTA_LOGIN_PROVIDERS = new Set(['antigravity', 'claude_code']);
+
 interface AccountFormDraft {
   mode: 'create' | 'edit';
   connectKind: 'login' | 'api';
@@ -427,7 +429,7 @@ export function SubscriptionsPage() {
 
   const refreshQuotaMutation = useMutation({
     mutationFn: async (providerId: string) => {
-      if (QUOTA_BALANCE_API_PROVIDERS.has(providerId)) {
+      if (QUOTA_BALANCE_API_PROVIDERS.has(providerId) || CLI_QUOTA_LOGIN_PROVIDERS.has(providerId)) {
         const outcome = await ipc.refreshProviderBalance(providerId);
         return outcome.from_cache
           ? `${providerDisplayName(providerId)} 使用近期缓存（冷却剩余 ${outcome.cooldown_remaining_secs}s）`
@@ -461,8 +463,11 @@ export function SubscriptionsPage() {
 
   const syncLoginAccountMutation = useMutation({
     mutationFn: async (providerId: string) => {
-      if (providerId === 'antigravity') {
+      if (CLI_QUOTA_LOGIN_PROVIDERS.has(providerId)) {
         const outcome = await ipc.refreshProviderBalance(providerId);
+        if (providerId === 'claude_code') {
+          await ipc.triggerScanNow();
+        }
         return outcome.from_cache
           ? `${providerDisplayName(providerId)} 命中 60s 缓存（冷却剩余 ${outcome.cooldown_remaining_secs}s）`
           : `${providerDisplayName(providerId)} 配额已同步（更新 ${outcome.rate_limits_updated} 个窗口）`;

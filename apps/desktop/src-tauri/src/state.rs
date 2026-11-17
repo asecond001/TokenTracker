@@ -3,7 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
+use tokvane_collectors::quota_refresh::{
+    activity_refresh_kind, ActivityRefreshThrottle, QuotaRefreshKind,
+};
 use tokvane_collectors::{
     start_loopback_otlp_server, sync_catalog_and_rate, CollectorCoordinator, CredentialManager,
     OsKeyringStore, OtlpServerHandle, SyncClientHandle,
@@ -90,6 +93,8 @@ impl AppState {
         let (tx, rx) = watch::channel(false);
         let mut catalog_rx = tx.subscribe();
         let mut quota_rx = tx.subscribe();
+        let activity_shutdown_rx = tx.subscribe();
+        let (activity_tx, activity_rx) = mpsc::unbounded_channel::<Vec<String>>();
         let watcher_app = app_handle.clone();
         let coord = self.coordinator.clone();
         let sync_for_watcher = self.sync_client.clone();
@@ -100,9 +105,21 @@ impl AppState {
                         let _ = watcher_app.emit("usage-updated", report);
                         sync_for_watcher.notify_local_change();
                     }
+                    if !report.active_providers.is_empty() {
+                        let _ = activity_tx.send(report.active_providers.clone());
+                    }
                 })
                 .await;
         });
+
+        tauri::async_runtime::spawn(run_activity_quota_refresher(
+            self.storage.clone(),
+            Arc::clone(&self.credentials),
+            app_handle.clone(),
+            self.sync_client.clone(),
+            activity_rx,
+            activity_shutdown_rx,
+        ));
 
         let sync_client = self.sync_client.clone();
         let sync_app = app_handle.clone();
@@ -306,8 +323,15 @@ async fn poll_configured_provider_apis(
         if !cfg.enabled {
             continue;
         }
-        let is_cli_quota_provider = cfg.provider_id == "antigravity"
-            && tokvane_collectors::providers::antigravity::resolve_agy_cli_binary().is_some();
+        let is_cli_quota_provider = match cfg.provider_id.as_str() {
+            "antigravity" => {
+                tokvane_collectors::providers::antigravity::resolve_agy_cli_binary().is_some()
+            }
+            "claude_code" => {
+                tokvane_collectors::providers::claude_cli::resolve_claude_cli_binary().is_some()
+            }
+            _ => false,
+        };
         let is_key_balance_provider = cfg.has_credential
             && matches!(
                 cfg.provider_id.as_str(),
@@ -343,5 +367,122 @@ async fn poll_configured_provider_apis(
     }
     if any_rate_limits {
         sync_client.notify_local_change();
+    }
+}
+
+/// Whether a provider with fresh log activity can have its official quota refreshed right now.
+fn activity_refresh_eligible(storage: &Storage, provider_id: &str) -> bool {
+    let Some(kind) = activity_refresh_kind(provider_id) else {
+        return false;
+    };
+    let Ok(configs) = storage.list_provider_configs() else {
+        return false;
+    };
+    let Some(cfg) = configs.iter().find(|c| c.provider_id == provider_id) else {
+        return false;
+    };
+    if !cfg.enabled {
+        return false;
+    }
+    match kind {
+        QuotaRefreshKind::OfficialApiKey => cfg.has_credential,
+        QuotaRefreshKind::OfficialCli => match provider_id {
+            "antigravity" => {
+                tokvane_collectors::providers::antigravity::resolve_agy_cli_binary().is_some()
+            }
+            "claude_code" => {
+                tokvane_collectors::providers::claude_cli::resolve_claude_cli_binary().is_some()
+            }
+            _ => false,
+        },
+    }
+}
+
+/// Refresh official quota shortly after a provider shows new local activity (at most once per
+/// 60s per provider, with one trailing refresh after a burst), so quota bars track live usage
+/// instead of waiting for the 5-minute poll.
+async fn run_activity_quota_refresher(
+    storage: Storage,
+    credentials: Arc<dyn CredentialManager>,
+    app: AppHandle,
+    sync_client: SyncClientHandle,
+    mut activity_rx: mpsc::UnboundedReceiver<Vec<String>>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    let throttle = Arc::new(Mutex::new(ActivityRefreshThrottle::new()));
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let start_refresh = |provider_id: String| {
+        let storage = storage.clone();
+        let credentials = Arc::clone(&credentials);
+        let app = app.clone();
+        let sync_client = sync_client.clone();
+        let throttle = Arc::clone(&throttle);
+        tauri::async_runtime::spawn(async move {
+            match tokvane_collectors::refresh_provider_balance_force(
+                &storage,
+                &provider_id,
+                credentials.as_ref(),
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    let _ = storage.set_provider_sync_status(
+                        &provider_id,
+                        Some(outcome.snapshot.fetched_at_ms),
+                        None,
+                    );
+                    let _ = app.emit("usage-updated", "activity_quota_refresh");
+                    if outcome.rate_limits_updated > 0 {
+                        sync_client.notify_local_change();
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!("Activity quota refresh warning for {provider_id}: {err}");
+                }
+            }
+            if let Ok(mut guard) = throttle.lock() {
+                guard.finish(&provider_id);
+            }
+        });
+    };
+
+    loop {
+        tokio::select! {
+            msg = activity_rx.recv() => {
+                let Some(provider_ids) = msg else {
+                    break;
+                };
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                for provider_id in provider_ids {
+                    if !activity_refresh_eligible(&storage, &provider_id) {
+                        continue;
+                    }
+                    let start_now = throttle
+                        .lock()
+                        .map(|mut guard| guard.on_activity(&provider_id, now_ms))
+                        .unwrap_or(false);
+                    if start_now {
+                        start_refresh(provider_id);
+                    }
+                }
+            }
+            _ = tick.tick() => {
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let due = throttle
+                    .lock()
+                    .map(|mut guard| guard.take_due(now_ms))
+                    .unwrap_or_default();
+                for provider_id in due {
+                    start_refresh(provider_id);
+                }
+            }
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+        }
     }
 }

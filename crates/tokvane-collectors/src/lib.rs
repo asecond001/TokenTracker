@@ -5,6 +5,7 @@ pub mod credentials;
 pub mod error;
 pub mod otlp;
 pub mod providers;
+pub mod quota_refresh;
 pub mod sync_client;
 pub mod sync_provision;
 pub mod watcher;
@@ -17,7 +18,7 @@ pub use credentials::{CredentialManager, MemoryCredentialStore, OsKeyringStore};
 pub use error::{CollectorError, CollectorResult};
 pub use otlp::{start_loopback_otlp_server, validate_loopback_addr, OtlpServerHandle};
 pub use providers::official_api::{
-    refresh_provider_balance, refresh_provider_balance_force,
+    refresh_cli_quota_with_runner, refresh_provider_balance, refresh_provider_balance_force,
     refresh_provider_balance_with_fetcher, AuthHttpFetcher, BalanceApiEndpoints,
     BalanceRefreshOutcome, ReqwestAuthFetcher, BALANCE_COOLDOWN_MS,
 };

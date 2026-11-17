@@ -818,8 +818,15 @@ pub async fn refresh_provider_balance(
     state: State<'_, AppState>,
     provider_id: String,
 ) -> Result<BalanceRefreshOutcome, IpcError> {
-    if provider_id.trim().eq_ignore_ascii_case("antigravity") {
-        let _ = state.storage.reset_auto_subscription_dismissal(&provider_id);
+    let trimmed_provider = provider_id.trim();
+    if trimmed_provider.eq_ignore_ascii_case("antigravity")
+        || trimmed_provider.eq_ignore_ascii_case("claude_code")
+    {
+        let _ = state.storage.reset_auto_subscription_dismissal(trimmed_provider);
+    }
+    if trimmed_provider.eq_ignore_ascii_case("claude_code") {
+        // Explicit user sync re-checks the subscription tier instead of reusing the 6h cache.
+        tokvane_collectors::providers::claude_cli::invalidate_claude_auth_cache();
     }
     let outcome = collect_provider_balance(&state.storage, &provider_id, state.credentials.as_ref())
         .await
@@ -859,7 +866,15 @@ pub fn launch_provider_cli_login(
             (bin, Vec::new())
         }
         "codex" => ("codex".to_string(), vec!["login"]),
-        "claude_code" => ("claude".to_string(), Vec::new()),
+        "claude_code" => {
+            let bin = tokvane_collectors::providers::claude_cli::resolve_claude_cli_binary()
+                .map(|p| p.to_string_lossy().into_owned())
+                .ok_or_else(|| {
+                    IpcError::new("CLI_LOGIN_UNAVAILABLE", "请先安装官方 Claude Code CLI（claude）")
+                })?;
+            tokvane_collectors::providers::claude_cli::invalidate_claude_auth_cache();
+            (bin, vec!["auth", "login"])
+        }
         _ => {
             return Err(IpcError::new(
                 "UNSUPPORTED_LOGIN",

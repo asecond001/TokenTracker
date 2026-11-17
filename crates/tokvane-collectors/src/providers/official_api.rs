@@ -13,6 +13,7 @@ use tokvane_core::Storage;
 
 use crate::credentials::CredentialManager;
 use crate::error::{CollectorError, CollectorResult};
+use crate::providers::claude_cli::CLAUDE_CLI_ENDPOINT;
 use crate::providers::parse_timestamp_ms;
 
 pub const DEFAULT_MOONSHOT_BALANCE_URL: &str = "https://api.moonshot.cn/v1/users/me/balance";
@@ -159,6 +160,7 @@ fn candidate_endpoints_for_provider(
 fn default_endpoint_label(provider_id: &str, endpoints: &BalanceApiEndpoints) -> CollectorResult<String> {
     match provider_id {
         provider_ids::ANTIGRAVITY => Ok(ANTIGRAVITY_CLI_ENDPOINT.to_string()),
+        provider_ids::CLAUDE_CODE => Ok(CLAUDE_CLI_ENDPOINT.to_string()),
         provider_ids::KIMI_CODE => Ok(endpoints.moonshot_url.clone()),
         provider_ids::DEEPSEEK_HARNESS => Ok(endpoints.deepseek_url.clone()),
         provider_ids::QCODE => Ok(endpoints.qcode_url.clone()),
@@ -346,8 +348,34 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = CollectorResult<(ProviderBalanceSnapshot, Vec<ObservedRateLimitWindow>)>>,
 {
+    refresh_cli_quota_with_runner(
+        storage,
+        provider_ids::ANTIGRAVITY,
+        ANTIGRAVITY_CLI_ENDPOINT,
+        now_ms,
+        bypass_cooldown,
+        runner,
+    )
+    .await
+}
+
+/// Testable official CLI quota polling entry point (Antigravity `agy`, Claude Code `claude`) with
+/// 60-second cooldown. On success the provider's `official_cli` windows are atomically replaced;
+/// on failure the last good windows are retained and the sync error is recorded.
+pub async fn refresh_cli_quota_with_runner<F, Fut>(
+    storage: &Storage,
+    provider_id: &str,
+    endpoint: &str,
+    now_ms: i64,
+    bypass_cooldown: bool,
+    runner: F,
+) -> CollectorResult<BalanceRefreshOutcome>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = CollectorResult<(ProviderBalanceSnapshot, Vec<ObservedRateLimitWindow>)>>,
+{
     if !bypass_cooldown {
-        if let Some(cached) = storage.get_provider_balance(provider_ids::ANTIGRAVITY)? {
+        if let Some(cached) = storage.get_provider_balance(provider_id)? {
             let age_ms = now_ms.saturating_sub(cached.fetched_at_ms);
             if (0..BALANCE_COOLDOWN_MS).contains(&age_ms) {
                 let remaining_ms = BALANCE_COOLDOWN_MS - age_ms;
@@ -355,7 +383,7 @@ where
                 return Ok(BalanceRefreshOutcome {
                     snapshot: cached,
                     rate_limits_updated: 0,
-                    endpoint: ANTIGRAVITY_CLI_ENDPOINT.to_string(),
+                    endpoint: endpoint.to_string(),
                     from_cache: true,
                     cooldown_remaining_secs: remaining_secs,
                 });
@@ -366,31 +394,19 @@ where
     match runner().await {
         Ok((snapshot, rate_limits)) => {
             let rate_limits_updated = rate_limits.len();
-            storage.replace_provider_source_rate_limits(
-                provider_ids::ANTIGRAVITY,
-                "official_cli",
-                &rate_limits,
-            )?;
+            storage.replace_provider_source_rate_limits(provider_id, "official_cli", &rate_limits)?;
             storage.upsert_provider_balance(&snapshot)?;
-            let _ = storage.set_provider_sync_status(
-                provider_ids::ANTIGRAVITY,
-                Some(now_ms),
-                None,
-            );
+            let _ = storage.set_provider_sync_status(provider_id, Some(now_ms), None);
             Ok(BalanceRefreshOutcome {
                 snapshot,
                 rate_limits_updated,
-                endpoint: ANTIGRAVITY_CLI_ENDPOINT.to_string(),
+                endpoint: endpoint.to_string(),
                 from_cache: false,
                 cooldown_remaining_secs: 0,
             })
         }
         Err(err) => {
-            let _ = storage.set_provider_sync_status(
-                provider_ids::ANTIGRAVITY,
-                None,
-                Some(&err.to_string()),
-            );
+            let _ = storage.set_provider_sync_status(provider_id, None, Some(&err.to_string()));
             Err(err)
         }
     }
@@ -409,6 +425,17 @@ pub async fn refresh_provider_balance_with_fetcher_inner(
         return refresh_antigravity_cli_quota_with_runner(storage, now_ms, bypass_cooldown, || {
             crate::providers::antigravity::collect_antigravity_cli_usage(now_ms)
         })
+        .await;
+    }
+    if provider_id.trim().eq_ignore_ascii_case(provider_ids::CLAUDE_CODE) {
+        return refresh_cli_quota_with_runner(
+            storage,
+            provider_ids::CLAUDE_CODE,
+            CLAUDE_CLI_ENDPOINT,
+            now_ms,
+            bypass_cooldown,
+            || crate::providers::claude_cli::collect_claude_cli_usage(now_ms),
+        )
         .await;
     }
 

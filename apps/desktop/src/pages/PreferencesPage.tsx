@@ -872,7 +872,7 @@ export function PreferencesPage({
               color: 'var(--accent-tonal-text)',
             }}
           >
-            v0.4.2
+            v0.4.3
           </span>
         </div>
 

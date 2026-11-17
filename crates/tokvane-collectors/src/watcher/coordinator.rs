@@ -32,6 +32,9 @@ pub struct ScanReport {
     pub events_deduplicated: usize,
     #[serde(default)]
     pub rate_limits_updated: usize,
+    /// Built-in provider ids that ingested at least one new usage event during this scan.
+    #[serde(default)]
+    pub active_providers: Vec<String>,
     pub errors: Vec<String>,
     pub scanned_at_ms: i64,
 }
@@ -114,6 +117,7 @@ impl CollectorCoordinator {
 
             let files = discover_files_for_parser(parser.as_ref(), cfg);
             let mut provider_err: Option<String> = None;
+            let mut provider_inserted = 0usize;
 
             for file_path in files {
                 match tail_file_incremental(&self.storage, parser.as_ref(), &file_path, &device_id)
@@ -121,6 +125,7 @@ impl CollectorCoordinator {
                     Ok(out) => {
                         report.files_scanned += 1;
                         report.events_inserted += out.events_inserted;
+                        provider_inserted += out.events_inserted;
                         report.events_deduplicated += out.events_deduplicated;
                         report.rate_limits_updated += out.rate_limits_updated;
                     }
@@ -135,6 +140,10 @@ impl CollectorCoordinator {
                         report.errors.push(msg);
                     }
                 }
+            }
+
+            if provider_inserted > 0 {
+                report.active_providers.push(parser.provider_id().to_string());
             }
 
             if parser.provider_id() == provider_ids::CODEX {

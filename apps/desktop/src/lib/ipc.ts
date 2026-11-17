@@ -480,7 +480,11 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
       } as T;
     case 'refresh_provider_balance': {
       const targetProvider = (args?.providerId as string | undefined) ?? 'kimi_code';
-      const isQuotaCli = targetProvider === 'antigravity';
+      const isQuotaCli = targetProvider === 'antigravity' || targetProvider === 'claude_code';
+      const cliEndpoint =
+        targetProvider === 'claude_code'
+          ? 'claude auth status --json + claude -p -- /usage'
+          : 'agy -p "/usage" --output-format json';
       return {
         snapshot: {
           provider_id: targetProvider,
@@ -492,8 +496,8 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
           daily_quota_limit_micro: null,
           fetched_at_ms: now,
         },
-        rate_limits_updated: isQuotaCli ? 4 : 0,
-        endpoint: isQuotaCli ? 'agy -p "/usage" --output-format json' : 'preview://balance',
+        rate_limits_updated: isQuotaCli ? (targetProvider === 'claude_code' ? 2 : 4) : 0,
+        endpoint: isQuotaCli ? cliEndpoint : 'preview://balance',
         from_cache: !isQuotaCli,
         cooldown_remaining_secs: isQuotaCli ? 0 : 60,
       } as T;

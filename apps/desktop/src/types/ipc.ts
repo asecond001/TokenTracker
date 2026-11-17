@@ -71,6 +71,7 @@ export interface ScanReport {
   events_inserted: number;
   events_deduplicated: number;
   rate_limits_updated?: number;
+  active_providers?: string[];
   errors: string[];
   scanned_at_ms: number;
 }

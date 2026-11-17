@@ -1,4 +1,5 @@
 pub mod antigravity;
+pub mod claude_cli;
 pub mod claude_code;
 pub mod codex;
 pub mod compatible_common;
