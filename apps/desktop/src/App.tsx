@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { type QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { listen } from '@tauri-apps/api/event';
 import { Sidebar } from './components/Sidebar';
@@ -7,16 +7,37 @@ import { WorkspaceBackdrop } from './components/WorkspaceBackdrop';
 import { ipc, isTauriRuntime } from './lib/ipc';
 import { CLOCK_REFRESH_MS, createUsageRefresher } from './lib/liveRefresh';
 import { checkForUpdates } from './lib/updater';
-import { DataSourcesPage } from './pages/DataSourcesPage';
-import { ModelsPricingPage } from './pages/ModelsPricingPage';
-import { MonthlyPage } from './pages/MonthlyPage';
-import { OverviewPage } from './pages/OverviewPage';
-import { PreferencesPage } from './pages/PreferencesPage';
-import { SpeedLatencyPage } from './pages/SpeedLatencyPage';
-import { SubscriptionsPage } from './pages/SubscriptionsPage';
-import { TrayPopupPage } from './pages/TrayPopupPage';
-import { FloatingMonitorPage } from './pages/FloatingMonitorPage';
-import { TrendsPage } from './pages/TrendsPage';
+
+// Secondary pages and the auxiliary tray / floating windows are split into
+// their own chunks so each webview only downloads the code it renders.
+const OverviewPage = lazy(() =>
+  import('./pages/OverviewPage').then((m) => ({ default: m.OverviewPage }))
+);
+const TrendsPage = lazy(() => import('./pages/TrendsPage').then((m) => ({ default: m.TrendsPage })));
+const MonthlyPage = lazy(() =>
+  import('./pages/MonthlyPage').then((m) => ({ default: m.MonthlyPage }))
+);
+const ModelsPricingPage = lazy(() =>
+  import('./pages/ModelsPricingPage').then((m) => ({ default: m.ModelsPricingPage }))
+);
+const SubscriptionsPage = lazy(() =>
+  import('./pages/SubscriptionsPage').then((m) => ({ default: m.SubscriptionsPage }))
+);
+const SpeedLatencyPage = lazy(() =>
+  import('./pages/SpeedLatencyPage').then((m) => ({ default: m.SpeedLatencyPage }))
+);
+const DataSourcesPage = lazy(() =>
+  import('./pages/DataSourcesPage').then((m) => ({ default: m.DataSourcesPage }))
+);
+const PreferencesPage = lazy(() =>
+  import('./pages/PreferencesPage').then((m) => ({ default: m.PreferencesPage }))
+);
+const TrayPopupPage = lazy(() =>
+  import('./pages/TrayPopupPage').then((m) => ({ default: m.TrayPopupPage }))
+);
+const FloatingMonitorPage = lazy(() =>
+  import('./pages/FloatingMonitorPage').then((m) => ({ default: m.FloatingMonitorPage }))
+);
 import {
   type NavPage,
   syncDocumentAndNativeTheme,
@@ -347,11 +368,19 @@ export function App() {
   });
 
   if (isTrayView) {
-    return <TrayPopupPage />;
+    return (
+      <Suspense fallback={null}>
+        <TrayPopupPage />
+      </Suspense>
+    );
   }
 
   if (isFloatingView) {
-    return <FloatingMonitorPage livePulseSeq={livePulseSeq} />;
+    return (
+      <Suspense fallback={null}>
+        <FloatingMonitorPage livePulseSeq={livePulseSeq} />
+      </Suspense>
+    );
   }
 
   const activePreferences = preferences ?? bootstrap?.preferences ?? null;
@@ -420,7 +449,7 @@ export function App() {
           <Sidebar traySummary={traySummary} hasBackdrop={hasBackdrop} />
           <main className="flex-1 h-full overflow-y-auto pl-6 pr-8 py-5 [scrollbar-gutter:stable]">
             <div key={activePage} className="page-transition-enter min-h-full">
-              {renderPage()}
+              <Suspense fallback={null}>{renderPage()}</Suspense>
             </div>
           </main>
         </div>

@@ -12,6 +12,23 @@ export default defineConfig({
       ignored: ['**/src-tauri/**'],
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Keep the chart engine in its own long-lived chunk so the tray and
+        // floating windows (which never draw ECharts) skip it entirely.
+        manualChunks(id) {
+          if (id.includes('node_modules/zrender')) {
+            return 'zrender';
+          }
+          if (id.includes('node_modules/echarts')) {
+            return 'echarts';
+          }
+          return undefined;
+        },
+      },
+    },
+  },
   test: {
     environment: 'jsdom',
     globals: true,

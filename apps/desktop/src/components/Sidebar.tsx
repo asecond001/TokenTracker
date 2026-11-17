@@ -107,7 +107,7 @@ export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
                 </button>
               )}
               <span className="font-mono text-[10px] font-normal lowercase tabular-nums">
-                v0.4.3
+                v0.4.4
               </span>
             </div>
           </div>

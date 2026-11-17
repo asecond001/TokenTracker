@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'docs/**'
+      - 'apps/ios/**'
+      - '**/*.md'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'apps/ios/**'
+      - '**/*.md'
+  # Reused by release-desktop.yml as the pre-release verification gate.
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Desktop frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter desktop typecheck
+      - run: pnpm --filter desktop test
+      - run: pnpm --filter desktop build
+
+  sync-worker:
+    name: Sync Worker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter sync-worker typecheck
+      - run: pnpm --filter sync-worker test
+      - run: pnpm --filter sync-worker build
+      # The desktop app embeds bundle/*.js via include_str! for one-click
+      # provisioning; fail if src/ changed without rebuilding the bundle.
+      - name: Verify committed Worker bundle is up to date
+        run: git diff --exit-code -- services/sync-worker/bundle
+
+  rust:
+    name: Rust workspace
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings

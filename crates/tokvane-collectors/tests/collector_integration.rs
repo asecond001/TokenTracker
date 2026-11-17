@@ -858,7 +858,9 @@ fn custom_declarative_rules_and_phase2_otlp_ingest_cleanly() {
         .upsert_custom_provider_rule(&rule)
         .expect("save rule");
 
-    let coordinator = CollectorCoordinator::new(storage.clone());
+    // Hermetic: no built-in parsers, so only the custom rule's temp directory is
+    // scanned and real AI tool logs on the developer machine never leak in.
+    let coordinator = CollectorCoordinator::with_parsers(storage.clone(), Vec::new());
     let rep1 = coordinator.scan_now().expect("scan partial");
     assert_eq!(rep1.events_inserted, 0);
 

@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,8 @@ use tokvane_collectors::{
     normalize_worker_url, provision_worker, refresh_provider_balance as collect_provider_balance,
     refresh_provider_balance_force as collect_provider_balance_force,
     set_sync_credentials as set_sync_creds, BalanceRefreshOutcome, CloudSyncProvisionRequest,
-    ScanReport, SyncRunReport, SyncStatusView, SYNC_BEARER_TOKEN_KEY, SYNC_E2EE_PASSPHRASE_KEY,
+    CredentialManager, ScanReport, SyncRunReport, SyncStatusView, SYNC_BEARER_TOKEN_KEY,
+    SYNC_E2EE_PASSPHRASE_KEY,
 };
 use tokvane_core::analytics::{
     export_monthly_csv, export_monthly_json, AnalyticsFilter, ModelStatsReport, MonthlyQuery,
@@ -112,7 +114,7 @@ fn encode_base64(input: &[u8]) -> String {
     out
 }
 
-fn cleanup_backgrounds_dir(dir: &PathBuf, keep_filename: Option<&str>) {
+fn cleanup_backgrounds_dir(dir: &Path, keep_filename: Option<&str>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -177,7 +179,17 @@ where
     F: FnOnce(&Storage) -> Result<T, IpcError> + Send + 'static,
 {
     let storage = state.storage.clone();
-    tauri::async_runtime::spawn_blocking(move || f(&storage))
+    run_blocking(move || f(&storage)).await
+}
+
+/// Run a blocking closure (SQLite, OS credential store, sync client status) on
+/// Tauri's blocking thread pool instead of the main (UI) thread.
+async fn run_blocking<T, F>(f: F) -> Result<T, IpcError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, IpcError> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
         .await
         .map_err(|e| IpcError::new("TASK_JOIN_ERROR", e.to_string()))?
 }
@@ -317,27 +329,21 @@ pub async fn get_subscriptions(
 }
 
 #[tauri::command]
-pub fn upsert_subscription_plan(
+pub async fn upsert_subscription_plan(
     state: State<'_, AppState>,
     plan: SubscriptionPlan,
 ) -> Result<(), IpcError> {
-    state
-        .storage
-        .upsert_subscription_plan(&plan)
-        .map_err(IpcError::from)?;
+    run_storage(&state, move |s| Ok(s.upsert_subscription_plan(&plan)?)).await?;
     state.sync_client.notify_local_change();
     Ok(())
 }
 
 #[tauri::command]
-pub fn delete_subscription_plan(
+pub async fn delete_subscription_plan(
     state: State<'_, AppState>,
     plan_id: String,
 ) -> Result<(), IpcError> {
-    state
-        .storage
-        .delete_subscription_plan(&plan_id)
-        .map_err(IpcError::from)?;
+    run_storage(&state, move |s| Ok(s.delete_subscription_plan(&plan_id)?)).await?;
     state.sync_client.notify_local_change();
     Ok(())
 }
@@ -385,14 +391,11 @@ pub async fn get_provider_configs(
 }
 
 #[tauri::command]
-pub fn update_provider_config(
+pub async fn update_provider_config(
     state: State<'_, AppState>,
     config: ProviderConfig,
 ) -> Result<(), IpcError> {
-    state
-        .storage
-        .upsert_provider_config(&config)
-        .map_err(IpcError::from)
+    run_storage(&state, move |s| Ok(s.upsert_provider_config(&config)?)).await
 }
 
 #[tauri::command]
@@ -466,21 +469,22 @@ pub async fn set_provider_api_key(
 }
 
 #[tauri::command]
-pub fn delete_provider_api_key(
+pub async fn delete_provider_api_key(
     app: AppHandle,
     state: State<'_, AppState>,
     provider_id: String,
 ) -> Result<(), IpcError> {
-    state.credentials.delete_api_key(&provider_id)?;
-    state
-        .storage
-        .set_provider_has_credential(&provider_id, false)?;
-    state
-        .storage
-        .clear_provider_api_artifacts(&provider_id)?;
-    let _ = state
-        .storage
-        .set_provider_sync_status(&provider_id, None, None);
+    let credentials = Arc::clone(&state.credentials);
+    let storage = state.storage.clone();
+    let pid = provider_id.clone();
+    run_blocking(move || {
+        credentials.delete_api_key(&pid)?;
+        storage.set_provider_has_credential(&pid, false)?;
+        storage.clear_provider_api_artifacts(&pid)?;
+        let _ = storage.set_provider_sync_status(&pid, None, None);
+        Ok(())
+    })
+    .await?;
     let _ = app.emit("usage-updated", &provider_id);
     state.sync_client.notify_local_change();
     Ok(())
@@ -536,11 +540,26 @@ pub async fn update_preferences(
 }
 
 #[tauri::command]
-pub fn import_background_image(
+pub async fn import_background_image(
     app: AppHandle,
     state: State<'_, AppState>,
     source_path: String,
 ) -> Result<String, IpcError> {
+    let storage = state.storage.clone();
+    let bg_dir = managed_backgrounds_dir(&state);
+    let (filename, updated) = run_blocking(move || {
+        import_background_image_blocking(&storage, &bg_dir, &source_path)
+    })
+    .await?;
+    let _ = app.emit("preferences-updated", &updated);
+    Ok(filename)
+}
+
+fn import_background_image_blocking(
+    storage: &Storage,
+    bg_dir: &Path,
+    source_path: &str,
+) -> Result<(String, AppPreferences), IpcError> {
     let trimmed = source_path.trim();
     if trimmed.is_empty() {
         return Err(IpcError::new(
@@ -586,8 +605,7 @@ pub fn import_background_image(
         )
     })?;
 
-    let bg_dir = managed_backgrounds_dir(&state);
-    std::fs::create_dir_all(&bg_dir).map_err(|e| {
+    std::fs::create_dir_all(bg_dir).map_err(|e| {
         IpcError::new(
             "BG_IO_ERROR",
             format!("Failed to create backgrounds directory: {e}"),
@@ -603,43 +621,54 @@ pub fn import_background_image(
         )
     })?;
 
-    cleanup_backgrounds_dir(&bg_dir, Some(&filename));
+    cleanup_backgrounds_dir(bg_dir, Some(&filename));
 
-    let mut prefs = state.storage.get_preferences()?;
+    let mut prefs = storage.get_preferences()?;
     prefs.bg_mode = "image".to_string();
     prefs.bg_image_path = Some(filename.clone());
-    state.storage.update_preferences(&prefs)?;
+    storage.update_preferences(&prefs)?;
 
-    let updated = state.storage.get_preferences()?;
-    let _ = app.emit("preferences-updated", &updated);
-    Ok(filename)
+    let updated = storage.get_preferences()?;
+    Ok((filename, updated))
 }
 
 #[tauri::command]
-pub fn clear_background_image(
+pub async fn clear_background_image(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), IpcError> {
+    let storage = state.storage.clone();
     let bg_dir = managed_backgrounds_dir(&state);
-    cleanup_backgrounds_dir(&bg_dir, None);
+    let updated = run_blocking(move || {
+        cleanup_backgrounds_dir(&bg_dir, None);
 
-    let mut prefs = state.storage.get_preferences()?;
-    prefs.bg_image_path = None;
-    if prefs.bg_mode == "image" {
-        prefs.bg_mode = "none".to_string();
-    }
-    state.storage.update_preferences(&prefs)?;
-
-    let updated = state.storage.get_preferences()?;
+        let mut prefs = storage.get_preferences()?;
+        prefs.bg_image_path = None;
+        if prefs.bg_mode == "image" {
+            prefs.bg_mode = "none".to_string();
+        }
+        storage.update_preferences(&prefs)?;
+        Ok(storage.get_preferences()?)
+    })
+    .await?;
     let _ = app.emit("preferences-updated", &updated);
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_background_image_data_url(
+pub async fn get_background_image_data_url(
     state: State<'_, AppState>,
 ) -> Result<Option<String>, IpcError> {
-    let prefs = state.storage.get_preferences()?;
+    let storage = state.storage.clone();
+    let bg_dir = managed_backgrounds_dir(&state);
+    run_blocking(move || background_image_data_url_blocking(&storage, &bg_dir)).await
+}
+
+fn background_image_data_url_blocking(
+    storage: &Storage,
+    bg_dir: &Path,
+) -> Result<Option<String>, IpcError> {
+    let prefs = storage.get_preferences()?;
     let Some(filename) = prefs
         .bg_image_path
         .as_deref()
@@ -656,7 +685,7 @@ pub fn get_background_image_data_url(
         ));
     }
 
-    let full_path = managed_backgrounds_dir(&state).join(filename);
+    let full_path = bg_dir.join(filename);
     let bytes = match std::fs::read(&full_path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -740,37 +769,40 @@ pub async fn list_custom_provider_rules(
 }
 
 #[tauri::command]
-pub fn upsert_custom_provider_rule(
+pub async fn upsert_custom_provider_rule(
     state: State<'_, AppState>,
     rule: CustomProviderRule,
 ) -> Result<Vec<CustomProviderRule>, IpcError> {
-    state.storage.upsert_custom_provider_rule(&rule)?;
-    state
-        .storage
-        .list_custom_provider_rules()
-        .map_err(IpcError::from)
+    run_storage(&state, move |s| {
+        s.upsert_custom_provider_rule(&rule)?;
+        Ok(s.list_custom_provider_rules()?)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn delete_custom_provider_rule(
+pub async fn delete_custom_provider_rule(
     state: State<'_, AppState>,
     rule_id: String,
 ) -> Result<Vec<CustomProviderRule>, IpcError> {
-    state.storage.delete_custom_provider_rule(&rule_id)?;
-    state
-        .storage
-        .list_custom_provider_rules()
-        .map_err(IpcError::from)
+    run_storage(&state, move |s| {
+        s.delete_custom_provider_rule(&rule_id)?;
+        Ok(s.list_custom_provider_rules()?)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn test_custom_provider_sample_line(
+pub async fn test_custom_provider_sample_line(
     state: State<'_, AppState>,
     rule: CustomProviderRule,
     sample_line: String,
 ) -> Result<CustomRuleTestResult, IpcError> {
-    let catalog = state.storage.list_model_pricing()?;
-    Ok(test_custom_rule_line(&rule, &sample_line, &catalog))
+    run_storage(&state, move |s| {
+        let catalog = s.list_model_pricing()?;
+        Ok(test_custom_rule_line(&rule, &sample_line, &catalog))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -791,23 +823,25 @@ pub async fn get_payg_accounts(
 }
 
 #[tauri::command]
-pub fn upsert_payg_account(
+pub async fn upsert_payg_account(
     app: AppHandle,
     state: State<'_, AppState>,
     account: PaygAccount,
 ) -> Result<(), IpcError> {
-    state.storage.upsert_payg_account(&account)?;
-    let _ = app.emit("usage-updated", &account.account_id);
+    let account_id = account.account_id.clone();
+    run_storage(&state, move |s| Ok(s.upsert_payg_account(&account)?)).await?;
+    let _ = app.emit("usage-updated", &account_id);
     Ok(())
 }
 
 #[tauri::command]
-pub fn delete_payg_account(
+pub async fn delete_payg_account(
     app: AppHandle,
     state: State<'_, AppState>,
     account_id: String,
 ) -> Result<(), IpcError> {
-    state.storage.delete_payg_account(&account_id)?;
+    let id = account_id.clone();
+    run_storage(&state, move |s| Ok(s.delete_payg_account(&id)?)).await?;
     let _ = app.emit("usage-updated", &account_id);
     Ok(())
 }
@@ -947,8 +981,9 @@ pub async fn list_devices(state: State<'_, AppState>) -> Result<Vec<DeviceRecord
 }
 
 #[tauri::command]
-pub fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatusView, IpcError> {
-    state.sync_client.status_view().map_err(IpcError::from)
+pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatusView, IpcError> {
+    let sync_client = state.sync_client.clone();
+    run_blocking(move || sync_client.status_view().map_err(IpcError::from)).await
 }
 
 fn resolve_missing_e2ee_salt(
@@ -973,25 +1008,28 @@ fn resolve_missing_e2ee_salt(
 }
 
 #[tauri::command]
-pub fn update_sync_config(
+pub async fn update_sync_config(
     state: State<'_, AppState>,
     enabled: bool,
     worker_url: Option<String>,
     e2ee_enabled: bool,
 ) -> Result<SyncStatusView, IpcError> {
-    let salt = resolve_missing_e2ee_salt(&state.storage, e2ee_enabled)?;
-
-    state
-        .storage
-        .update_sync_config_state(
-            enabled,
-            worker_url.as_deref(),
-            e2ee_enabled,
-            salt.as_deref(),
-        )
-        .map_err(IpcError::from)?;
-    state.sync_client.reconfigure();
-    state.sync_client.status_view().map_err(IpcError::from)
+    let storage = state.storage.clone();
+    let sync_client = state.sync_client.clone();
+    run_blocking(move || {
+        let salt = resolve_missing_e2ee_salt(&storage, e2ee_enabled)?;
+        storage
+            .update_sync_config_state(
+                enabled,
+                worker_url.as_deref(),
+                e2ee_enabled,
+                salt.as_deref(),
+            )
+            .map_err(IpcError::from)?;
+        sync_client.reconfigure();
+        sync_client.status_view().map_err(IpcError::from)
+    })
+    .await
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1037,7 +1075,7 @@ struct SyncPairingJsonPayload<'a> {
 }
 
 #[tauri::command]
-pub fn save_cloud_sync_setup(
+pub async fn save_cloud_sync_setup(
     state: State<'_, AppState>,
     enabled: bool,
     worker_url: Option<String>,
@@ -1045,6 +1083,10 @@ pub fn save_cloud_sync_setup(
     e2ee_enabled: bool,
     e2ee_passphrase: Option<String>,
 ) -> Result<SyncStatusView, IpcError> {
+    let storage = state.storage.clone();
+    let credentials = Arc::clone(&state.credentials);
+    let sync_client = state.sync_client.clone();
+    run_blocking(move || {
     let normalized_url = match worker_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(raw) => Some(normalize_worker_url(Some(raw)).map_err(IpcError::from)?),
         None => {
@@ -1059,14 +1101,14 @@ pub fn save_cloud_sync_setup(
     };
 
     set_sync_creds(
-        state.credentials.as_ref(),
+        credentials.as_ref(),
         bearer_token.as_deref(),
         e2ee_passphrase.as_deref(),
     )
     .map_err(IpcError::from)?;
 
     let (has_bearer, has_passphrase) =
-        has_sync_credentials(state.credentials.as_ref()).map_err(IpcError::from)?;
+        has_sync_credentials(credentials.as_ref()).map_err(IpcError::from)?;
     if enabled && !has_bearer {
         return Err(IpcError::new(
             "VALIDATION_ERROR",
@@ -1080,10 +1122,9 @@ pub fn save_cloud_sync_setup(
         ));
     }
 
-    let salt = resolve_missing_e2ee_salt(&state.storage, e2ee_enabled)?;
+    let salt = resolve_missing_e2ee_salt(&storage, e2ee_enabled)?;
 
-    state
-        .storage
+    storage
         .update_sync_config_state(
             enabled,
             normalized_url.as_deref(),
@@ -1091,23 +1132,24 @@ pub fn save_cloud_sync_setup(
             salt.as_deref(),
         )
         .map_err(IpcError::from)?;
-    state.sync_client.reconfigure();
-    state.sync_client.status_view().map_err(IpcError::from)
+    sync_client.reconfigure();
+    sync_client.status_view().map_err(IpcError::from)
+    })
+    .await
 }
 
 fn build_sync_pairing_bundle(
-    state: &AppState,
+    storage: &Storage,
+    credentials: &dyn CredentialManager,
     include_passphrase: bool,
 ) -> Result<SyncPairingBundle, IpcError> {
-    let cfg = state
-        .storage
+    let cfg = storage
         .get_sync_config_state()
         .map_err(IpcError::from)?;
     let worker_url = normalize_worker_url(cfg.worker_url.as_deref()).map_err(|_| {
         IpcError::new("VALIDATION_ERROR", "请先填写并保存 Worker 服务地址")
     })?;
-    let bearer_token = state
-        .credentials
+    let bearer_token = credentials
         .get_api_key(SYNC_BEARER_TOKEN_KEY)
         .map_err(IpcError::from)?
         .map(|s| s.trim().to_string())
@@ -1115,8 +1157,7 @@ fn build_sync_pairing_bundle(
         .ok_or_else(|| IpcError::new("VALIDATION_ERROR", "请先填写或生成访问令牌 (SYNC_TOKEN)"))?;
 
     let passphrase = if cfg.e2ee_enabled && include_passphrase {
-        state
-            .credentials
+        credentials
             .get_api_key(SYNC_E2EE_PASSPHRASE_KEY)
             .map_err(IpcError::from)?
             .map(|s| s.trim().to_string())
@@ -1153,11 +1194,16 @@ fn build_sync_pairing_bundle(
 }
 
 #[tauri::command]
-pub fn get_sync_pairing_bundle(
+pub async fn get_sync_pairing_bundle(
     state: State<'_, AppState>,
     include_passphrase: bool,
 ) -> Result<SyncPairingBundle, IpcError> {
-    build_sync_pairing_bundle(&state, include_passphrase)
+    let storage = state.storage.clone();
+    let credentials = Arc::clone(&state.credentials);
+    run_blocking(move || {
+        build_sync_pairing_bundle(&storage, credentials.as_ref(), include_passphrase)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1219,7 +1265,15 @@ pub async fn provision_cloud_sync_worker(
     }
 
     let status = state.sync_client.status_view().map_err(IpcError::from)?;
-    let pairing = build_sync_pairing_bundle(&state, req.e2ee_enabled)?;
+    let pairing = {
+        let storage = state.storage.clone();
+        let credentials = Arc::clone(&state.credentials);
+        let include_passphrase = req.e2ee_enabled;
+        run_blocking(move || {
+            build_sync_pairing_bundle(&storage, credentials.as_ref(), include_passphrase)
+        })
+        .await?
+    };
 
     Ok(CloudSyncProvisionResult {
         mode: artifacts.mode,
@@ -1234,26 +1288,38 @@ pub async fn provision_cloud_sync_worker(
 }
 
 #[tauri::command]
-pub fn set_sync_credentials(
+pub async fn set_sync_credentials(
     state: State<'_, AppState>,
     bearer_token: Option<String>,
     e2ee_passphrase: Option<String>,
 ) -> Result<SyncStatusView, IpcError> {
-    set_sync_creds(
-        state.credentials.as_ref(),
-        bearer_token.as_deref(),
-        e2ee_passphrase.as_deref(),
-    )
-    .map_err(IpcError::from)?;
-    state.sync_client.reconfigure();
-    state.sync_client.status_view().map_err(IpcError::from)
+    let credentials = Arc::clone(&state.credentials);
+    let sync_client = state.sync_client.clone();
+    run_blocking(move || {
+        set_sync_creds(
+            credentials.as_ref(),
+            bearer_token.as_deref(),
+            e2ee_passphrase.as_deref(),
+        )
+        .map_err(IpcError::from)?;
+        sync_client.reconfigure();
+        sync_client.status_view().map_err(IpcError::from)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn clear_sync_credentials(state: State<'_, AppState>) -> Result<SyncStatusView, IpcError> {
-    clear_sync_creds(state.credentials.as_ref()).map_err(IpcError::from)?;
-    state.sync_client.reconfigure();
-    state.sync_client.status_view().map_err(IpcError::from)
+pub async fn clear_sync_credentials(
+    state: State<'_, AppState>,
+) -> Result<SyncStatusView, IpcError> {
+    let credentials = Arc::clone(&state.credentials);
+    let sync_client = state.sync_client.clone();
+    run_blocking(move || {
+        clear_sync_creds(credentials.as_ref()).map_err(IpcError::from)?;
+        sync_client.reconfigure();
+        sync_client.status_view().map_err(IpcError::from)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1312,16 +1378,22 @@ pub async fn toggle_floating_window(app: AppHandle, visible: Option<bool>) -> bo
 }
 
 #[tauri::command]
-pub fn get_floating_window_visible(app: AppHandle, state: State<'_, AppState>) -> bool {
-    app.get_webview_window(FLOATING_MONITOR_LABEL)
+pub async fn get_floating_window_visible(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, IpcError> {
+    if let Some(visible) = app
+        .get_webview_window(FLOATING_MONITOR_LABEL)
         .and_then(|w| w.is_visible().ok())
-        .unwrap_or_else(|| {
-            state
-                .storage
-                .get_preferences()
-                .map(|p| p.floating_window_enabled)
-                .unwrap_or(false)
-        })
+    {
+        return Ok(visible);
+    }
+    run_storage(&state, |s| {
+        Ok(s.get_preferences()
+            .map(|p| p.floating_window_enabled)
+            .unwrap_or(false))
+    })
+    .await
 }
 
 #[tauri::command]

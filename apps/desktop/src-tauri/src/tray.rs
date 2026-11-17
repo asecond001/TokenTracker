@@ -112,9 +112,7 @@ fn ensure_tray_popup(app: &AppHandle) -> Option<tauri::WebviewWindow> {
         }
     });
 
-    if let Ok(prefs) = app.state::<AppState>().storage.get_preferences() {
-        let _ = popup.set_theme(crate::commands::parse_tauri_theme(&prefs.theme));
-    }
+    apply_saved_theme_async(app, popup.clone());
     Some(popup)
 }
 
@@ -236,9 +234,7 @@ fn ensure_floating_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
 
     let win = builder.build().ok()?;
     position_floating_window(&win);
-    if let Ok(prefs) = app.state::<AppState>().storage.get_preferences() {
-        let _ = win.set_theme(crate::commands::parse_tauri_theme(&prefs.theme));
-    }
+    apply_saved_theme_async(app, win.clone());
     Some(win)
 }
 
@@ -261,19 +257,37 @@ pub fn set_floating_window_visible(app: &AppHandle, visible: bool) -> bool {
     }
 }
 
+/// Read the persisted theme on the blocking pool and apply it to a freshly built
+/// auxiliary window, keeping SQLite reads off the main (UI) thread.
+fn apply_saved_theme_async(app: &AppHandle, win: tauri::WebviewWindow) {
+    let storage = app.state::<AppState>().storage.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Ok(prefs) = storage.get_preferences() {
+            let _ = win.set_theme(crate::commands::parse_tauri_theme(&prefs.theme));
+        }
+    });
+}
+
 pub fn set_floating_window_and_persist(app: &AppHandle, visible: bool) -> bool {
     let next = set_floating_window_visible(app, visible);
-    let storage = &app.state::<AppState>().storage;
-    if let Ok(mut prefs) = storage.get_preferences() {
-        if prefs.floating_window_enabled != next {
-            prefs.floating_window_enabled = next;
-            if storage.update_preferences(&prefs).is_ok() {
-                if let Ok(updated) = storage.get_preferences() {
-                    let _ = app.emit("preferences-updated", &updated);
-                }
+    // Persist on the blocking pool: this runs from tray menu / window event
+    // handlers on the main thread, and SQLite may wait on the writer lock.
+    let storage = app.state::<AppState>().storage.clone();
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok(mut prefs) = storage.get_preferences() else {
+            return;
+        };
+        if prefs.floating_window_enabled == next {
+            return;
+        }
+        prefs.floating_window_enabled = next;
+        if storage.update_preferences(&prefs).is_ok() {
+            if let Ok(updated) = storage.get_preferences() {
+                let _ = app.emit("preferences-updated", &updated);
             }
         }
-    }
+    });
     next
 }
 

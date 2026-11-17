@@ -90,7 +90,7 @@ cargo run --release --offline -p tokvane-collectors --example bench_million_line
 
 ## 自动更新与发布签名
 
-推送 `v*` 标签时，GitHub Actions（`.github/workflows/release-desktop.yml`）会自动跑完测试门禁，打包签名安装包并生成 `latest.json` 更新清单。
+推送到 `main` 或提交 PR 时，`.github/workflows/ci.yml` 会运行前端、Sync Worker 与 Rust 三组检查；推送 `v*` 标签时，`.github/workflows/release-desktop.yml` 复用同一门禁，打包签名安装包并生成 `latest.json` 更新清单。
 
 如果要维护自己的发布源：
 1. 运行 `pnpm tauri signer generate` 生成 Minisign 密钥对。

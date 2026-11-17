@@ -1,6 +1,29 @@
 import { useEffect, useRef } from 'react';
-import * as echarts from 'echarts';
+import * as echarts from 'echarts/core';
+import { BarChart, HeatmapChart, LineChart } from 'echarts/charts';
+import {
+  CalendarComponent,
+  GridComponent,
+  LegendComponent,
+  TooltipComponent,
+  VisualMapPiecewiseComponent,
+} from 'echarts/components';
+import { CanvasRenderer } from 'echarts/renderers';
 import type { EChartsOption } from 'echarts';
+
+// Register only the charts/components the workspace actually renders so Vite
+// can tree-shake the rest of ECharts out of the bundle.
+echarts.use([
+  BarChart,
+  LineChart,
+  HeatmapChart,
+  GridComponent,
+  TooltipComponent,
+  LegendComponent,
+  VisualMapPiecewiseComponent,
+  CalendarComponent,
+  CanvasRenderer,
+]);
 
 export interface EChartBoxProps {
   option: EChartsOption;
@@ -29,7 +52,7 @@ export function EChartBox({
   lazyUpdate = true,
 }: EChartBoxProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const chartRef = useRef<echarts.ECharts | null>(null);
+  const chartRef = useRef<echarts.EChartsType | null>(null);
 
   useEffect(() => {
     const el = containerRef.current;
