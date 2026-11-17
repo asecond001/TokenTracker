@@ -319,8 +319,8 @@ def build_parser() -> argparse.ArgumentParser:
     val_p = sub.add_parser("validate-profiles", help="Validate App & Widgets Distribution .mobileprovision files")
     val_p.add_argument("--app-profile", required=True, type=Path)
     val_p.add_argument("--widgets-profile", required=True, type=Path)
-    val_p.add_argument("--bundle-base-id", default="com.asecond.tokenvane")
-    val_p.add_argument("--app-group", default="group.com.asecond.tokenvane")
+    val_p.add_argument("--bundle-base-id", default="com.asecond.tokentracker")
+    val_p.add_argument("--app-group", default="group.com.asecond.tokentracker")
     val_p.add_argument("--team-id", required=True)
     val_p.add_argument("--cert-sha256", required=True)
 

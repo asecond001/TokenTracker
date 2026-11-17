@@ -143,6 +143,9 @@ test('testflight-owner signs verifiable ES256 ASC JWT and enforces VALID process
   });
   const parts = jwt.split('.');
   assert.equal(parts.length, 3);
+  const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+  assert.equal(payload.iat, 1_759_999_940);
+  assert.equal(payload.exp, 1_760_000_900);
   const sigBuf = Buffer.from(parts[2].replace(/-/g, '+').replace(/_/g, '/'), 'base64');
   assert.equal(sigBuf.length, 64);
   const verified = crypto.verify(
@@ -193,11 +196,11 @@ test('Azure pipeline YAMLs, secure files, and shell scripts enforce manual trigg
   }
 
   for (const secureFile of [
-    'tokenvane_distribution.p12',
-    'tokenvane_p12_password.txt',
-    'tokenvane_app.mobileprovision',
-    'tokenvane_widgets.mobileprovision',
-    'tokenvane_appstore.p8',
+    'tokentracker_distribution.p12',
+    'tokentracker_p12_password.txt',
+    'tokentracker_app.mobileprovision',
+    'tokentracker_widgets.mobileprovision',
+    'tokentracker_appstore.p8',
     'apple-api-identifiers.json'
   ]) {
     assert.ok(relYaml.includes(secureFile), `azure-pipelines-release.yml missing Secure File ${secureFile}`);

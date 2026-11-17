@@ -2,7 +2,7 @@ import SwiftUI
 import WidgetKit
 
 public struct QuotaLockScreenWidget: Widget {
-    public let kind: String = "com.asecond.tokenvane.quota-lockscreen"
+    public let kind: String = "com.asecond.tokentracker.quota-lockscreen"
 
     public init() {}
 

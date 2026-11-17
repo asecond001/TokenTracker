@@ -79,22 +79,22 @@ stages:
             name: AppleP12
             displayName: Download Apple Distribution .p12
             inputs:
-              secureFile: tokenvane_distribution.p12
+              secureFile: tokentracker_distribution.p12
           - task: DownloadSecureFile@1
             name: AppleP12Password
             displayName: Download .p12 password file
             inputs:
-              secureFile: tokenvane_p12_password.txt
+              secureFile: tokentracker_p12_password.txt
           - task: DownloadSecureFile@1
             name: AppProfile
             displayName: Download App Distribution .mobileprovision
             inputs:
-              secureFile: tokenvane_app.mobileprovision
+              secureFile: tokentracker_app.mobileprovision
           - task: DownloadSecureFile@1
             name: WidgetsProfile
             displayName: Download Widgets Distribution .mobileprovision
             inputs:
-              secureFile: tokenvane_widgets.mobileprovision
+              secureFile: tokentracker_widgets.mobileprovision
           - bash: |
               set -euo pipefail
               PYTHON_BIN="$(pwd)/.tools/apple-venv/bin/python3"
@@ -213,22 +213,22 @@ stages:
             name: AppleP12
             displayName: Download Apple Distribution .p12
             inputs:
-              secureFile: tokenvane_distribution.p12
+              secureFile: tokentracker_distribution.p12
           - task: DownloadSecureFile@1
             name: AppleP12Password
             displayName: Download .p12 password file
             inputs:
-              secureFile: tokenvane_p12_password.txt
+              secureFile: tokentracker_p12_password.txt
           - task: DownloadSecureFile@1
             name: AppProfile
             displayName: Download App Distribution .mobileprovision
             inputs:
-              secureFile: tokenvane_app.mobileprovision
+              secureFile: tokentracker_app.mobileprovision
           - task: DownloadSecureFile@1
             name: WidgetsProfile
             displayName: Download Widgets Distribution .mobileprovision
             inputs:
-              secureFile: tokenvane_widgets.mobileprovision
+              secureFile: tokentracker_widgets.mobileprovision
           - task: Cache@2
             displayName: Restore Cargo registry
             inputs:
@@ -265,7 +265,7 @@ stages:
             condition: and(succeeded(), eq('${{ parameters.action }}', 'upload'))
             displayName: Download App Store Connect AuthKey .p8
             inputs:
-              secureFile: tokenvane_appstore.p8
+              secureFile: tokentracker_appstore.p8
           - task: DownloadSecureFile@1
             name: AscApiIdentifiers
             condition: and(succeeded(), eq('${{ parameters.action }}', 'upload'))
@@ -318,7 +318,7 @@ stages:
             name: AscApiKey
             displayName: Download App Store Connect AuthKey .p8
             inputs:
-              secureFile: tokenvane_appstore.p8
+              secureFile: tokentracker_appstore.p8
           - task: DownloadSecureFile@1
             name: AscApiIdentifiers
             displayName: Download Apple API identifiers JSON

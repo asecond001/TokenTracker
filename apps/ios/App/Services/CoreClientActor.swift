@@ -47,7 +47,7 @@ public actor CoreClientActor {
             e2eePassphrase: e2eePassphrase,
             nowMs: Self.nowMs()
         )
-        _ = try? refreshWidgetSnapshot()
+        _ = try? refreshWidgetSnapshot(reloadTimelines: false)
         return outcome
     }
 
@@ -96,7 +96,7 @@ public actor CoreClientActor {
         let patchJSON = try encodeJSON(patch)
         let raw = try engine.updateMobilePreferencesJson(patchJson: patchJSON, nowMs: Self.nowMs())
         let prefs: AppPreferencesDTO = try decodeJSON(raw)
-        _ = try? refreshWidgetSnapshot()
+        _ = try? refreshWidgetSnapshot(reloadTimelines: false)
         return prefs
     }
 
@@ -115,26 +115,31 @@ public actor CoreClientActor {
     public func resetSyncWatermark() throws -> SyncConfigStateDTO {
         let raw = try engine.resetSyncWatermark(nowMs: Self.nowMs())
         let state: SyncConfigStateDTO = try decodeJSON(raw)
-        _ = try? refreshWidgetSnapshot()
+        _ = try? refreshWidgetSnapshot(reloadTimelines: false)
         return state
     }
 
     @discardableResult
     public func applyExchangeRatePayload(source: String, bodyJSON: String) throws -> Double {
         let updated = try engine.applyExchangeRatePayload(source: source, bodyJson: bodyJSON, nowMs: Self.nowMs())
-        _ = try? refreshWidgetSnapshot()
+        _ = try? refreshWidgetSnapshot(reloadTimelines: false)
         return updated
     }
 
+    /// Writes the < 8 KB App Group snapshot. Intermediate writes (each pull page, preference
+    /// patches) pass `reloadTimelines: false`; `AppStore.reloadAllData` asks WidgetKit to reload
+    /// once per refresh cycle so the system widget reload budget is not exhausted.
     @discardableResult
-    public func refreshWidgetSnapshot() throws -> WidgetDashboardSnapshot {
+    public func refreshWidgetSnapshot(reloadTimelines: Bool = true) throws -> WidgetDashboardSnapshot {
         let raw = try engine.buildWidgetSnapshotJson(
             nowMs: Self.nowMs(),
             tzOffsetMinutes: Self.currentTzOffsetMinutes
         )
         let snapshot: WidgetDashboardSnapshot = try decodeJSON(raw)
         try AppGroupPaths.writeWidgetSnapshot(snapshot, to: snapshotURL)
-        WidgetCenter.shared.reloadAllTimelines()
+        if reloadTimelines {
+            WidgetCenter.shared.reloadAllTimelines()
+        }
         return snapshot
     }
 

@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "bundleBaseId": "com.asecond.tokenvane",
-  "widgetsBundleId": "com.asecond.tokenvane.widgets",
-  "appGroupId": "group.com.asecond.tokenvane",
-  "marketingVersion": "0.4.2",
+  "bundleBaseId": "com.asecond.tokentracker",
+  "widgetsBundleId": "com.asecond.tokentracker.widgets",
+  "appGroupId": "group.com.asecond.tokentracker",
+  "marketingVersion": "0.3.0",
   "buildNumber": "1",
   "sourceCommit": "UNSET",
   "teamId": "PLDKGC2B26",

@@ -122,7 +122,7 @@ public struct AnalyticsView: View {
                 .background(SemanticColors.surfaceSubtle)
             } else if let report {
                 HStack {
-                    Text("生效粒度: \(report.effectiveGranularity.label) · 长按或拖动图表查看时段详情")
+                    Text("生效粒度 · \(report.effectiveGranularity.label)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -132,7 +132,7 @@ public struct AnalyticsView: View {
 
             // Frameless full-width Swift Chart
             if flatPoints.isEmpty {
-                Text("当前筛选条件暂无趋势序列")
+                Text("等待趋势数据")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 16)
@@ -308,7 +308,7 @@ public struct AnalyticsView: View {
                     .font(.subheadline.weight(.semibold))
                 let rows = (mo?.dailyLedger ?? []).sorted { $0.date > $1.date }
                 if rows.isEmpty {
-                    Text("本月暂无按日账单记录")
+                    Text("本月账单待同步")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {

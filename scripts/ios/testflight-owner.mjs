@@ -20,8 +20,8 @@ export function buildAscJwt({ keyId, issuerId, privateKeyPem, nowSec = Math.floo
   const payload = base64UrlEncode(
     JSON.stringify({
       iss: issuerId,
-      iat: nowSec,
-      exp: nowSec + 1200,
+      iat: nowSec - 60,
+      exp: nowSec + 900,
       aud: 'appstoreconnect-v1'
     })
   );

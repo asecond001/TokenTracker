@@ -1,8 +1,8 @@
 import Foundation
 
 public enum AppGroupPaths {
-    public static let defaultGroupIdentifier = "group.com.asecond.tokenvane"
-    public static let defaultRefreshTaskIdentifier = "com.asecond.tokenvane.sync-refresh"
+    public static let defaultGroupIdentifier = "group.com.asecond.tokentracker"
+    public static let defaultRefreshTaskIdentifier = "com.asecond.tokentracker.sync-refresh"
 
     public static var appGroupIdentifier: String {
         if let configured = Bundle.main.object(forInfoDictionaryKey: "TTAppGroupIdentifier") as? String {
@@ -55,7 +55,7 @@ public enum AppGroupPaths {
 
     public static func databaseFileURL(fileManager: FileManager = .default) throws -> URL {
         try databaseDirectoryURL(fileManager: fileManager)
-            .appendingPathComponent("tokenvane.sqlite", isDirectory: false)
+            .appendingPathComponent("tokentracker.sqlite", isDirectory: false)
     }
 
     public static func snapshotsDirectoryURL(fileManager: FileManager = .default) throws -> URL {

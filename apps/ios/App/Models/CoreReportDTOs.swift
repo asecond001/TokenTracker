@@ -709,9 +709,9 @@ public struct DesktopPairingPayload: Codable, Equatable, Sendable {
         public var errorDescription: String? {
             switch self {
             case .invalidJSON: return "配对二维码或链接格式无效"
-            case .unsupportedVersion(let v): return "不支持的配对协议版本 v\(v)"
+            case .unsupportedVersion(let v): return "配对协议 v\(v) 需更新 App 后导入"
             case .invalidURL: return "Worker 地址必须为有效的 https:// 或本地 http:// URL"
-            case .emptyToken: return "Sync Token 不能为空"
+            case .emptyToken: return "Sync Token 为必填项"
             }
         }
     }

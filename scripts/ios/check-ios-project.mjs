@@ -22,14 +22,13 @@ export function validateIosProject(rootDir = repoRoot) {
     if (!cond) errors.push(msg);
   };
 
-  const pkgJson = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
   const candidate = JSON.parse(fs.readFileSync(path.join(rootDir, 'ci/testflight-candidate.json'), 'utf8'));
   const toolchain = JSON.parse(fs.readFileSync(path.join(rootDir, 'ci/ios-toolchain.json'), 'utf8'));
 
   const projectYml = fs.readFileSync(path.join(rootDir, 'apps/ios/project.yml'), 'utf8');
-  check(projectYml.includes('BUNDLE_BASE_ID: com.asecond.tokenvane'), 'project.yml missing BUNDLE_BASE_ID: com.asecond.tokenvane');
+  check(projectYml.includes('BUNDLE_BASE_ID: com.asecond.tokentracker'), 'project.yml missing BUNDLE_BASE_ID: com.asecond.tokentracker');
   check(projectYml.includes('APP_GROUP_ID: group.$(BUNDLE_BASE_ID)'), 'project.yml missing APP_GROUP_ID: group.$(BUNDLE_BASE_ID)');
-  check(projectYml.includes(`MARKETING_VERSION: "${pkgJson.version}"`), `project.yml MARKETING_VERSION must equal package.json (${pkgJson.version})`);
+  check(projectYml.includes(`MARKETING_VERSION: "${candidate.marketingVersion}"`), `project.yml MARKETING_VERSION must equal testflight-candidate.json (${candidate.marketingVersion})`);
   check(projectYml.includes(`SWIFT_VERSION: "${toolchain.swiftVersion}"`), `project.yml SWIFT_VERSION must equal ${toolchain.swiftVersion}`);
   check(projectYml.includes(`IPHONEOS_DEPLOYMENT_TARGET: "${toolchain.deploymentTarget}"`), `project.yml deployment target must equal ${toolchain.deploymentTarget}`);
   check(projectYml.includes('PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_BASE_ID)'), 'TokenVane target missing $(BUNDLE_BASE_ID)');
@@ -128,17 +127,18 @@ export function validateIosProject(rootDir = repoRoot) {
     }
   }
 
-  check(candidate.marketingVersion === pkgJson.version, `testflight-candidate.json marketingVersion must equal ${pkgJson.version}`);
-  check(candidate.bundleBaseId === 'com.asecond.tokenvane', 'testflight-candidate.json bundleBaseId mismatch');
-  check(candidate.widgetsBundleId === 'com.asecond.tokenvane.widgets', 'testflight-candidate.json widgetsBundleId mismatch');
-  check(candidate.appGroupId === 'group.com.asecond.tokenvane', 'testflight-candidate.json appGroupId mismatch');
+  check(/^\d+\.\d+\.\d+$/.test(candidate.marketingVersion), 'testflight-candidate.json marketingVersion must be a three-part version');
+  check(projectYml.includes(`CURRENT_PROJECT_VERSION: "${candidate.buildNumber}"`), 'project.yml build number must match testflight-candidate.json');
+  check(candidate.bundleBaseId === 'com.asecond.tokentracker', 'testflight-candidate.json bundleBaseId mismatch');
+  check(candidate.widgetsBundleId === 'com.asecond.tokentracker.widgets', 'testflight-candidate.json widgetsBundleId mismatch');
+  check(candidate.appGroupId === 'group.com.asecond.tokentracker', 'testflight-candidate.json appGroupId mismatch');
 
   if (errors.length > 0) {
     throw new Error(`iOS project validation failed:\n - ${errors.join('\n - ')}`);
   }
   return {
     ok: true,
-    version: pkgJson.version,
+    version: candidate.marketingVersion,
     checkedFiles: requiredSwift.length,
     localizedKeys: locEntries.length
   };
