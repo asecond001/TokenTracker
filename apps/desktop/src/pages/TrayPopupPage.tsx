@@ -85,7 +85,7 @@ export function TrayPopupPage() {
               className="inline-block w-2 h-2 rounded-full collector-dot-live"
               style={{ backgroundColor: 'var(--accent-emerald)' }}
             />
-            <span className="text-[12.5px] font-semibold">TokenTracker 实时摘要</span>
+            <span className="text-[12.5px] font-semibold">TokenVane 实时摘要</span>
           </div>
           <div className="flex items-center gap-2">
             <LiveSpeedBadge

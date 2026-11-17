@@ -46,9 +46,9 @@ test('testflight-handoff enforces sourceCommit immutability and UNSET rejection'
   const commit = 'a'.repeat(40);
   const certSha = 'b'.repeat(64);
   const baseCandidate = {
-    bundleBaseId: 'com.tokentracker.app',
-    widgetsBundleId: 'com.tokentracker.app.widgets',
-    appGroupId: 'group.com.tokentracker.app',
+    bundleBaseId: 'com.asecond.tokenvane',
+    widgetsBundleId: 'com.asecond.tokenvane.widgets',
+    appGroupId: 'group.com.asecond.tokenvane',
     marketingVersion: '0.3.0',
     buildNumber: '1',
     sourceCommit: 'UNSET',
@@ -86,9 +86,9 @@ test('verifySigningReportMatch checks both .xcarchive/.ipa bundles and exact IPA
   const ipaSha = 'd'.repeat(64);
   const certSha = 'e'.repeat(64);
   const candidate = {
-    bundleBaseId: 'com.tokentracker.app',
-    widgetsBundleId: 'com.tokentracker.app.widgets',
-    appGroupId: 'group.com.tokentracker.app',
+    bundleBaseId: 'com.asecond.tokenvane',
+    widgetsBundleId: 'com.asecond.tokenvane.widgets',
+    appGroupId: 'group.com.asecond.tokenvane',
     marketingVersion: '0.3.0',
     buildNumber: '7',
     teamId: 'TEAM123456',
@@ -100,12 +100,12 @@ test('verifySigningReportMatch checks both .xcarchive/.ipa bundles and exact IPA
     certificateSha256: certSha,
     marketingVersion: '0.3.0',
     buildNumber: '7',
-    appGroupId: 'group.com.tokentracker.app',
+    appGroupId: 'group.com.asecond.tokenvane',
     bundles: {
-      app: { bundleId: 'com.tokentracker.app', xcarchiveVerified: true, ipaVerified: true },
-      widgets: { bundleId: 'com.tokentracker.app.widgets', xcarchiveVerified: true, ipaVerified: true }
+      app: { bundleId: 'com.asecond.tokenvane', xcarchiveVerified: true, ipaVerified: true },
+      widgets: { bundleId: 'com.asecond.tokenvane.widgets', xcarchiveVerified: true, ipaVerified: true }
     },
-    ipa: { filename: 'TokenTracker.ipa', sizeBytes: 1024, sha256: ipaSha }
+    ipa: { filename: 'TokenVane.ipa', sizeBytes: 1024, sha256: ipaSha }
   };
 
   const matched = verifySigningReportMatch({ signingReport: report, candidate, actualIpaSha256: ipaSha });
@@ -121,7 +121,7 @@ test('verifySigningReportMatch checks both .xcarchive/.ipa bundles and exact IPA
         ...report,
         bundles: {
           ...report.bundles,
-          widgets: { bundleId: 'com.tokentracker.app.widgets', xcarchiveVerified: true, ipaVerified: false }
+          widgets: { bundleId: 'com.asecond.tokenvane.widgets', xcarchiveVerified: true, ipaVerified: false }
         }
       },
       candidate,
@@ -193,11 +193,11 @@ test('Azure pipeline YAMLs, secure files, and shell scripts enforce manual trigg
   }
 
   for (const secureFile of [
-    'tokentracker_distribution.p12',
-    'tokentracker_p12_password.txt',
-    'tokentracker_app.mobileprovision',
-    'tokentracker_widgets.mobileprovision',
-    'tokentracker_appstore.p8',
+    'tokenvane_distribution.p12',
+    'tokenvane_p12_password.txt',
+    'tokenvane_app.mobileprovision',
+    'tokenvane_widgets.mobileprovision',
+    'tokenvane_appstore.p8',
     'apple-api-identifiers.json'
   ]) {
     assert.ok(relYaml.includes(secureFile), `azure-pipelines-release.yml missing Secure File ${secureFile}`);

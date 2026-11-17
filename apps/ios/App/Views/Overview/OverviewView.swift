@@ -34,7 +34,7 @@ public struct OverviewView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("连接自托管云端中枢")
                 .font(.title3.weight(.semibold))
-            Text("TokenTracker iOS 通过您部署的 Cloudflare Sync Worker 实时拉取桌面端脱敏统计与订阅滚动窗口快照。")
+            Text("TokenVane iOS 通过您部署的 Cloudflare Sync Worker 实时拉取桌面端脱敏统计与订阅滚动窗口快照。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Button {
@@ -64,7 +64,7 @@ public struct OverviewView: View {
                     Text(store.timeRange == .today ? "今日实时态势" : "所选周期累计等效花费")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
-                    Text(TokenTrackerFormatters.formatCurrency(ov?.totalCostMicroUsd ?? 0, currency: cur, rateString: rate))
+                    Text(TokenVaneFormatters.formatCurrency(ov?.totalCostMicroUsd ?? 0, currency: cur, rateString: rate))
                         .font(.system(size: 32, weight: .semibold))
                         .tabularMetrics()
                         .accessibilityIdentifier("overview.totalCost")
@@ -74,7 +74,7 @@ public struct OverviewView: View {
                     Text("今日花费")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Text(TokenTrackerFormatters.formatCurrency(ov?.todayCostMicroUsd ?? 0, currency: cur, rateString: rate))
+                    Text(TokenVaneFormatters.formatCurrency(ov?.todayCostMicroUsd ?? 0, currency: cur, rateString: rate))
                         .font(.callout.weight(.semibold))
                         .tabularMetrics()
                 }
@@ -83,19 +83,19 @@ public struct OverviewView: View {
             HStack(spacing: 0) {
                 metricCell(
                     title: "总 Token",
-                    value: TokenTrackerFormatters.formatCompactTokens(ov?.totalTokens ?? 0)
+                    value: TokenVaneFormatters.formatCompactTokens(ov?.totalTokens ?? 0)
                 )
                 metricCell(
                     title: "缓存命中率",
-                    value: TokenTrackerFormatters.formatPercent((ov?.cacheHitRatio ?? 0) * 100.0)
+                    value: TokenVaneFormatters.formatPercent((ov?.cacheHitRatio ?? 0) * 100.0)
                 )
                 metricCell(
                     title: "最新速率",
-                    value: TokenTrackerFormatters.formatTps(ov?.latestOutputTps)
+                    value: TokenVaneFormatters.formatTps(ov?.latestOutputTps)
                 )
                 metricCell(
                     title: "有效请求",
-                    value: TokenTrackerFormatters.formatExactInt(ov?.totalRequests ?? 0)
+                    value: TokenVaneFormatters.formatExactInt(ov?.totalRequests ?? 0)
                 )
             }
         }
@@ -125,7 +125,7 @@ public struct OverviewView: View {
                 id: $0.key,
                 label: $0.label,
                 sharePercent: $0.tokenSharePercent,
-                color: TokenTrackerFormatters.providerColor($0.key)
+                color: TokenVaneFormatters.providerColor($0.key)
             )
         }
 
@@ -155,13 +155,13 @@ public struct OverviewView: View {
                         ForEach(providers.prefix(4)) { item in
                             HStack(spacing: 6) {
                                 Circle()
-                                    .fill(TokenTrackerFormatters.providerColor(item.key))
+                                    .fill(TokenVaneFormatters.providerColor(item.key))
                                     .frame(width: 7, height: 7)
                                 Text(item.label)
                                     .font(.caption)
                                     .lineLimit(1)
                                 Spacer(minLength: 4)
-                                Text(TokenTrackerFormatters.formatPercent(item.tokenSharePercent))
+                                Text(TokenVaneFormatters.formatPercent(item.tokenSharePercent))
                                     .font(.caption)
                                     .tabularMetrics()
                                     .foregroundStyle(.secondary)
@@ -180,7 +180,7 @@ public struct OverviewView: View {
                                     .font(.caption)
                                     .lineLimit(1)
                                 Spacer(minLength: 4)
-                                Text(TokenTrackerFormatters.formatCompactTokens(item.tokens))
+                                Text(TokenVaneFormatters.formatCompactTokens(item.tokens))
                                     .font(.caption)
                                     .tabularMetrics()
                                     .foregroundStyle(.secondary)
@@ -221,17 +221,17 @@ public struct OverviewView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(dev.deviceName)
                                 .font(.subheadline.weight(.medium))
-                            Text("最近活跃 · \(TokenTrackerFormatters.formatRelativeSync(atMs: dev.lastActivityMs))")
+                            Text("最近活跃 · \(TokenVaneFormatters.formatRelativeSync(atMs: dev.lastActivityMs))")
                                 .font(.caption2)
                                 .tabularMetrics()
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
                         VStack(alignment: .trailing, spacing: 2) {
-                            Text(TokenTrackerFormatters.formatCurrency(dev.todayCostMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))
+                            Text(TokenVaneFormatters.formatCurrency(dev.todayCostMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))
                                 .font(.subheadline.weight(.medium))
                                 .tabularMetrics()
-                            Text("今日 \(TokenTrackerFormatters.formatCompactTokens(dev.todayTokens))")
+                            Text("今日 \(TokenVaneFormatters.formatCompactTokens(dev.todayTokens))")
                                 .font(.caption2)
                                 .tabularMetrics()
                                 .foregroundStyle(.secondary)
@@ -276,21 +276,21 @@ public struct OverviewView: View {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            Text(TokenTrackerFormatters.formatPercent(sub.usedPercent))
+                            Text(TokenVaneFormatters.formatPercent(sub.usedPercent))
                                 .font(.caption.weight(.semibold))
                                 .tabularMetrics()
-                                .foregroundStyle(TokenTrackerFormatters.quotaSeverityColor(usedPercent: sub.usedPercent))
+                                .foregroundStyle(TokenVaneFormatters.quotaSeverityColor(usedPercent: sub.usedPercent))
                         }
                         LinearProgressStrip(
                             progressPercent: sub.usedPercent,
-                            tint: TokenTrackerFormatters.quotaSeverityColor(usedPercent: sub.usedPercent)
+                            tint: TokenVaneFormatters.quotaSeverityColor(usedPercent: sub.usedPercent)
                         )
                         HStack {
                             Text(sub.source == "official_header" ? "官方接口" : "本地推算")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            Text("重置 · \(TokenTrackerFormatters.formatCountdown(untilMs: sub.resetsAtMs))")
+                            Text("重置 · \(TokenVaneFormatters.formatCountdown(untilMs: sub.resetsAtMs))")
                                 .font(.caption2)
                                 .tabularMetrics()
                                 .foregroundStyle(.secondary)

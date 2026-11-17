@@ -75,7 +75,7 @@ echo "$PROFILES_JSON"
 echo "[archive-ios] Regenerating Xcode project..."
 (cd "$ROOT_DIR/apps/ios" && xcodegen generate --spec project.yml)
 
-ARCHIVE_PATH="$ARTIFACTS_DIR/TokenTracker.xcarchive"
+ARCHIVE_PATH="$ARTIFACTS_DIR/TokenVane.xcarchive"
 EXPORT_DIR="$ARTIFACTS_DIR/export"
 EXPORT_PLIST="$ARTIFACTS_DIR/ExportOptions.plist"
 rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR"
@@ -131,7 +131,7 @@ echo "[archive-ios] Applying manual profiles & archiving inside ephemeral keycha
     set -euo pipefail
     xcodebuild archive \
       -project "$1" \
-      -scheme TokenTracker \
+      -scheme TokenVane \
       -configuration Release \
       -destination "generic/platform=iOS" \
       -archivePath "$4" \
@@ -146,7 +146,7 @@ echo "[archive-ios] Applying manual profiles & archiving inside ephemeral keycha
       -exportPath "$8" \
       -exportOptionsPlist "$9"
   ' _ \
-    "$ROOT_DIR/apps/ios/TokenTracker.xcodeproj" \
+    "$ROOT_DIR/apps/ios/TokenVane.xcodeproj" \
     "$APP_PROFILE_UUID" \
     "$WIDGETS_PROFILE_UUID" \
     "$ARCHIVE_PATH" \
@@ -161,11 +161,11 @@ if [[ -z "$IPA_FILE" ]]; then
   echo "xcodebuild -exportArchive did not produce an .ipa file in $EXPORT_DIR" >&2
   exit 1
 fi
-cp "$IPA_FILE" "$ARTIFACTS_DIR/TokenTracker.ipa"
+cp "$IPA_FILE" "$ARTIFACTS_DIR/TokenVane.ipa"
 
 "$PYTHON_BIN" "$ROOT_DIR/scripts/ios/verify-device-build.py" \
   --xcarchive "$ARCHIVE_PATH" \
-  --ipa "$ARTIFACTS_DIR/TokenTracker.ipa" \
+  --ipa "$ARTIFACTS_DIR/TokenVane.ipa" \
   --candidate "$CANDIDATE_JSON" \
   --team-id "$TEAM_ID" \
   --cert-sha256 "$CERT_SHA256" \
@@ -174,7 +174,7 @@ cp "$IPA_FILE" "$ARTIFACTS_DIR/TokenTracker.ipa"
 RELEASE_PKG_DIR="$ARTIFACTS_DIR/release-package"
 rm -rf "$RELEASE_PKG_DIR"
 mkdir -p "$RELEASE_PKG_DIR"
-cp "$ARTIFACTS_DIR/TokenTracker.ipa" "$RELEASE_PKG_DIR/TokenTracker.ipa"
+cp "$ARTIFACTS_DIR/TokenVane.ipa" "$RELEASE_PKG_DIR/TokenVane.ipa"
 cp "$ARTIFACTS_DIR/device-signing.json" "$RELEASE_PKG_DIR/device-signing.json"
 cp "$EXPORT_PLIST" "$RELEASE_PKG_DIR/ExportOptions.plist"
 if [[ -d "$ARCHIVE_PATH/dSYMs" ]]; then

@@ -113,24 +113,24 @@ class BootstrapAndArchiveCryptoTests(unittest.TestCase):
         cert_sha = hashlib.sha256(cert_der).hexdigest().lower()
         now = dt.datetime.now(dt.timezone.utc)
         valid_profile = {
-            "Name": "TokenTracker AppStore",
+            "Name": "TokenVane AppStore",
             "UUID": "11111111-2222-3333-4444-555555555555",
             "TeamIdentifier": ["TEAM123456"],
             "ExpirationDate": now + dt.timedelta(days=30),
             "DeveloperCertificates": [cert_der],
             "Entitlements": {
                 "get-task-allow": False,
-                "application-identifier": "TEAM123456.com.tokentracker.app",
-                "com.apple.security.application-groups": ["group.com.tokentracker.app"],
+                "application-identifier": "TEAM123456.com.asecond.tokenvane",
+                "com.apple.security.application-groups": ["group.com.asecond.tokenvane"],
             },
         }
         wrapped_cms = b"CMS-HEADER" + plistlib.dumps(valid_profile) + b"CMS-TRAILER"
         decoded = archive_mod.decode_mobileprovision_bytes(wrapped_cms)
         res = archive_mod.validate_profile_dict(
             decoded,
-            expected_bundle_id="com.tokentracker.app",
+            expected_bundle_id="com.asecond.tokenvane",
             expected_team_id="TEAM123456",
-            expected_app_group="group.com.tokentracker.app",
+            expected_app_group="group.com.asecond.tokenvane",
             expected_cert_sha256=cert_sha,
             now_utc=now,
         )
@@ -149,9 +149,9 @@ class BootstrapAndArchiveCryptoTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 archive_mod.validate_profile_dict(
                     broken,
-                    expected_bundle_id="com.tokentracker.app",
+                    expected_bundle_id="com.asecond.tokenvane",
                     expected_team_id="TEAM123456",
-                    expected_app_group="group.com.tokentracker.app",
+                    expected_app_group="group.com.asecond.tokenvane",
                     expected_cert_sha256=cert_sha,
                     now_utc=now,
                 )
@@ -213,16 +213,16 @@ class BootstrapAndArchiveCryptoTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            xcarchive = root / "TokenTracker.xcarchive"
-            app_dir = xcarchive / "Products" / "Applications" / "TokenTracker.app"
-            widgets_dir = app_dir / "PlugIns" / "TokenTrackerWidgets.appex"
+            xcarchive = root / "TokenVane.xcarchive"
+            app_dir = xcarchive / "Products" / "Applications" / "TokenVane.app"
+            widgets_dir = app_dir / "PlugIns" / "TokenVaneWidgets.appex"
             app_dir.mkdir(parents=True)
             widgets_dir.mkdir(parents=True)
 
             with (app_dir / "Info.plist").open("wb") as fh:
                 plistlib.dump(
                     {
-                        "CFBundleIdentifier": "com.tokentracker.app",
+                        "CFBundleIdentifier": "com.asecond.tokenvane",
                         "CFBundleShortVersionString": "0.3.0",
                         "CFBundleVersion": "12",
                     },
@@ -231,21 +231,21 @@ class BootstrapAndArchiveCryptoTests(unittest.TestCase):
             with (widgets_dir / "Info.plist").open("wb") as fh:
                 plistlib.dump(
                     {
-                        "CFBundleIdentifier": "com.tokentracker.app.widgets",
+                        "CFBundleIdentifier": "com.asecond.tokenvane.widgets",
                         "CFBundleShortVersionString": "0.3.0",
                         "CFBundleVersion": "12",
                     },
                     fh,
                 )
 
-            ipa_path = root / "TokenTracker.ipa"
+            ipa_path = root / "TokenVane.ipa"
             with zipfile.ZipFile(ipa_path, "w") as zf:
-                zf.write(app_dir / "Info.plist", "Payload/TokenTracker.app/Info.plist")
-                zf.write(widgets_dir / "Info.plist", "Payload/TokenTracker.app/PlugIns/TokenTrackerWidgets.appex/Info.plist")
+                zf.write(app_dir / "Info.plist", "Payload/TokenVane.app/Info.plist")
+                zf.write(widgets_dir / "Info.plist", "Payload/TokenVane.app/PlugIns/TokenVaneWidgets.appex/Info.plist")
 
             def fake_codesign(cmd: list[str], *, check: bool = True, capture_output: bool = True):
                 target = cmd[-1]
-                bundle_id = "com.tokentracker.app.widgets" if target.endswith(".appex") else "com.tokentracker.app"
+                bundle_id = "com.asecond.tokenvane.widgets" if target.endswith(".appex") else "com.asecond.tokenvane"
                 if "--verify" in cmd:
                     return SimpleNamespace(returncode=0, stdout="", stderr=f"{target}: valid on disk")
                 if "-dvv" in cmd:
@@ -260,7 +260,7 @@ class BootstrapAndArchiveCryptoTests(unittest.TestCase):
                         {
                             "get-task-allow": False,
                             "application-identifier": f"{team_id}.{bundle_id}",
-                            "com.apple.security.application-groups": ["group.com.tokentracker.app"],
+                            "com.apple.security.application-groups": ["group.com.asecond.tokenvane"],
                         }
                     ).decode("utf-8")
                     return SimpleNamespace(returncode=0, stdout=ent_bytes, stderr="")
@@ -269,9 +269,9 @@ class BootstrapAndArchiveCryptoTests(unittest.TestCase):
             report = verify_mod.verify_signing_artifacts(
                 xcarchive_path=xcarchive,
                 ipa_path=ipa_path,
-                bundle_base_id="com.tokentracker.app",
-                widgets_bundle_id="com.tokentracker.app.widgets",
-                app_group_id="group.com.tokentracker.app",
+                bundle_base_id="com.asecond.tokenvane",
+                widgets_bundle_id="com.asecond.tokenvane.widgets",
+                app_group_id="group.com.asecond.tokenvane",
                 team_id=team_id,
                 certificate_sha256=cert_sha,
                 marketing_version="0.3.0",
@@ -279,8 +279,8 @@ class BootstrapAndArchiveCryptoTests(unittest.TestCase):
                 runner=fake_codesign,
             )
             self.assertTrue(report["verified"])
-            self.assertEqual(report["bundles"]["app"]["bundleId"], "com.tokentracker.app")
-            self.assertEqual(report["bundles"]["widgets"]["bundleId"], "com.tokentracker.app.widgets")
+            self.assertEqual(report["bundles"]["app"]["bundleId"], "com.asecond.tokenvane")
+            self.assertEqual(report["bundles"]["widgets"]["bundleId"], "com.asecond.tokenvane.widgets")
             self.assertEqual(len(report["ipa"]["sha256"]), 64)
 
 

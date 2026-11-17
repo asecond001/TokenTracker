@@ -137,7 +137,7 @@ function makePreferences(overrides: Partial<AppPreferences> = {}): AppPreference
 
 function makeBootstrap(prefs: AppPreferences = makePreferences()): BootstrapState {
   return {
-    db_path: 'C:\\Users\\dev\\AppData\\Local\\TokenTracker\\tokentracker.db',
+    db_path: 'C:\\Users\\dev\\AppData\\Local\\TokenVane\\tokenvane.db',
     device: {
       device_id: 'dev-test-1',
       device_name: 'win-workstation',
@@ -606,7 +606,7 @@ function resetWorkspaceState() {
   document.documentElement.dataset.theme = 'dark';
 }
 
-describe('TokenTracker formatting & currency conversion', () => {
+describe('TokenVane formatting & currency conversion', () => {
   it('formats token quantities concisely', () => {
     expect(formatTokens(0)).toBe('0');
     expect(formatTokens(950)).toBe('950');
@@ -661,7 +661,7 @@ describe('Workspace store & UI shell navigation', () => {
   it('renders Linear-style flat workspace and navigates to DataSources and Preferences', async () => {
     renderWithQuery(<App />);
 
-    expect(screen.getByText('TokenTracker')).toBeInTheDocument();
+    expect(screen.getByText('TokenVane')).toBeInTheDocument();
     expect(await screen.findByText(/今日 API 等效费用/)).toBeInTheDocument();
     expect(screen.getByText('今日 24h 分时活跃度')).toBeInTheDocument();
 
@@ -674,7 +674,7 @@ describe('Workspace store & UI shell navigation', () => {
 
   it('renders TrayPopupPage compact summary without errors', async () => {
     renderWithQuery(<TrayPopupPage />);
-    expect(await screen.findByText('TokenTracker 实时摘要')).toBeInTheDocument();
+    expect(await screen.findByText('TokenVane 实时摘要')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '打开工作台' })).toBeInTheDocument();
   });
 });
@@ -1076,7 +1076,7 @@ describe('Theme switching & TrayPopup hydration', () => {
 
     renderWithQuery(<TrayPopupPage />);
 
-    expect(await screen.findByText('TokenTracker 实时摘要')).toBeInTheDocument();
+    expect(await screen.findByText('TokenVane 实时摘要')).toBeInTheDocument();
     await waitFor(() => {
       expect(document.documentElement.dataset.theme).toBe('light');
       expect(useWorkspaceStore.getState().currency).toBe('CNY');
@@ -1799,8 +1799,8 @@ describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sy
       .spyOn(ipc, 'getSyncPairingBundle')
       .mockImplementation(async (includePassphrase) => {
         const uri = includePassphrase
-          ? 'tokentracker://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=tok-secret-123&e2ee=1&key=e2ee-pass-999'
-          : 'tokentracker://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=tok-secret-123&e2ee=1';
+          ? 'tokenvane://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=tok-secret-123&e2ee=1&key=e2ee-pass-999'
+          : 'tokenvane://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=tok-secret-123&e2ee=1';
         const bundle: SyncPairingBundle = {
           pairing_uri: uri,
           pairing_json: JSON.stringify({
@@ -1862,7 +1862,7 @@ describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sy
     expect(await screen.findByText('SSE 实时已连接')).toBeInTheDocument();
     expect(await screen.findByTestId('sync-pairing-qr')).toBeInTheDocument();
     expect(screen.getByLabelText('移动端配对链接')).toHaveValue(
-      'tokentracker://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=tok-secret-123&e2ee=1'
+      'tokenvane://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=tok-secret-123&e2ee=1'
     );
 
     fireEvent.click(screen.getByRole('button', { name: '立即同步' }));
@@ -2123,7 +2123,7 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
             session_title: 'Refactor Floating Monitor HUD',
             provider_id: 'claude_code',
             model_id: 'claude-sonnet-4-5',
-            project_label: 'TokenTracker',
+            project_label: 'TokenVane',
             activity_state: 'active',
             started_at_ms: now - 120_000,
             last_active_at_ms: now - 5_000,
@@ -2143,7 +2143,7 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
 
     renderWithQuery(<FloatingMonitorPage />);
 
-    expect(screen.getByText('TokenTracker')).toBeInTheDocument();
+    expect(screen.getByText('TokenVane')).toBeInTheDocument();
     expect(await screen.findByText('Refactor Floating Monitor HUD')).toBeInTheDocument();
     const speedEl = screen.getByText('78.4 tok/s');
     expect(speedEl).toBeInTheDocument();
@@ -2165,7 +2165,7 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
 
   it('displays average speed across multiple active models and lists all active models on hover', async () => {
     const now = Date.now();
-    window.localStorage.removeItem('tokentracker.floating_config.v1');
+    window.localStorage.removeItem('tokenvane.floating_config.v1');
     vi.spyOn(ipc, 'getPreferences').mockResolvedValue(
       makePreferences({ floating_window_enabled: true })
     );
@@ -2180,7 +2180,7 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
             session_title: 'Claude Task',
             provider_id: 'claude_code',
             model_id: 'claude-sonnet-4-5',
-            project_label: 'TokenTracker',
+            project_label: 'TokenVane',
             activity_state: 'active',
             started_at_ms: now - 60_000,
             last_active_at_ms: now - 5_000,
@@ -2197,7 +2197,7 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
             session_title: 'Codex Task',
             provider_id: 'codex',
             model_id: 'gpt-5.3-codex',
-            project_label: 'TokenTracker',
+            project_label: 'TokenVane',
             activity_state: 'active',
             started_at_ms: now - 50_000,
             last_active_at_ms: now - 3_000,
@@ -2410,7 +2410,7 @@ describe('v0.2.2 Floating Monitor, Session Titles & Subscription Tier Labels', (
       session_title: 'Refactor Chart Stacking',
       provider_id: 'claude_code',
       model_id: 'claude-sonnet-4-5',
-      project_label: 'TokenTracker',
+      project_label: 'TokenVane',
       activity_state: 'active',
       started_at_ms: now - 60_000,
       last_active_at_ms: now - 3_000,
@@ -2861,7 +2861,7 @@ describe('v0.3.0 Analytics Differentiation, Sync Pairing QR, TZ & UX Fixes', () 
     expect(rs).toHaveLength(7);
 
     const uri =
-      'tokentracker://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=tok-123&e2ee=1';
+      'tokenvane://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=tok-123&e2ee=1';
     const matrix = encodeQrMatrix(uri);
     expect(matrix.version).toBeGreaterThanOrEqual(4);
     expect(matrix.size).toBe(17 + 4 * matrix.version);

@@ -153,7 +153,7 @@ def reencode_p12_legacy(
 
     one_time_password = secrets.token_hex(24)
     legacy_bytes = pkcs12.serialize_key_and_certificates(
-        name=b"TokenTracker Distribution",
+        name=b"TokenVane Distribution",
         key=key,
         cert=cert,
         cas=cas,
@@ -303,7 +303,7 @@ def run_with_ephemeral_keychain(
         runner(["security", "default-keychain", "-d", "user", "-s", str(keychain_path)], check=True, capture_output=True)
 
         child_env = dict(os.environ)
-        child_env["TOKENTRACKER_KEYCHAIN_PATH"] = str(keychain_path)
+        child_env["TOKENVANE_KEYCHAIN_PATH"] = str(keychain_path)
         proc = runner(child_command, check=True, env=child_env)
         return int(proc.returncode)
     finally:
@@ -319,8 +319,8 @@ def build_parser() -> argparse.ArgumentParser:
     val_p = sub.add_parser("validate-profiles", help="Validate App & Widgets Distribution .mobileprovision files")
     val_p.add_argument("--app-profile", required=True, type=Path)
     val_p.add_argument("--widgets-profile", required=True, type=Path)
-    val_p.add_argument("--bundle-base-id", default="com.tokentracker.app")
-    val_p.add_argument("--app-group", default="group.com.tokentracker.app")
+    val_p.add_argument("--bundle-base-id", default="com.asecond.tokenvane")
+    val_p.add_argument("--app-group", default="group.com.asecond.tokenvane")
     val_p.add_argument("--team-id", required=True)
     val_p.add_argument("--cert-sha256", required=True)
 

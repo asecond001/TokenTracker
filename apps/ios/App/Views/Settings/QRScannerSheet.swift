@@ -101,7 +101,7 @@ public struct QRScannerSheet: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("未授予相机权限")
                 .font(.subheadline.weight(.semibold))
-            Text("请在系统设置中允许 TokenTracker 访问相机，或在下方直接粘贴配对 JSON。")
+            Text("请在系统设置中允许 TokenVane 访问相机，或在下方直接粘贴配对 JSON。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

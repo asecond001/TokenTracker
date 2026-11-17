@@ -278,7 +278,7 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
   switch (command) {
     case 'get_bootstrap_state': {
       const data: BootstrapState = {
-        db_path: '%LOCALAPPDATA%\\TokenTracker\\tokentracker.db',
+        db_path: '%LOCALAPPDATA%\\TokenVane\\tokenvane.db',
         device: {
           device_id: 'preview-local-device',
           device_name: 'win-workstation',
@@ -655,7 +655,7 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
     }
     case 'get_sync_pairing_bundle': {
       const bundle: SyncPairingBundle = {
-        pairing_uri: 'tokentracker://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=preview&e2ee=0',
+        pairing_uri: 'tokenvane://pair?v=1&url=https%3A%2F%2Fsync.example.workers.dev&token=preview&e2ee=0',
         pairing_json: JSON.stringify({
           v: 1,
           url: 'https://sync.example.workers.dev',

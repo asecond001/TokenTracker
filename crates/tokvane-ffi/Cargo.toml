@@ -1,0 +1,21 @@
+[package]
+name = "tokvane-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "UniFFI Swift and mobile cross-language bindings for tokvane-core"
+
+[lib]
+name = "tokvane_ffi"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+tokvane-core = { path = "../tokvane-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uniffi.workspace = true

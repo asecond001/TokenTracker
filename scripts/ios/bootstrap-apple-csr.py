@@ -40,8 +40,8 @@ def _restrict_file_permissions(path: Path) -> None:
 def generate_csr(
     private_key_out: Path,
     csr_out: Path,
-    common_name: str = "TokenTracker Apple Distribution",
-    organization: str = "TokenTracker",
+    common_name: str = "TokenVane Apple Distribution",
+    organization: str = "TokenVane",
     country: str = "US",
 ) -> dict[str, Any]:
     if len(country) != 2:
@@ -109,7 +109,7 @@ def pack_p12(
     cer_path: Path,
     p12_out: Path,
     password_out: Path | None = None,
-    friendly_name: str = "TokenTracker Distribution",
+    friendly_name: str = "TokenVane Distribution",
     password: str | None = None,
     legacy_pbes1: bool = False,
 ) -> dict[str, Any]:
@@ -167,35 +167,35 @@ def build_parser() -> argparse.ArgumentParser:
     csr_cmd.add_argument(
         "--key-out",
         type=Path,
-        default=Path("artifacts/apple-signing/tokentracker_distribution.key"),
+        default=Path("artifacts/apple-signing/tokenvane_distribution.key"),
     )
     csr_cmd.add_argument(
         "--csr-out",
         type=Path,
-        default=Path("artifacts/apple-signing/tokentracker_distribution.certSigningRequest"),
+        default=Path("artifacts/apple-signing/tokenvane_distribution.certSigningRequest"),
     )
-    csr_cmd.add_argument("--common-name", default="TokenTracker Apple Distribution")
-    csr_cmd.add_argument("--org", default="TokenTracker")
+    csr_cmd.add_argument("--common-name", default="TokenVane Apple Distribution")
+    csr_cmd.add_argument("--org", default="TokenVane")
     csr_cmd.add_argument("--country", default="US")
 
     p12_cmd = sub.add_parser("pack-p12", help="Combine private key and Apple .cer into an encrypted .p12")
     p12_cmd.add_argument(
         "--key-in",
         type=Path,
-        default=Path("artifacts/apple-signing/tokentracker_distribution.key"),
+        default=Path("artifacts/apple-signing/tokenvane_distribution.key"),
     )
     p12_cmd.add_argument("--cer", "--cer-in", dest="cer_in", required=True, type=Path)
     p12_cmd.add_argument(
         "--p12-out",
         type=Path,
-        default=Path("artifacts/apple-signing/tokentracker_distribution.p12"),
+        default=Path("artifacts/apple-signing/tokenvane_distribution.p12"),
     )
     p12_cmd.add_argument(
         "--password-out",
         type=Path,
-        default=Path("artifacts/apple-signing/tokentracker_p12_password.txt"),
+        default=Path("artifacts/apple-signing/tokenvane_p12_password.txt"),
     )
-    p12_cmd.add_argument("--friendly-name", default="TokenTracker Distribution")
+    p12_cmd.add_argument("--friendly-name", default="TokenVane Distribution")
     p12_cmd.add_argument("--legacy-pbes1", action="store_true")
     return parser
 

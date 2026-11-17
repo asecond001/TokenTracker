@@ -2,7 +2,7 @@ import SwiftUI
 import WidgetKit
 
 public struct QuotaLockScreenWidget: Widget {
-    public let kind: String = "com.tokentracker.app.quota-lockscreen"
+    public let kind: String = "com.asecond.tokenvane.quota-lockscreen"
 
     public init() {}
 
@@ -11,7 +11,7 @@ public struct QuotaLockScreenWidget: Widget {
             QuotaLockScreenEntryView(entry: entry)
                 .containerBackground(.clear, for: .widget)
         }
-        .configurationDisplayName("TokenTracker 锁屏配额")
+        .configurationDisplayName("TokenVane 锁屏配额")
         .description("在锁屏一眼掌握今日花销、核心订阅窗口已用占比与重置倒计时。")
         .supportedFamilies([.accessoryCircular, .accessoryRectangular, .accessoryInline])
     }
@@ -24,14 +24,14 @@ private struct QuotaLockScreenEntryView: View {
     var body: some View {
         let snap = entry.snapshot
         let primary = snap.primaryQuotas.first
-        let cost = TokenTrackerFormatters.formatCurrency(snap.todayCostMicroUsd, currency: snap.currency, rateString: snap.usdToCnyRate)
-        let tokens = TokenTrackerFormatters.formatCompactTokens(snap.todayTokens)
+        let cost = TokenVaneFormatters.formatCurrency(snap.todayCostMicroUsd, currency: snap.currency, rateString: snap.usdToCnyRate)
+        let tokens = TokenVaneFormatters.formatCompactTokens(snap.todayTokens)
 
         switch family {
         case .accessoryCircular:
             let pct = min(100.0, max(0.0, primary?.usedPercent ?? 0.0))
             Gauge(value: pct, in: 0...100) {
-                Text(primary.map { TokenTrackerFormatters.providerShortCode($0.providerId) } ?? "TT")
+                Text(primary.map { TokenVaneFormatters.providerShortCode($0.providerId) } ?? "TV")
             } currentValueLabel: {
                 Text("\(Int(pct.rounded()))%")
                     .font(.caption2.weight(.bold))
@@ -48,7 +48,7 @@ private struct QuotaLockScreenEntryView: View {
                 if let primary {
                     ProgressView(value: min(1.0, max(0.0, primary.usedPercent / 100.0)))
                         .progressViewStyle(.linear)
-                    Text("\(TokenTrackerFormatters.providerShortCode(primary.providerId)) \(primary.windowLabel) \(TokenTrackerFormatters.formatPercent(primary.usedPercent, decimals: 0)) · \(TokenTrackerFormatters.formatCountdown(untilMs: primary.resetsAtMs, now: entry.date))")
+                    Text("\(TokenVaneFormatters.providerShortCode(primary.providerId)) \(primary.windowLabel) \(TokenVaneFormatters.formatPercent(primary.usedPercent, decimals: 0)) · \(TokenVaneFormatters.formatCountdown(untilMs: primary.resetsAtMs, now: entry.date))")
                         .font(.caption2)
                         .monospacedDigit()
                         .lineLimit(1)
@@ -61,10 +61,10 @@ private struct QuotaLockScreenEntryView: View {
 
         default: // .accessoryInline
             if let primary {
-                Text("TT \(cost) · \(TokenTrackerFormatters.providerShortCode(primary.providerId)) \(Int(primary.usedPercent.rounded()))%")
+                Text("TV \(cost) · \(TokenVaneFormatters.providerShortCode(primary.providerId)) \(Int(primary.usedPercent.rounded()))%")
                     .monospacedDigit()
             } else {
-                Text("TT \(cost) · \(tokens)")
+                Text("TV \(cost) · \(tokens)")
                     .monospacedDigit()
             }
         }

@@ -1,5 +1,5 @@
 import Foundation
-import TokenTrackerCore
+import TokenVaneCore
 import UIKit
 import WidgetKit
 
@@ -33,7 +33,7 @@ public actor CoreClientActor {
     @discardableResult
     public func ingestPullResponse(bodyJSON: String, e2eePassphrase: String?) async throws -> FfiSyncIngestOutcome {
         let taskID = await MainActor.run {
-            UIApplication.shared.beginBackgroundTask(withName: "tokentracker.ingest", expirationHandler: nil)
+            UIApplication.shared.beginBackgroundTask(withName: "tokenvane.ingest", expirationHandler: nil)
         }
         defer {
             if taskID != .invalid {
@@ -145,14 +145,14 @@ public actor CoreClientActor {
     private func encodeJSON<T: Encodable>(_ value: T) throws -> String {
         let data = try JSONEncoder().encode(value)
         guard let str = String(data: data, encoding: .utf8) else {
-            throw NSError(domain: "TokenTrackerCore", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to encode JSON"])
+            throw NSError(domain: "TokenVaneCore", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to encode JSON"])
         }
         return str
     }
 
     private func decodeJSON<T: Decodable>(_ raw: String) throws -> T {
         guard let data = raw.data(using: .utf8) else {
-            throw NSError(domain: "TokenTrackerCore", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid UTF-8 JSON"])
+            throw NSError(domain: "TokenVaneCore", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid UTF-8 JSON"])
         }
         return try JSONDecoder().decode(T.self, from: data)
     }

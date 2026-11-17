@@ -79,22 +79,22 @@ stages:
             name: AppleP12
             displayName: Download Apple Distribution .p12
             inputs:
-              secureFile: tokentracker_distribution.p12
+              secureFile: tokenvane_distribution.p12
           - task: DownloadSecureFile@1
             name: AppleP12Password
             displayName: Download .p12 password file
             inputs:
-              secureFile: tokentracker_p12_password.txt
+              secureFile: tokenvane_p12_password.txt
           - task: DownloadSecureFile@1
             name: AppProfile
             displayName: Download App Distribution .mobileprovision
             inputs:
-              secureFile: tokentracker_app.mobileprovision
+              secureFile: tokenvane_app.mobileprovision
           - task: DownloadSecureFile@1
             name: WidgetsProfile
             displayName: Download Widgets Distribution .mobileprovision
             inputs:
-              secureFile: tokentracker_widgets.mobileprovision
+              secureFile: tokenvane_widgets.mobileprovision
           - bash: |
               set -euo pipefail
               PYTHON_BIN="$(pwd)/.tools/apple-venv/bin/python3"
@@ -154,15 +154,15 @@ stages:
           - task: Cache@2
             displayName: Cache native simulator XCFramework
             inputs:
-              key: 'rust-ios-xcf-v1 | "native" | "$(Agent.OS)" | Cargo.lock | crates/tokentracker-core/** | crates/tokentracker-ffi/** | scripts/ios/build-xcframework.sh'
+              key: 'rust-ios-xcf-v1 | "native" | "$(Agent.OS)" | Cargo.lock | crates/tokvane-core/** | crates/tokvane-ffi/** | scripts/ios/build-xcframework.sh'
               path: $(XCFRAMEWORK_CACHE_DIR)
             continueOnError: true
           - bash: |
               set -euo pipefail
-              if [[ ! -d "apps/ios/CoreFFI/Artifacts/TokenTrackerCoreFFI.xcframework" ]]; then
+              if [[ ! -d "apps/ios/CoreFFI/Artifacts/TokenVaneCoreFFI.xcframework" ]]; then
                 bash scripts/ios/build-xcframework.sh --mode native
               else
-                echo "Reusing cached native TokenTrackerCoreFFI.xcframework"
+                echo "Reusing cached native TokenVaneCoreFFI.xcframework"
               fi
             displayName: Build native Simulator XCFramework on cache miss
           - bash: bash scripts/ios/native-check.sh
@@ -213,22 +213,22 @@ stages:
             name: AppleP12
             displayName: Download Apple Distribution .p12
             inputs:
-              secureFile: tokentracker_distribution.p12
+              secureFile: tokenvane_distribution.p12
           - task: DownloadSecureFile@1
             name: AppleP12Password
             displayName: Download .p12 password file
             inputs:
-              secureFile: tokentracker_p12_password.txt
+              secureFile: tokenvane_p12_password.txt
           - task: DownloadSecureFile@1
             name: AppProfile
             displayName: Download App Distribution .mobileprovision
             inputs:
-              secureFile: tokentracker_app.mobileprovision
+              secureFile: tokenvane_app.mobileprovision
           - task: DownloadSecureFile@1
             name: WidgetsProfile
             displayName: Download Widgets Distribution .mobileprovision
             inputs:
-              secureFile: tokentracker_widgets.mobileprovision
+              secureFile: tokenvane_widgets.mobileprovision
           - task: Cache@2
             displayName: Restore Cargo registry
             inputs:
@@ -239,16 +239,16 @@ stages:
           - task: Cache@2
             displayName: Cache release device+sim XCFramework
             inputs:
-              key: 'rust-ios-xcf-v1 | "release" | "$(Agent.OS)" | Cargo.lock | crates/tokentracker-core/** | crates/tokentracker-ffi/** | scripts/ios/build-xcframework.sh'
+              key: 'rust-ios-xcf-v1 | "release" | "$(Agent.OS)" | Cargo.lock | crates/tokvane-core/** | crates/tokvane-ffi/** | scripts/ios/build-xcframework.sh'
               path: $(XCFRAMEWORK_CACHE_DIR)
             continueOnError: true
           - bash: |
               set -euo pipefail
               bash scripts/ios/azure-setup.sh --with-apple-tools --wheelhouse-dir "$(WHEELHOUSE_DIR)"
-              if [[ ! -d "apps/ios/CoreFFI/Artifacts/TokenTrackerCoreFFI.xcframework" ]]; then
+              if [[ ! -d "apps/ios/CoreFFI/Artifacts/TokenVaneCoreFFI.xcframework" ]]; then
                 bash scripts/ios/build-xcframework.sh --mode release
               else
-                echo "Reusing cached release TokenTrackerCoreFFI.xcframework"
+                echo "Reusing cached release TokenVaneCoreFFI.xcframework"
               fi
               TEAM_ID="$(node -pe 'JSON.parse(require("fs").readFileSync("ci/testflight-candidate.json","utf8")).teamId')"
               CERT_SHA="$(node -pe 'JSON.parse(require("fs").readFileSync("ci/testflight-candidate.json","utf8")).certificateSha256')"
@@ -265,7 +265,7 @@ stages:
             condition: and(succeeded(), eq('${{ parameters.action }}', 'upload'))
             displayName: Download App Store Connect AuthKey .p8
             inputs:
-              secureFile: tokentracker_appstore.p8
+              secureFile: tokenvane_appstore.p8
           - task: DownloadSecureFile@1
             name: AscApiIdentifiers
             condition: and(succeeded(), eq('${{ parameters.action }}', 'upload'))
@@ -285,7 +285,7 @@ stages:
                 --action upload \
                 --candidate ci/testflight-candidate.json \
                 --signing-report artifacts/ios/device-signing.json \
-                --ipa artifacts/ios/release-package/TokenTracker.ipa \
+                --ipa artifacts/ios/release-package/TokenVane.ipa \
                 --api-identifiers "$(AscApiIdentifiers.secureFilePath)" \
                 --private-keys-dir "$KEYS_DIR" \
                 --output artifacts/ios/release-package/upload-handoff.json
@@ -318,7 +318,7 @@ stages:
             name: AscApiKey
             displayName: Download App Store Connect AuthKey .p8
             inputs:
-              secureFile: tokentracker_appstore.p8
+              secureFile: tokenvane_appstore.p8
           - task: DownloadSecureFile@1
             name: AscApiIdentifiers
             displayName: Download Apple API identifiers JSON

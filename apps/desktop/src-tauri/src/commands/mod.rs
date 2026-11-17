@@ -5,30 +5,30 @@ use chrono::Utc;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
-use tokentracker_collectors::providers::official_api::{
+use tokvane_collectors::providers::official_api::{
     reconcile_official_usage_api, OfficialApiReconcileResult,
 };
-use tokentracker_collectors::{
+use tokvane_collectors::{
     build_sync_pairing_uri, clear_sync_credentials as clear_sync_creds, has_sync_credentials,
     normalize_worker_url, refresh_provider_balance as collect_provider_balance,
     refresh_provider_balance_force as collect_provider_balance_force,
     set_sync_credentials as set_sync_creds, BalanceRefreshOutcome, ScanReport, SyncRunReport,
     SyncStatusView, SYNC_BEARER_TOKEN_KEY, SYNC_E2EE_PASSPHRASE_KEY,
 };
-use tokentracker_core::analytics::{
+use tokvane_core::analytics::{
     export_monthly_csv, export_monthly_json, AnalyticsFilter, ModelStatsReport, MonthlyQuery,
     MonthlyReport, OverviewReport, SpeedLatencyReport, TraySummary, TrendsQuery, TrendsReport,
 };
-use tokentracker_core::declarative::test_custom_rule_line;
-use tokentracker_core::domain::{
+use tokvane_core::declarative::test_custom_rule_line;
+use tokvane_core::domain::{
     AppPreferences, CatalogSyncResult, CustomProviderRule, CustomRuleTestResult, DeviceRecord,
     IngestionCursor, ModelPricingEntry, ObservedRateLimitWindow, PaygAccount, PaygAccountStatus,
     ProviderBalanceSnapshot, ProviderConfig, RemoteSubscriptionSnapshot, SubscriptionPlan,
     SubscriptionPlanTemplate, SyncEnvelopeV1,
 };
-use tokentracker_core::subscription::SubscriptionPlanStatus;
-use tokentracker_core::sync_crypto::generate_kdf_salt_hex;
-use tokentracker_core::CoreError;
+use tokvane_core::subscription::SubscriptionPlanStatus;
+use tokvane_core::sync_crypto::generate_kdf_salt_hex;
+use tokvane_core::CoreError;
 
 use crate::state::AppState;
 use crate::tray::{
@@ -159,8 +159,8 @@ impl From<CoreError> for IpcError {
     }
 }
 
-impl From<tokentracker_collectors::CollectorError> for IpcError {
-    fn from(err: tokentracker_collectors::CollectorError) -> Self {
+impl From<tokvane_collectors::CollectorError> for IpcError {
+    fn from(err: tokvane_collectors::CollectorError) -> Self {
         Self::new("COLLECTOR_ERROR", err.to_string())
     }
 }
@@ -844,7 +844,7 @@ pub fn launch_provider_cli_login(
 
     let (program, cli_args): (String, Vec<&'static str>) = match trimmed.as_str() {
         "antigravity" => {
-            let bin = tokentracker_collectors::providers::antigravity::resolve_agy_cli_binary()
+            let bin = tokvane_collectors::providers::antigravity::resolve_agy_cli_binary()
                 .map(|p| p.to_string_lossy().into_owned())
                 .ok_or_else(|| {
                     IpcError::new(
@@ -869,7 +869,7 @@ pub fn launch_provider_cli_login(
         let mut cmd = std::process::Command::new("cmd.exe");
         cmd.arg("/c")
             .arg("start")
-            .arg("TokenTracker Account Login")
+            .arg("TokenVane Account Login")
             .arg(&program);
         for arg in &cli_args {
             cmd.arg(arg);

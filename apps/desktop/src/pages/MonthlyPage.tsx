@@ -122,7 +122,7 @@ export function MonthlyPage() {
 
   const handleExport = async (format: 'csv' | 'json') => {
     setExportNotice(null);
-    const defaultName = `tokentracker-${year}-${String(month).padStart(2, '0')}.${format}`;
+    const defaultName = `tokenvane-${year}-${String(month).padStart(2, '0')}.${format}`;
     let savePath: string | null = null;
     if (isTauriRuntime()) {
       savePath = await save({

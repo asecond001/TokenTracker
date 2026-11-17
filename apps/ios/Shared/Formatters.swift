@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-public enum TokenTrackerFormatters {
+public enum TokenVaneFormatters {
     public static func exchangeRate(from rateString: String) -> Double {
         let parsed = Double(rateString.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 7.25
         return parsed.isFinite && parsed > 0 ? parsed : 7.25

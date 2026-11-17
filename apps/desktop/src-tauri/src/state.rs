@@ -4,26 +4,48 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
-use tokentracker_collectors::{
+use tokvane_collectors::{
     start_loopback_otlp_server, sync_catalog_and_rate, CollectorCoordinator, CredentialManager,
     OsKeyringStore, OtlpServerHandle, SyncClientHandle,
 };
-use tokentracker_core::domain::CatalogSyncResult;
-use tokentracker_core::{CoreResult, Storage};
+use tokvane_core::domain::CatalogSyncResult;
+use tokvane_core::{CoreResult, Storage};
 
-/// Resolve `%LOCALAPPDATA%\TokenTracker\tokentracker.db` (PLAN.md §4).
+/// Resolve `%LOCALAPPDATA%\TokenVane\tokenvane.db`, seamlessly migrating legacy `%LOCALAPPDATA%\TokenVane\tokenvane.db` on first run.
 pub fn default_db_path() -> PathBuf {
     if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(local_app_data)
-            .join("TokenTracker")
-            .join("tokentracker.db");
+        let base = PathBuf::from(local_app_data);
+        let target_dir = base.join("TokenVane");
+        let target_db = target_dir.join("tokenvane.db");
+        if !target_db.exists() {
+            let legacy_dir = base.join("TokenTracker");
+            let legacy_db = legacy_dir.join("tokentracker.db");
+            if legacy_db.is_file() {
+                let _ = std::fs::create_dir_all(&target_dir);
+                let _ = std::fs::copy(&legacy_db, &target_db);
+                let legacy_bg = legacy_dir.join("backgrounds");
+                let target_bg = target_dir.join("backgrounds");
+                if legacy_bg.is_dir() && !target_bg.exists() {
+                    let _ = std::fs::create_dir_all(&target_bg);
+                    if let Ok(entries) = std::fs::read_dir(&legacy_bg) {
+                        for entry in entries.flatten() {
+                            let src = entry.path();
+                            if src.is_file() {
+                                let _ = std::fs::copy(&src, target_bg.join(entry.file_name()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return target_db;
     }
     if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
         return PathBuf::from(home)
-            .join(".tokentracker")
-            .join("tokentracker.db");
+            .join(".tokenvane")
+            .join("tokenvane.db");
     }
-    PathBuf::from("tokentracker.db")
+    PathBuf::from("tokenvane.db")
 }
 
 /// Shared Tauri managed application state.
@@ -42,7 +64,7 @@ impl AppState {
     pub fn initialize() -> Result<Self, String> {
         let db_path = default_db_path();
         let storage = Storage::open_file(&db_path)
-            .map_err(|e| format!("Failed to open TokenTracker SQLite database: {e}"))?;
+            .map_err(|e| format!("Failed to open TokenVane SQLite database: {e}"))?;
         let coordinator = CollectorCoordinator::new(storage.clone());
         let credentials: Arc<dyn CredentialManager> = Arc::new(OsKeyringStore::new());
         let sync_client = SyncClientHandle::new(storage.clone(), Arc::clone(&credentials))
@@ -285,7 +307,7 @@ async fn poll_configured_provider_apis(
             continue;
         }
         let is_cli_quota_provider = cfg.provider_id == "antigravity"
-            && tokentracker_collectors::providers::antigravity::resolve_agy_cli_binary().is_some();
+            && tokvane_collectors::providers::antigravity::resolve_agy_cli_binary().is_some();
         let is_key_balance_provider = cfg.has_credential
             && matches!(
                 cfg.provider_id.as_str(),
@@ -294,7 +316,7 @@ async fn poll_configured_provider_apis(
         if !is_cli_quota_provider && !is_key_balance_provider {
             continue;
         }
-        match tokentracker_collectors::refresh_provider_balance(storage, &cfg.provider_id, credentials)
+        match tokvane_collectors::refresh_provider_balance(storage, &cfg.provider_id, credentials)
             .await
         {
             Ok(outcome) => {

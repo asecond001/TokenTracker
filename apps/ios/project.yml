@@ -1,6 +1,6 @@
-name: TokenTracker
+name: TokenVane
 options:
-  bundleIdPrefix: com.tokentracker
+  bundleIdPrefix: com.asecond
   deploymentTarget:
     iOS: "18.0"
   createIntermediateGroups: true
@@ -8,12 +8,12 @@ options:
   generateEmptyDirectories: true
 
 packages:
-  TokenTrackerCore:
+  TokenVaneCore:
     path: CoreFFI
 
 settings:
   base:
-    BUNDLE_BASE_ID: com.tokentracker.app
+    BUNDLE_BASE_ID: com.asecond.tokenvane
     APP_GROUP_ID: group.$(BUNDLE_BASE_ID)
     MARKETING_VERSION: "0.3.1"
     CURRENT_PROJECT_VERSION: "1"
@@ -27,7 +27,7 @@ settings:
     ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: YES
 
 targets:
-  TokenTracker:
+  TokenVane:
     type: application
     platform: iOS
     deploymentTarget: "18.0"
@@ -35,19 +35,19 @@ targets:
       - path: App
         excludes:
           - Info.plist
-          - TokenTracker.entitlements
+          - TokenVane.entitlements
       - path: Shared
     dependencies:
-      - package: TokenTrackerCore
-        product: TokenTrackerCore
-      - target: TokenTrackerWidgets
+      - package: TokenVaneCore
+        product: TokenVaneCore
+      - target: TokenVaneWidgets
         embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_BASE_ID)
-        PRODUCT_NAME: TokenTracker
+        PRODUCT_NAME: TokenVane
         INFOPLIST_FILE: App/Info.plist
-        CODE_SIGN_ENTITLEMENTS: App/TokenTracker.entitlements
+        CODE_SIGN_ENTITLEMENTS: App/TokenVane.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         SUPPORTS_LIVE_ACTIVITIES: YES
@@ -59,7 +59,7 @@ targets:
           CODE_SIGN_STYLE: Manual
           "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": $(TT_APP_PROFILE)
 
-  TokenTrackerWidgets:
+  TokenVaneWidgets:
     type: app-extension
     platform: iOS
     deploymentTarget: "18.0"
@@ -67,14 +67,14 @@ targets:
       - path: Widgets
         excludes:
           - Info.plist
-          - TokenTrackerWidgets.entitlements
+          - TokenVaneWidgets.entitlements
       - path: Shared
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_BASE_ID).widgets
-        PRODUCT_NAME: TokenTrackerWidgets
+        PRODUCT_NAME: TokenVaneWidgets
         INFOPLIST_FILE: Widgets/Info.plist
-        CODE_SIGN_ENTITLEMENTS: Widgets/TokenTrackerWidgets.entitlements
+        CODE_SIGN_ENTITLEMENTS: Widgets/TokenVaneWidgets.entitlements
         SKIP_INSTALL: YES
         ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: NO
         LD_RUNPATH_SEARCH_PATHS:
@@ -86,7 +86,7 @@ targets:
           CODE_SIGN_STYLE: Manual
           "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": $(TT_WIDGETS_PROFILE)
 
-  TokenTrackerTests:
+  TokenVaneTests:
     type: bundle.unit-test
     platform: iOS
     deploymentTarget: "18.0"
@@ -95,15 +95,15 @@ targets:
         excludes:
           - Info.plist
     dependencies:
-      - target: TokenTracker
+      - target: TokenVane
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_BASE_ID).tests
         INFOPLIST_FILE: Tests/Info.plist
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/TokenTracker.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TokenTracker"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/TokenVane.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TokenVane"
         BUNDLE_LOADER: "$(TEST_HOST)"
 
-  TokenTrackerUITests:
+  TokenVaneUITests:
     type: bundle.ui-testing
     platform: iOS
     deploymentTarget: "18.0"
@@ -112,28 +112,28 @@ targets:
         excludes:
           - Info.plist
     dependencies:
-      - target: TokenTracker
+      - target: TokenVane
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_BASE_ID).uitests
         INFOPLIST_FILE: UITests/Info.plist
-        TEST_TARGET_NAME: TokenTracker
+        TEST_TARGET_NAME: TokenVane
 
 schemes:
-  TokenTracker:
+  TokenVane:
     shared: true
     build:
       targets:
-        TokenTracker: all
-        TokenTrackerWidgets: all
-        TokenTrackerTests: [test]
-        TokenTrackerUITests: [test]
+        TokenVane: all
+        TokenVaneWidgets: all
+        TokenVaneTests: [test]
+        TokenVaneUITests: [test]
     test:
       gatherCoverageData: false
       targets:
-        - name: TokenTrackerTests
+        - name: TokenVaneTests
           parallelizable: false
-        - name: TokenTrackerUITests
+        - name: TokenVaneUITests
           parallelizable: false
     profile:
       config: Release

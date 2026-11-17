@@ -5402,81 +5402,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
-name = "tokentracker-collectors"
-version = "0.3.1"
-dependencies = [
- "axum",
- "chrono",
- "hex",
- "keyring",
- "notify",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.21",
- "tokentracker-core",
- "tokio",
- "tracing",
- "walkdir",
-]
-
-[[package]]
-name = "tokentracker-core"
-version = "0.3.1"
-dependencies = [
- "aes-gcm",
- "base64 0.22.1",
- "chrono",
- "getrandom 0.2.17",
- "hex",
- "hmac",
- "pbkdf2",
- "rusqlite",
- "rust_decimal",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.21",
- "uuid",
-]
-
-[[package]]
-name = "tokentracker-desktop"
-version = "0.3.1"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-dialog",
- "tauri-plugin-notification",
- "tauri-plugin-process",
- "tauri-plugin-updater",
- "thiserror 2.0.21",
- "tokentracker-collectors",
- "tokentracker-core",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tokentracker-ffi"
-version = "0.3.1"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokentracker-core",
- "uniffi",
-]
-
-[[package]]
 name = "tokio"
 version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5523,6 +5448,81 @@ dependencies = [
  "futures-sink",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "tokvane-collectors"
+version = "0.3.1"
+dependencies = [
+ "axum",
+ "chrono",
+ "hex",
+ "keyring",
+ "notify",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokvane-core",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
+name = "tokvane-core"
+version = "0.3.1"
+dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "chrono",
+ "getrandom 0.2.17",
+ "hex",
+ "hmac",
+ "pbkdf2",
+ "rusqlite",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "tokvane-desktop"
+version = "0.3.1"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tauri-plugin-process",
+ "tauri-plugin-updater",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokvane-collectors",
+ "tokvane-core",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tokvane-ffi"
+version = "0.3.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokvane-core",
+ "uniffi",
 ]
 
 [[package]]

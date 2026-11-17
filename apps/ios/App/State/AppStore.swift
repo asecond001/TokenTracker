@@ -121,7 +121,7 @@ public final class AppStore {
             self.core = provided
         } else if demoMode {
             let demoURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("tokentracker-uitest-\(UUID().uuidString).sqlite")
+                .appendingPathComponent("tokenvane-uitest-\(UUID().uuidString).sqlite")
             self.core = try? CoreClientActor(dbPath: demoURL.path, localDeviceName: "iPhone-UITest")
         } else {
             self.core = try? CoreClientActor.openDefault()
@@ -374,7 +374,7 @@ public final class AppStore {
     }
 
     public func toggleLiveActivityWatch(for sub: RemoteSubscriptionSnapshotDTO) async {
-        let todayCost = TokenTrackerFormatters.formatCurrency(
+        let todayCost = TokenVaneFormatters.formatCurrency(
             overview?.todayCostMicroUsd ?? 0,
             currency: currency,
             rateString: usdToCnyRate
@@ -402,7 +402,7 @@ public final class AppStore {
         do {
             let content = try await core.exportMonthlyReport(query: query, format: format)
             let ext = format.lowercased() == "json" ? "json" : "csv"
-            let fileName = String(format: "tokentracker-%04d-%02d.%@", selectedYear, selectedMonth, ext)
+            let fileName = String(format: "tokenvane-%04d-%02d.%@", selectedYear, selectedMonth, ext)
             let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
             try content.write(to: url, atomically: true, encoding: .utf8)
             return url
@@ -542,7 +542,7 @@ public final class AppStore {
             _ = try? await core.ingestPullResponse(bodyJSON: body, e2eePassphrase: nil)
             _ = try? await core.updateSyncConfig(
                 enabled: true,
-                workerURL: "https://sync-demo.tokentracker.local",
+                workerURL: "https://sync-demo.tokenvane.local",
                 e2eeEnabled: false
             )
             connectionState = .live

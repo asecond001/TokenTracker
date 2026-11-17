@@ -1603,7 +1603,7 @@ export function PreferencesPage({
               <input
                 type="url"
                 aria-label="Worker 服务地址"
-                placeholder="https://tokentracker-sync.your-subdomain.workers.dev"
+                placeholder="https://tokenvane-sync.your-subdomain.workers.dev"
                 value={syncWorkerUrlDraft}
                 onChange={(e) => setSyncWorkerUrlDraft(e.target.value)}
                 className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"

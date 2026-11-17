@@ -9,7 +9,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>TokenTracker</string>
+	<string>TokenVane</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -27,7 +27,7 @@
 			<string>$(BUNDLE_BASE_ID)</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>tokentracker</string>
+				<string>tokenvane</string>
 			</array>
 		</dict>
 	</array>
@@ -40,7 +40,7 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>用于扫描桌面端 TokenTracker 的云同步配对二维码。</string>
+	<string>用于扫描桌面端 TokenVane 的云同步配对二维码。</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>NSSupportsLiveActivitiesFrequentUpdates</key>

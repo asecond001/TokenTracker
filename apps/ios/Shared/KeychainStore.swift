@@ -31,7 +31,7 @@ public final class KeychainStore: SecretStoring, @unchecked Sendable {
 
     private let service: String
 
-    public init(service: String = "com.tokentracker.app.sync") {
+    public init(service: String = "com.asecond.tokenvane.sync") {
         self.service = service
     }
 

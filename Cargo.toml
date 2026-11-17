@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/tokentracker-core",
-    "crates/tokentracker-collectors",
-    "crates/tokentracker-ffi",
+    "crates/tokvane-core",
+    "crates/tokvane-collectors",
+    "crates/tokvane-ffi",
     "apps/desktop/src-tauri",
 ]
 

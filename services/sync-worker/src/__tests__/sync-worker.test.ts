@@ -92,7 +92,7 @@ function makeEnvelope(deviceId: string, displayName: string, tokens: number): Sy
   };
 }
 
-describe('tokentracker-sync-worker SQLite Durable Object hub', () => {
+describe('tokenvane-sync-worker SQLite Durable Object hub', () => {
   let db: DatabaseSync;
   let hub: SyncHubCore;
   let env: WorkerEnv;

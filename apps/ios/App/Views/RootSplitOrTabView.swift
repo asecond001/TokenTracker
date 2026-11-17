@@ -89,7 +89,7 @@ public struct RootSplitOrTabView: View {
                 Label(tab.title, systemImage: tab.systemImage)
                     .tag(tab)
             }
-            .navigationTitle("TokenTracker")
+            .navigationTitle("TokenVane")
         } detail: {
             VStack(spacing: 0) {
                 if store.selectedTab != .settings {
@@ -245,7 +245,7 @@ public struct RootSplitOrTabView: View {
         case .syncing: return "同步中"
         case .error: return "异常"
         case .offline:
-            return TokenTrackerFormatters.formatRelativeSync(atMs: store.bootstrap?.syncConfig.lastSyncAtMs)
+            return TokenVaneFormatters.formatRelativeSync(atMs: store.bootstrap?.syncConfig.lastSyncAtMs)
         }
     }
 }

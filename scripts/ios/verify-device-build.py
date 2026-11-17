@@ -81,7 +81,7 @@ def _verify_single_bundle(
     if forbid_coreffi_framework:
         frameworks_dir = bundle_dir / "Frameworks"
         if frameworks_dir.is_dir():
-            ffi_items = [p.name for p in frameworks_dir.iterdir() if "TokenTrackerCoreFFI" in p.name]
+            ffi_items = [p.name for p in frameworks_dir.iterdir() if "TokenVaneCoreFFI" in p.name]
             if ffi_items:
                 raise ValueError(f"Widget extension illegally embeds CoreFFI framework: {ffi_items}")
 
@@ -147,8 +147,8 @@ def verify_signing_artifacts(
     if not ipa_path.is_file():
         raise FileNotFoundError(f"Missing .ipa archive file: {ipa_path}")
 
-    archive_app = xcarchive_path / "Products" / "Applications" / "TokenTracker.app"
-    archive_widgets = archive_app / "PlugIns" / "TokenTrackerWidgets.appex"
+    archive_app = xcarchive_path / "Products" / "Applications" / "TokenVane.app"
+    archive_widgets = archive_app / "PlugIns" / "TokenVaneWidgets.appex"
 
     archive_app_info = _verify_single_bundle(
         archive_app,
@@ -180,8 +180,8 @@ def verify_signing_artifacts(
         else:
             with zipfile.ZipFile(ipa_path, "r") as zf:
                 zf.extractall(tmpdir)
-        ipa_app = Path(tmpdir) / "Payload" / "TokenTracker.app"
-        ipa_widgets = ipa_app / "PlugIns" / "TokenTrackerWidgets.appex"
+        ipa_app = Path(tmpdir) / "Payload" / "TokenVane.app"
+        ipa_widgets = ipa_app / "PlugIns" / "TokenVaneWidgets.appex"
         ipa_app_info = _verify_single_bundle(
             ipa_app,
             expected_bundle_id=bundle_base_id,

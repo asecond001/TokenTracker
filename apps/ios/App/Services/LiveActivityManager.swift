@@ -33,7 +33,7 @@ public final class LiveActivityManager {
             deviceId: subscription.deviceId,
             deviceName: subscription.deviceDisplayName,
             providerId: subscription.providerId,
-            providerName: TokenTrackerFormatters.providerDisplayName(subscription.providerId),
+            providerName: TokenVaneFormatters.providerDisplayName(subscription.providerId),
             planId: subscription.planId,
             planName: subscription.planName,
             windowId: subscription.windowId,
@@ -57,7 +57,7 @@ public final class LiveActivityManager {
     ) async {
         let costFormatted: String
         if let snapshot {
-            costFormatted = TokenTrackerFormatters.formatCurrency(
+            costFormatted = TokenVaneFormatters.formatCurrency(
                 snapshot.todayCostMicroUsd,
                 currency: snapshot.currency,
                 rateString: snapshot.usdToCnyRate

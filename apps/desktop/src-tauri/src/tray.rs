@@ -8,7 +8,7 @@ use tauri::{
 
 use crate::state::AppState;
 
-const TRAY_ID: &str = "tokentracker-tray";
+const TRAY_ID: &str = "tokenvane-tray";
 pub const TRAY_POPUP_LABEL: &str = "tray-popup";
 pub const FLOATING_MONITOR_LABEL: &str = "floating-monitor";
 const MENU_OPEN: &str = "tray_open_main";
@@ -20,14 +20,14 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let open_item = MenuItem::with_id(app, MENU_OPEN, "打开工作台", true, None::<&str>)?;
     let scan_item = MenuItem::with_id(app, MENU_SCAN, "立即增量扫描", true, None::<&str>)?;
     let float_item = MenuItem::with_id(app, MENU_FLOAT, "切换实时悬浮窗", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, MENU_QUIT, "退出 TokenTracker", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, MENU_QUIT, "退出 TokenVane", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open_item, &scan_item, &float_item, &quit_item])?;
 
     let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
-        .tooltip("TokenTracker — AI Token & 配额监测")
+        .tooltip("TokenVane — AI Token & 配额监测")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -96,7 +96,7 @@ fn ensure_tray_popup(app: &AppHandle) -> Option<tauri::WebviewWindow> {
         TRAY_POPUP_LABEL,
         WebviewUrl::App("index.html?view=tray".into()),
     )
-    .title("TokenTracker Quick View")
+    .title("TokenVane Quick View")
     .inner_size(360.0, 480.0)
     .decorations(false)
     .resizable(false)
@@ -220,7 +220,7 @@ fn ensure_floating_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
         FLOATING_MONITOR_LABEL,
         WebviewUrl::App("index.html?view=floating".into()),
     )
-    .title("TokenTracker 实时悬浮窗")
+    .title("TokenVane 实时悬浮窗")
     .inner_size(304.0, 248.0)
     .min_inner_size(148.0, 44.0)
     .max_inner_size(640.0, 640.0)

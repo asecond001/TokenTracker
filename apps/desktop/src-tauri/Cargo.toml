@@ -1,12 +1,12 @@
 [package]
-name = "tokentracker-desktop"
+name = "tokvane-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "TokenTracker Windows desktop application shell built on Tauri v2."
+description = "TokenVane Windows desktop application shell built on Tauri v2."
 
 [lib]
-name = "tokentracker_desktop_lib"
+name = "tokvane_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -24,7 +24,7 @@ tauri-plugin-process.workspace = true
 tauri-plugin-updater.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokentracker-collectors = { path = "../../../crates/tokentracker-collectors" }
-tokentracker-core = { path = "../../../crates/tokentracker-core" }
+tokvane-collectors = { path = "../../../crates/tokvane-collectors" }
+tokvane-core = { path = "../../../crates/tokvane-core" }
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -53,15 +53,15 @@ function findCompiledFfiLibrary() {
   const debugDir = path.join(repoRoot, 'target', 'debug');
   const names =
     process.platform === 'win32'
-      ? ['tokentracker_ffi.dll']
+      ? ['tokvane_ffi.dll']
       : process.platform === 'darwin'
-        ? ['libtokentracker_ffi.dylib']
-        : ['libtokentracker_ffi.so'];
+        ? ['libtokvane_ffi.dylib']
+        : ['libtokvane_ffi.so'];
   for (const name of names) {
     const full = path.join(debugDir, name);
     if (fs.existsSync(full)) return full;
   }
-  throw new Error(`Compiled tokentracker-ffi library not found in ${debugDir}`);
+  throw new Error(`Compiled tokvane-ffi library not found in ${debugDir}`);
 }
 
 function verifyGeneratedSwiftBindings(swiftFilePath) {
@@ -90,7 +90,7 @@ function verifyGeneratedSwiftBindings(swiftFilePath) {
   ];
   for (const sym of requiredSymbols) {
     if (!generated.includes(sym)) {
-      throw new Error(`Generated TokenTrackerCore.swift missing expected symbol: ${sym}`);
+      throw new Error(`Generated TokenVaneCore.swift missing expected symbol: ${sym}`);
     }
   }
 
@@ -100,8 +100,8 @@ function verifyGeneratedSwiftBindings(swiftFilePath) {
     'ios',
     'CoreFFI',
     'Sources',
-    'TokenTrackerCore',
-    'TokenTrackerCore.swift'
+    'TokenVaneCore',
+    'TokenVaneCore.swift'
   );
   if (!fs.existsSync(checkedInSwift)) {
     throw new Error(`Checked-in Swift wrapper missing: ${checkedInSwift}`);
@@ -129,9 +129,9 @@ if (!skipRust) {
   runStep('Clippy core + ffi', cargo, [
     'clippy',
     '-p',
-    'tokentracker-core',
+    'tokvane-core',
     '-p',
-    'tokentracker-ffi',
+    'tokvane-ffi',
     '--all-targets',
     ...offlineFlag,
     '--',
@@ -141,12 +141,12 @@ if (!skipRust) {
   runStep('Cargo test core + ffi', cargo, [
     'test',
     '-p',
-    'tokentracker-core',
+    'tokvane-core',
     '-p',
-    'tokentracker-ffi',
+    'tokvane-ffi',
     ...offlineFlag
   ]);
-  runStep('Build tokentracker-ffi host library', cargo, ['build', '-p', 'tokentracker-ffi', ...offlineFlag]);
+  runStep('Build tokvane-ffi host library', cargo, ['build', '-p', 'tokvane-ffi', ...offlineFlag]);
 
   const hostLib = findCompiledFfiLibrary();
   const outDir = path.join(repoRoot, 'artifacts', 'ffi-swift-local');
@@ -154,7 +154,7 @@ if (!skipRust) {
   runStep('Generate UniFFI Swift bindings', cargo, [
     'run',
     '-p',
-    'tokentracker-ffi',
+    'tokvane-ffi',
     ...offlineFlag,
     '--bin',
     'uniffi-bindgen',
@@ -168,7 +168,7 @@ if (!skipRust) {
     '--out-dir',
     outDir
   ]);
-  verifyGeneratedSwiftBindings(path.join(outDir, 'TokenTrackerCore.swift'));
+  verifyGeneratedSwiftBindings(path.join(outDir, 'TokenVaneCore.swift'));
   console.log('[local-check] UniFFI Swift binding signature & sync check OK');
 }
 

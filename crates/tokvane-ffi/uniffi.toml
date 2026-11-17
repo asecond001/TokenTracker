@@ -1,0 +1,4 @@
+[bindings.swift]
+module_name = "TokenVaneCore"
+ffi_module_name = "TokenVaneCoreFFI"
+ffi_module_filename = "TokenVaneCoreFFI"

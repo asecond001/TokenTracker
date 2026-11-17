@@ -2,25 +2,25 @@
 import PackageDescription
 
 let package = Package(
-    name: "TokenTrackerCore",
+    name: "TokenVaneCore",
     platforms: [
         .iOS(.v18)
     ],
     products: [
         .library(
-            name: "TokenTrackerCore",
-            targets: ["TokenTrackerCore"]
+            name: "TokenVaneCore",
+            targets: ["TokenVaneCore"]
         )
     ],
     targets: [
         .binaryTarget(
-            name: "TokenTrackerCoreFFI",
-            path: "Artifacts/TokenTrackerCoreFFI.xcframework"
+            name: "TokenVaneCoreFFI",
+            path: "Artifacts/TokenVaneCoreFFI.xcframework"
         ),
         .target(
-            name: "TokenTrackerCore",
-            dependencies: ["TokenTrackerCoreFFI"],
-            path: "Sources/TokenTrackerCore"
+            name: "TokenVaneCore",
+            dependencies: ["TokenVaneCoreFFI"],
+            path: "Sources/TokenVaneCore"
         )
     ],
     swiftLanguageModes: [.v5]

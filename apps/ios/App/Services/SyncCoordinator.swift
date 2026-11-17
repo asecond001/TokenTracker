@@ -15,7 +15,7 @@ public final class SyncCoordinator {
     private let secrets: SecretStoring
     private let session: URLSession
     private let pathMonitor = NWPathMonitor()
-    private let monitorQueue = DispatchQueue(label: "com.tokentracker.app.network")
+    private let monitorQueue = DispatchQueue(label: "com.asecond.tokenvane.network")
 
     private var sseTask: Task<Void, Never>?
     private var isForeground = false

@@ -78,12 +78,12 @@ public struct QuotasAndModelsView: View {
 
     private func subscriptionRow(_ sub: RemoteSubscriptionSnapshotDTO, now: Date) -> some View {
         let isPinned = store.pinnedWatchKeys.contains(sub.id)
-        let severityColor = TokenTrackerFormatters.quotaSeverityColor(usedPercent: sub.usedPercent)
+        let severityColor = TokenVaneFormatters.quotaSeverityColor(usedPercent: sub.usedPercent)
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Circle()
-                    .fill(TokenTrackerFormatters.providerColor(sub.providerId))
+                    .fill(TokenVaneFormatters.providerColor(sub.providerId))
                     .frame(width: 7, height: 7)
                 Text("\(sub.planName) · \(sub.windowLabel)")
                     .font(.subheadline.weight(.medium))
@@ -113,7 +113,7 @@ public struct QuotasAndModelsView: View {
 
             HStack {
                 LinearProgressStrip(progressPercent: sub.usedPercent, tint: severityColor)
-                Text(TokenTrackerFormatters.formatPercent(sub.usedPercent))
+                Text(TokenVaneFormatters.formatPercent(sub.usedPercent))
                     .font(.caption.weight(.semibold))
                     .tabularMetrics()
                     .foregroundStyle(severityColor)
@@ -125,7 +125,7 @@ public struct QuotasAndModelsView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("重置倒计时 \(TokenTrackerFormatters.formatCountdown(untilMs: sub.resetsAtMs, now: now))")
+                Text("重置倒计时 \(TokenVaneFormatters.formatCountdown(untilMs: sub.resetsAtMs, now: now))")
                     .font(.caption2)
                     .tabularMetrics()
                     .foregroundStyle(.secondary)
@@ -173,35 +173,35 @@ public struct QuotasAndModelsView: View {
                             Text(row.modelId)
                                 .font(.subheadline.weight(.medium))
                                 .lineLimit(1)
-                            Text(TokenTrackerFormatters.providerShortCode(row.providerId))
+                            Text(TokenVaneFormatters.providerShortCode(row.providerId))
                                 .font(.caption2.weight(.semibold))
-                                .foregroundStyle(TokenTrackerFormatters.providerColor(row.providerId))
+                                .foregroundStyle(TokenVaneFormatters.providerColor(row.providerId))
                             Spacer()
-                            Text(TokenTrackerFormatters.formatCurrency(row.estimatedCostMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))
+                            Text(TokenVaneFormatters.formatCurrency(row.estimatedCostMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))
                                 .font(.subheadline.weight(.semibold))
                                 .tabularMetrics()
                         }
 
                         HStack(spacing: 12) {
-                            Text("Token \(TokenTrackerFormatters.formatCompactTokens(row.totalTokens))")
+                            Text("Token \(TokenVaneFormatters.formatCompactTokens(row.totalTokens))")
                                 .font(.caption2)
                                 .tabularMetrics()
                                 .foregroundStyle(.secondary)
-                            Text("缓存 \(TokenTrackerFormatters.formatPercent(row.cacheHitPercent, decimals: 0))")
+                            Text("缓存 \(TokenVaneFormatters.formatPercent(row.cacheHitPercent, decimals: 0))")
                                 .font(.caption2)
                                 .tabularMetrics()
                                 .foregroundStyle(.secondary)
                             Spacer()
                             if let speed {
                                 let label = fromRollups
-                                    ? "均 \(TokenTrackerFormatters.formatTps(speed.meanTps)) · 峰 \(String(format: "%.1f", speed.maxTps))"
-                                    : "\(TokenTrackerFormatters.formatTps(speed.meanTps)) · \(TokenTrackerFormatters.formatDurationMs(speed.avgDurationMs))"
+                                    ? "均 \(TokenVaneFormatters.formatTps(speed.meanTps)) · 峰 \(String(format: "%.1f", speed.maxTps))"
+                                    : "\(TokenVaneFormatters.formatTps(speed.meanTps)) · \(TokenVaneFormatters.formatDurationMs(speed.avgDurationMs))"
                                 Text(label)
                                     .font(.caption2)
                                     .tabularMetrics()
                                     .foregroundStyle(.secondary)
                             } else if row.avgOutputTps > 0 {
-                                Text(TokenTrackerFormatters.formatTps(row.avgOutputTps))
+                                Text(TokenVaneFormatters.formatTps(row.avgOutputTps))
                                     .font(.caption2)
                                     .tabularMetrics()
                                     .foregroundStyle(.secondary)

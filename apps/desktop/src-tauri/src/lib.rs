@@ -37,7 +37,7 @@ pub fn run() {
     let app_state = match AppState::initialize() {
         Ok(s) => s,
         Err(err) => {
-            log_startup_error("TokenTracker initialization failed", &err);
+            log_startup_error("TokenVane initialization failed", &err);
             return;
         }
     };
@@ -110,7 +110,7 @@ pub fn run() {
         ])
         .setup(|app| {
             if let Err(err) = setup_tray(app.handle()) {
-                log_startup_error("TokenTracker tray setup failed", &err);
+                log_startup_error("TokenVane tray setup failed", &err);
                 return Err(err.into());
             }
             let state = app.state::<AppState>();
@@ -156,7 +156,7 @@ pub fn run() {
     let app = match builder.build(tauri::generate_context!()) {
         Ok(a) => a,
         Err(err) => {
-            log_startup_error("Failed to build TokenTracker Tauri runtime", &err);
+            log_startup_error("Failed to build TokenVane Tauri runtime", &err);
             return;
         }
     };

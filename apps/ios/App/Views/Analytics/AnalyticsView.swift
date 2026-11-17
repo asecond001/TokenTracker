@@ -112,7 +112,7 @@ public struct AnalyticsView: View {
                         .font(.caption.weight(.semibold))
                         .tabularMetrics()
                     Spacer()
-                    Text("\(TokenTrackerFormatters.formatCompactTokens(summary.tokens)) · \(TokenTrackerFormatters.formatCurrency(summary.costMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))")
+                    Text("\(TokenVaneFormatters.formatCompactTokens(summary.tokens)) · \(TokenVaneFormatters.formatCurrency(summary.costMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))")
                         .font(.caption.weight(.semibold))
                         .tabularMetrics()
                         .foregroundStyle(SemanticColors.accentIndigo)
@@ -158,7 +158,7 @@ public struct AnalyticsView: View {
                             .foregroundStyle(SemanticColors.hairline)
                         AxisValueLabel {
                             if let v = value.as(Double.self) {
-                                Text(TokenTrackerFormatters.formatCompactTokens(Int64(v)))
+                                Text(TokenVaneFormatters.formatCompactTokens(Int64(v)))
                                     .font(.caption2)
                                     .tabularMetrics()
                             }
@@ -211,7 +211,7 @@ public struct AnalyticsView: View {
                             .font(.caption.weight(.medium))
                             .lineLimit(1)
                         Spacer()
-                        Text(TokenTrackerFormatters.formatCompactTokens(row.currentTokens))
+                        Text(TokenVaneFormatters.formatCompactTokens(row.currentTokens))
                             .font(.caption)
                             .tabularMetrics()
                         Text(formatDelta(row.deltaPct))
@@ -278,15 +278,15 @@ public struct AnalyticsView: View {
             HStack(spacing: 0) {
                 monthlySummaryCell(
                     title: "月度等效费用",
-                    value: TokenTrackerFormatters.formatCurrency(mo?.apiEquivalentCostMicroUsd ?? 0, currency: store.currency, rateString: store.usdToCnyRate)
+                    value: TokenVaneFormatters.formatCurrency(mo?.apiEquivalentCostMicroUsd ?? 0, currency: store.currency, rateString: store.usdToCnyRate)
                 )
                 monthlySummaryCell(
                     title: "月总 Tokens",
-                    value: TokenTrackerFormatters.formatCompactTokens(mo?.monthTotalTokens ?? 0)
+                    value: TokenVaneFormatters.formatCompactTokens(mo?.monthTotalTokens ?? 0)
                 )
                 monthlySummaryCell(
                     title: "缓存节省",
-                    value: TokenTrackerFormatters.formatCurrency(mo?.monthCacheSavedMicroUsd ?? 0, currency: store.currency, rateString: store.usdToCnyRate)
+                    value: TokenVaneFormatters.formatCurrency(mo?.monthCacheSavedMicroUsd ?? 0, currency: store.currency, rateString: store.usdToCnyRate)
                 )
             }
             .padding(.horizontal, 16)
@@ -327,10 +327,10 @@ public struct AnalyticsView: View {
                             }
                             Spacer()
                             VStack(alignment: .trailing, spacing: 2) {
-                                Text(TokenTrackerFormatters.formatCurrency(day.costMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))
+                                Text(TokenVaneFormatters.formatCurrency(day.costMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))
                                     .font(.caption.weight(.semibold))
                                     .tabularMetrics()
-                                Text("\(TokenTrackerFormatters.formatCompactTokens(day.totalTokens)) · \(day.requests) req")
+                                Text("\(TokenVaneFormatters.formatCompactTokens(day.totalTokens)) · \(day.requests) req")
                                     .font(.caption2)
                                     .tabularMetrics()
                                     .foregroundStyle(.secondary)
@@ -361,7 +361,7 @@ public struct AnalyticsView: View {
         guard let report else { return [] }
         var out: [FlatTrendPoint] = []
         for s in report.series.prefix(6) {
-            let color = TokenTrackerFormatters.providerColor(s.key)
+            let color = TokenVaneFormatters.providerColor(s.key)
             for p in s.points {
                 out.append(FlatTrendPoint(
                     seriesKey: s.key,

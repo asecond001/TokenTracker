@@ -1,8 +1,8 @@
-# TokenTracker
+# TokenVane
 
 一个用来算清 AI 编程工具到底花了多少 Token、合多少钱、离订阅限流还有多远的桌面端与 iOS 监测工具。
 
-平时同时开着 Claude Code、Codex、Antigravity、Kimi 或 DeepSeek 写代码时，账单和额度往往散落在各个终端和网页后台里。TokenTracker 把它们汇总到一个干净、像 Linear 一样克制的界面里，不搞满屏花哨的圆角卡片，也不碰任何中间人抓包或窃取 Cookie 的灰产手段。
+平时同时开着 Claude Code、Codex、Antigravity、Kimi 或 DeepSeek 写代码时，账单和额度往往散落在各个终端和网页后台里。TokenVane 把它们汇总到一个干净、像 Linear 一样克制的界面里，不搞满屏花哨的圆角卡片，也不碰任何中间人抓包或窃取 Cookie 的灰产手段。
 
 ---
 
@@ -59,13 +59,13 @@ pnpm desktop:build
 pnpm run ios:check:local
 
 # 运行 100 万行 JSONL 冷启动与增量续读压测
-cargo run --release --offline -p tokentracker-collectors --example bench_million_lines
+cargo run --release --offline -p tokvane-collectors --example bench_million_lines
 ```
 
 打包完成后，桌面端产物位于：
-- 可执行文件：`target/release/tokentracker-desktop.exe`
-- MSI 安装包：`target/release/bundle/msi/TokenTracker_0.2.3_x64_en-US.msi`
-- NSIS 安装包：`target/release/bundle/nsis/TokenTracker_0.2.3_x64-setup.exe`
+- 可执行文件：`target/release/tokvane-desktop.exe`
+- MSI 安装包：`target/release/bundle/msi/TokenVane_0.2.3_x64_en-US.msi`
+- NSIS 安装包：`target/release/bundle/nsis/TokenVane_0.2.3_x64-setup.exe`
 
 ---
 

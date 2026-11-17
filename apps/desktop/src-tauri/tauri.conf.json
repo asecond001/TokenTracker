@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "TokenTracker",
+  "productName": "TokenVane",
   "version": "0.3.1",
-  "identifier": "com.tokentracker.desktop",
+  "identifier": "com.tokenvane.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "TokenTracker",
+        "title": "TokenVane",
         "width": 1320,
         "height": 840,
         "minWidth": 1080,
@@ -48,7 +48,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJGQTRDMDZFNDgxNjA0MzcKUldRM0JCWklic0NrdjR3NUNkcUM5ajVWdlFYVVphQkFna3NUS0RWTFpvZ0RlMlhPeGFZRUtDWFEK",
       "endpoints": [
-        "https://github.com/asecond001/TokenTracker/releases/latest/download/latest.json"
+        "https://github.com/asecond001/TokenVane/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

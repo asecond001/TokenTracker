@@ -36,7 +36,7 @@ public struct DashboardTimelineProvider: TimelineProvider {
 }
 
 public struct OverviewHomeWidget: Widget {
-    public let kind: String = "com.tokentracker.app.overview-home"
+    public let kind: String = "com.asecond.tokenvane.overview-home"
 
     public init() {}
 
@@ -45,7 +45,7 @@ public struct OverviewHomeWidget: Widget {
             OverviewHomeWidgetEntryView(entry: entry)
                 .containerBackground(.background, for: .widget)
         }
-        .configurationDisplayName("TokenTracker 今日总览")
+        .configurationDisplayName("TokenVane 今日总览")
         .description("实时查看今日 AI 花费、Provider 分布与核心订阅滚动窗口配额。")
         .supportedFamilies([.systemSmall, .systemMedium])
     }
@@ -66,8 +66,8 @@ private struct OverviewHomeWidgetEntryView: View {
 
     private var smallView: some View {
         let snap = entry.snapshot
-        let cost = TokenTrackerFormatters.formatCurrency(snap.todayCostMicroUsd, currency: snap.currency, rateString: snap.usdToCnyRate)
-        let tokens = TokenTrackerFormatters.formatCompactTokens(snap.todayTokens)
+        let cost = TokenVaneFormatters.formatCurrency(snap.todayCostMicroUsd, currency: snap.currency, rateString: snap.usdToCnyRate)
+        let tokens = TokenVaneFormatters.formatCompactTokens(snap.todayTokens)
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -101,17 +101,17 @@ private struct OverviewHomeWidgetEntryView: View {
             if let quota = snap.primaryQuotas.first {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
-                        Text("\(TokenTrackerFormatters.providerShortCode(quota.providerId)) \(quota.windowLabel)")
+                        Text("\(TokenVaneFormatters.providerShortCode(quota.providerId)) \(quota.windowLabel)")
                             .font(.caption2.weight(.medium))
                             .lineLimit(1)
                         Spacer()
-                        Text(TokenTrackerFormatters.formatPercent(quota.usedPercent, decimals: 0))
+                        Text(TokenVaneFormatters.formatPercent(quota.usedPercent, decimals: 0))
                             .font(.caption2.weight(.semibold))
                             .monospacedDigit()
-                            .foregroundStyle(TokenTrackerFormatters.quotaSeverityColor(usedPercent: quota.usedPercent))
+                            .foregroundStyle(TokenVaneFormatters.quotaSeverityColor(usedPercent: quota.usedPercent))
                     }
                     widgetBar(percent: quota.usedPercent)
-                    Text(TokenTrackerFormatters.formatCountdown(untilMs: quota.resetsAtMs, now: entry.date))
+                    Text(TokenVaneFormatters.formatCountdown(untilMs: quota.resetsAtMs, now: entry.date))
                         .font(.system(size: 10))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
@@ -126,7 +126,7 @@ private struct OverviewHomeWidgetEntryView: View {
 
     private var mediumView: some View {
         let snap = entry.snapshot
-        let cost = TokenTrackerFormatters.formatCurrency(snap.todayCostMicroUsd, currency: snap.currency, rateString: snap.usdToCnyRate)
+        let cost = TokenVaneFormatters.formatCurrency(snap.todayCostMicroUsd, currency: snap.currency, rateString: snap.usdToCnyRate)
 
         return HStack(spacing: 12) {
             // Left column: Cost + Top 3 Providers
@@ -136,7 +136,7 @@ private struct OverviewHomeWidgetEntryView: View {
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text(TokenTrackerFormatters.formatTps(snap.latestOutputTps))
+                    Text(TokenVaneFormatters.formatTps(snap.latestOutputTps))
                         .font(.caption2)
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
@@ -146,7 +146,7 @@ private struct OverviewHomeWidgetEntryView: View {
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
-                Text("\(TokenTrackerFormatters.formatCompactTokens(snap.todayTokens)) tok")
+                Text("\(TokenVaneFormatters.formatCompactTokens(snap.todayTokens)) tok")
                     .font(.caption2)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -156,13 +156,13 @@ private struct OverviewHomeWidgetEntryView: View {
                 ForEach(snap.topProviders.prefix(3)) { item in
                     HStack(spacing: 4) {
                         Circle()
-                            .fill(TokenTrackerFormatters.providerColor(item.providerId))
+                            .fill(TokenVaneFormatters.providerColor(item.providerId))
                             .frame(width: 6, height: 6)
                         Text(item.displayName)
                             .font(.system(size: 10))
                             .lineLimit(1)
                         Spacer()
-                        Text(TokenTrackerFormatters.formatPercent(item.sharePercent, decimals: 0))
+                        Text(TokenVaneFormatters.formatPercent(item.sharePercent, decimals: 0))
                             .font(.system(size: 10))
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
@@ -199,21 +199,21 @@ private struct OverviewHomeWidgetEntryView: View {
                     ForEach(snap.primaryQuotas.prefix(3)) { quota in
                         VStack(alignment: .leading, spacing: 2) {
                             HStack {
-                                Text("\(TokenTrackerFormatters.providerShortCode(quota.providerId))·\(quota.windowLabel)")
+                                Text("\(TokenVaneFormatters.providerShortCode(quota.providerId))·\(quota.windowLabel)")
                                     .font(.system(size: 11, weight: .medium))
                                     .lineLimit(1)
                                 Spacer()
-                                Text(TokenTrackerFormatters.formatPercent(quota.usedPercent, decimals: 0))
+                                Text(TokenVaneFormatters.formatPercent(quota.usedPercent, decimals: 0))
                                     .font(.system(size: 11, weight: .semibold))
                                     .monospacedDigit()
-                                    .foregroundStyle(TokenTrackerFormatters.quotaSeverityColor(usedPercent: quota.usedPercent))
+                                    .foregroundStyle(TokenVaneFormatters.quotaSeverityColor(usedPercent: quota.usedPercent))
                             }
                             widgetBar(percent: quota.usedPercent)
                         }
                     }
                 }
                 Spacer(minLength: 0)
-                Text("同步 · \(TokenTrackerFormatters.formatRelativeSync(atMs: snap.lastSyncAtMs, now: entry.date))")
+                Text("同步 · \(TokenVaneFormatters.formatRelativeSync(atMs: snap.lastSyncAtMs, now: entry.date))")
                     .font(.system(size: 9.5))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -232,7 +232,7 @@ private struct OverviewHomeWidgetEntryView: View {
                     ForEach(shares.prefix(4)) { share in
                         let w = max(3, geo.size.width * max(0, share.sharePercent / 100.0))
                         Rectangle()
-                            .fill(TokenTrackerFormatters.providerColor(share.providerId))
+                            .fill(TokenVaneFormatters.providerColor(share.providerId))
                             .frame(width: w)
                     }
                 }
@@ -249,7 +249,7 @@ private struct OverviewHomeWidgetEntryView: View {
                 RoundedRectangle(cornerRadius: 1.5, style: .continuous)
                     .fill(Color.primary.opacity(0.12))
                 RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .fill(TokenTrackerFormatters.quotaSeverityColor(usedPercent: percent))
+                    .fill(TokenVaneFormatters.quotaSeverityColor(usedPercent: percent))
                     .frame(width: max(ratio > 0 ? 3 : 0, geo.size.width * ratio))
             }
         }

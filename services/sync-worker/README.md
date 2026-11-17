@@ -1,4 +1,4 @@
-# TokenTracker Sync Worker
+# TokenVane Sync Worker
 
 基于 Cloudflare Workers 和 SQLite Durable Objects (`SyncHubDO`) 的轻量多端同步服务，无需额外购买或配置外部数据库。
 
@@ -27,4 +27,4 @@
    ```bash
    curl https://<你的-worker-子域名>.workers.dev/healthz
    ```
-6. 打开 TokenTracker 桌面端 **偏好设置 -> 云端多端同步**，填入 Worker 地址和 `SYNC_TOKEN`。如需端到端加密，勾选 **E2EE** 并在各设备间使用相同的加密口令。
+6. 打开 TokenVane 桌面端 **偏好设置 -> 云端多端同步**，填入 Worker 地址和 `SYNC_TOKEN`。如需端到端加密，勾选 **E2EE** 并在各设备间使用相同的加密口令。

@@ -10,8 +10,8 @@ export interface FloatingWindowConfig {
   compact: boolean;
 }
 
-const STORAGE_KEY = 'tokentracker.floating_config.v1';
-const CUSTOM_EVENT_NAME = 'tokentracker:floating-config-changed';
+const STORAGE_KEY = 'tokenvane.floating_config.v1';
+const CUSTOM_EVENT_NAME = 'tokenvane:floating-config-changed';
 
 export const DEFAULT_FLOATING_CONFIG: FloatingWindowConfig = {
   showTokens: true,

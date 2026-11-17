@@ -389,7 +389,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
             style={{ backgroundColor: 'var(--accent-emerald)' }}
           />
           <span className="text-[11.5px] font-semibold tracking-tight truncate">
-            TokenTracker
+            TokenVane
           </span>
         </div>
         <div className="flex items-center gap-0.5 shrink-0">

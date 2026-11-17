@@ -51,7 +51,7 @@ jobs:
         with:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
-          releaseName: 'TokenTracker ${{ github.ref_name }}'
-          releaseBody: 'TokenTracker desktop release with signed Windows installers and latest.json updater manifest.'
+          releaseName: 'TokenVane ${{ github.ref_name }}'
+          releaseBody: 'TokenVane desktop release with signed Windows installers and latest.json updater manifest.'
           releaseDraft: false
           prerelease: false

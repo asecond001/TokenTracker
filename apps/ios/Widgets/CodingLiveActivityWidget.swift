@@ -12,7 +12,7 @@ public struct CodingLiveActivityWidget: Widget {
                 .activityBackgroundTint(Color(red: 0.06, green: 0.07, blue: 0.09))
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
-            let severityColor = TokenTrackerFormatters.quotaSeverityColor(usedPercent: context.state.usedPercent)
+            let severityColor = TokenVaneFormatters.quotaSeverityColor(usedPercent: context.state.usedPercent)
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -27,7 +27,7 @@ public struct CodingLiveActivityWidget: Widget {
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text(TokenTrackerFormatters.formatPercent(context.state.usedPercent, decimals: 1))
+                        Text(TokenVaneFormatters.formatPercent(context.state.usedPercent, decimals: 1))
                             .font(.headline.weight(.bold))
                             .monospacedDigit()
                             .foregroundStyle(severityColor)
@@ -52,7 +52,7 @@ public struct CodingLiveActivityWidget: Widget {
                                 .font(.caption2.weight(.medium))
                                 .monospacedDigit()
                             Spacer()
-                            Text(TokenTrackerFormatters.formatTps(context.state.latestTps))
+                            Text(TokenVaneFormatters.formatTps(context.state.latestTps))
                                 .font(.caption2)
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
@@ -60,9 +60,9 @@ public struct CodingLiveActivityWidget: Widget {
                     }
                 }
             } compactLeading: {
-                Text("\(TokenTrackerFormatters.providerShortCode(context.attributes.providerId)) \(context.attributes.windowId)")
+                Text("\(TokenVaneFormatters.providerShortCode(context.attributes.providerId)) \(context.attributes.windowId)")
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(TokenTrackerFormatters.providerColor(context.attributes.providerId))
+                    .foregroundStyle(TokenVaneFormatters.providerColor(context.attributes.providerId))
             } compactTrailing: {
                 Text("\(Int(context.state.usedPercent.rounded()))%")
                     .font(.caption2.weight(.bold))
@@ -71,7 +71,7 @@ public struct CodingLiveActivityWidget: Widget {
             } minimal: {
                 let pct = min(100.0, max(0.0, context.state.usedPercent))
                 Gauge(value: pct, in: 0...100) {
-                    Text(TokenTrackerFormatters.providerShortCode(context.attributes.providerId))
+                    Text(TokenVaneFormatters.providerShortCode(context.attributes.providerId))
                 }
                 .gaugeStyle(.accessoryCircularCapacity)
                 .tint(severityColor)
@@ -80,7 +80,7 @@ public struct CodingLiveActivityWidget: Widget {
     }
 
     private func lockScreenBanner(context: ActivityViewContext<CodingSessionAttributes>) -> some View {
-        let severityColor = TokenTrackerFormatters.quotaSeverityColor(usedPercent: context.state.usedPercent)
+        let severityColor = TokenVaneFormatters.quotaSeverityColor(usedPercent: context.state.usedPercent)
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -93,7 +93,7 @@ public struct CodingLiveActivityWidget: Widget {
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text(TokenTrackerFormatters.formatPercent(context.state.usedPercent, decimals: 1))
+                    Text(TokenVaneFormatters.formatPercent(context.state.usedPercent, decimals: 1))
                         .font(.title3.weight(.bold))
                         .monospacedDigit()
                         .foregroundStyle(severityColor)
@@ -118,7 +118,7 @@ public struct CodingLiveActivityWidget: Widget {
                     .monospacedDigit()
                     .foregroundStyle(.white.opacity(0.85))
                 Spacer()
-                Text("速率 \(TokenTrackerFormatters.formatTps(context.state.latestTps))")
+                Text("速率 \(TokenVaneFormatters.formatTps(context.state.latestTps))")
                     .font(.caption2)
                     .monospacedDigit()
                     .foregroundStyle(.white.opacity(0.75))

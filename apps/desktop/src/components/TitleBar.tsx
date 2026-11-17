@@ -252,7 +252,7 @@ export function TitleBar({
           className="text-[12.5px] font-semibold tracking-tight"
           style={{ color: 'var(--text-primary)' }}
         >
-          TokenTracker
+          TokenVane
         </span>
         <span style={{ color: 'var(--text-muted)' }}>/</span>
         <span className="text-[12.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>

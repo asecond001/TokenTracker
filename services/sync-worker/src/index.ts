@@ -47,7 +47,7 @@ export async function handleWorkerFetch(
     return jsonResponse(
       {
         ok: true,
-        service: 'tokentracker-sync-worker',
+        service: 'tokenvane-sync-worker',
         protocol_version: 1,
       },
       200

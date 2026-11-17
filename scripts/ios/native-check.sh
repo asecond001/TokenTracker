@@ -68,12 +68,12 @@ fi
 echo "[native-check] Selected Simulator UDID: $SIM_UDID"
 xcrun simctl boot "$SIM_UDID" >/dev/null 2>&1 || true
 
-RESULT_BUNDLE="$ARTIFACTS_DIR/TokenTrackerTests.xcresult"
+RESULT_BUNDLE="$ARTIFACTS_DIR/TokenVaneTests.xcresult"
 rm -rf "$RESULT_BUNDLE"
 
 xcodebuild test \
-  -project "$ROOT_DIR/apps/ios/TokenTracker.xcodeproj" \
-  -scheme TokenTracker \
+  -project "$ROOT_DIR/apps/ios/TokenVane.xcodeproj" \
+  -scheme TokenVane \
   -destination "platform=iOS Simulator,id=$SIM_UDID" \
   -derivedDataPath "$ARTIFACTS_DIR/DerivedData" \
   -resultBundlePath "$RESULT_BUNDLE" \

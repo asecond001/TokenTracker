@@ -120,7 +120,7 @@ public struct SettingsView: View {
                 Text("Worker URL")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                TextField("https://tokentracker-sync.workers.dev", text: $workerURL)
+                TextField("https://tokenvane-sync.workers.dev", text: $workerURL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
@@ -201,7 +201,7 @@ public struct SettingsView: View {
 
             diagnosticRow(title: "Pull 水位线", value: "\(cfg?.lastPullWatermarkMs ?? 0)")
             diagnosticRow(title: "已同步终端", value: "\(syncedCount) 台")
-            diagnosticRow(title: "最近同步时间", value: TokenTrackerFormatters.formatRelativeSync(atMs: cfg?.lastSyncAtMs))
+            diagnosticRow(title: "最近同步时间", value: TokenVaneFormatters.formatRelativeSync(atMs: cfg?.lastSyncAtMs))
 
             if let err = store.lastErrorMessage ?? cfg?.lastSyncError {
                 Text(err)

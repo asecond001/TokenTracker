@@ -719,7 +719,7 @@ public struct DesktopPairingPayload: Codable, Equatable, Sendable {
     public static func parse(_ raw: String) throws -> DesktopPairingPayload {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let decoded: DesktopPairingPayload
-        if trimmed.lowercased().hasPrefix("tokentracker://") {
+        if trimmed.lowercased().hasPrefix("tokenvane://") || trimmed.lowercased().hasPrefix("tokentracker://") {
             guard let components = URLComponents(string: trimmed),
                   (components.host?.lowercased() == "pair" || components.path.lowercased().contains("pair")),
                   let items = components.queryItems else {

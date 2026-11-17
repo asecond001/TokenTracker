@@ -1,0 +1,25 @@
+[package]
+name = "tokvane-collectors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Desktop-only compliant log tailers, OS keyring credentials, local loopback OTLP receiver, and official provider API clients."
+
+[dependencies]
+axum.workspace = true
+chrono.workspace = true
+hex.workspace = true
+keyring.workspace = true
+notify.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokvane-core = { path = "../tokvane-core" }
+tokio.workspace = true
+tracing.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

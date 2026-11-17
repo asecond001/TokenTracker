@@ -91,15 +91,15 @@ jobs:
       - task: Cache@2
         displayName: Cache native simulator XCFramework
         inputs:
-          key: 'rust-ios-xcf-v1 | "native" | "$(Agent.OS)" | Cargo.lock | crates/tokentracker-core/** | crates/tokentracker-ffi/** | scripts/ios/build-xcframework.sh'
+          key: 'rust-ios-xcf-v1 | "native" | "$(Agent.OS)" | Cargo.lock | crates/tokvane-core/** | crates/tokvane-ffi/** | scripts/ios/build-xcframework.sh'
           path: $(XCFRAMEWORK_CACHE_DIR)
         continueOnError: true
       - bash: |
           set -euo pipefail
-          if [[ ! -d "apps/ios/CoreFFI/Artifacts/TokenTrackerCoreFFI.xcframework" ]]; then
+          if [[ ! -d "apps/ios/CoreFFI/Artifacts/TokenVaneCoreFFI.xcframework" ]]; then
             bash scripts/ios/build-xcframework.sh --mode native
           else
-            echo "Reusing cached native TokenTrackerCoreFFI.xcframework"
+            echo "Reusing cached native TokenVaneCoreFFI.xcframework"
           fi
         displayName: Build Simulator XCFramework on cache miss
       - bash: bash scripts/ios/native-check.sh

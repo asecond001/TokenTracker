@@ -4,8 +4,8 @@
   "strings": {
     "app.name": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "TokenTracker" } },
-        "zh-Hans": { "stringUnit": { "state": "translated", "value": "TokenTracker" } }
+        "en": { "stringUnit": { "state": "translated", "value": "TokenVane" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "TokenVane" } }
       }
     },
     "tab.overview": {
@@ -124,8 +124,8 @@
     },
     "widget.overview.title": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "TokenTracker Overview" } },
-        "zh-Hans": { "stringUnit": { "state": "translated", "value": "TokenTracker 今日总览" } }
+        "en": { "stringUnit": { "state": "translated", "value": "TokenVane Overview" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "TokenVane 今日总览" } }
       }
     },
     "widget.lockscreen.title": {
