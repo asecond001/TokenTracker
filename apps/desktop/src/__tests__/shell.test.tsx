@@ -344,6 +344,7 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
       rows: [],
       total_cost_micro_usd: 0,
       total_cache_saved_micro_usd: 0,
+      subscription_allocations: [],
       catalog: [],
     });
     vi.spyOn(ipc, 'getSubscriptions').mockResolvedValue([]);
@@ -524,6 +525,7 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
       rows: [],
       total_cost_micro_usd: 0,
       total_cache_saved_micro_usd: 0,
+      subscription_allocations: [],
       catalog: [
         {
           model_pattern: 'claude-sonnet-4-5',

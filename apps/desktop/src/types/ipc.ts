@@ -317,6 +317,17 @@ export interface ModelStatRow {
   cost_share_ratio: number;
   avg_output_tps: number;
   effective_pricing: ModelPricingEntry | null;
+  /** API list-price cost with prompt caching ignored (all prompt tokens at the input rate). */
+  list_cost_micro_usd: number;
+  /** Prorated subscription fee allocated by API-equivalent cost within the provider. */
+  subscription_cost_micro_usd: number | null;
+}
+
+export interface ProviderSubscriptionAllocation {
+  provider_id: string;
+  plan_names: string[];
+  monthly_fee_micro_usd: number;
+  period_fee_micro_usd: number;
 }
 
 export interface ModelStatsReport {
@@ -324,6 +335,7 @@ export interface ModelStatsReport {
   total_cost_micro_usd: number;
   total_cache_saved_micro_usd: number;
   catalog: ModelPricingEntry[];
+  subscription_allocations: ProviderSubscriptionAllocation[];
 }
 
 export interface SubscriptionWindowRule {

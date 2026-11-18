@@ -456,6 +456,7 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
         total_cost_micro_usd: 0,
         total_cache_saved_micro_usd: 0,
         catalog: [],
+        subscription_allocations: [],
       } as T;
     case 'get_subscriptions':
     case 'get_provider_configs':

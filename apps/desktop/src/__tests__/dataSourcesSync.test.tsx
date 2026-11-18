@@ -753,10 +753,13 @@ describe('v0.3.0 Analytics Differentiation, Sync Pairing QR, TZ & UX Fixes', () 
           cost_share_ratio: 1,
           avg_output_tps: 76.5,
           effective_pricing: null,
+          list_cost_micro_usd: 9_000_000,
+          subscription_cost_micro_usd: null,
         },
       ],
       total_cost_micro_usd: 6_000_000,
       total_cache_saved_micro_usd: 3_500_000,
+      subscription_allocations: [],
       catalog: [
         {
           model_pattern: 'claude-opus-4-6',

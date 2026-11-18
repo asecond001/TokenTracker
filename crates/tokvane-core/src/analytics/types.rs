@@ -274,6 +274,25 @@ pub struct ModelStatRow {
     pub cost_share_ratio: f64,
     pub avg_output_tps: f64,
     pub effective_pricing: Option<ModelPricingEntry>,
+    /// API list-price cost with prompt caching ignored: every prompt token
+    /// (uncached input, cache reads and cache writes) billed at the input rate.
+    /// `0` when no pricing rule matches.
+    #[serde(default)]
+    pub list_cost_micro_usd: i64,
+    /// Share of the provider's subscription fee (prorated to the range, capped
+    /// at now) allocated by API-equivalent cost within that provider.
+    /// `None` when the provider has no paid subscription plan configured.
+    #[serde(default)]
+    pub subscription_cost_micro_usd: Option<i64>,
+}
+
+/// Paid subscription fee for one provider, prorated to the model-stats range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderSubscriptionAllocation {
+    pub provider_id: String,
+    pub plan_names: Vec<String>,
+    pub monthly_fee_micro_usd: i64,
+    pub period_fee_micro_usd: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -282,6 +301,8 @@ pub struct ModelStatsReport {
     pub total_cost_micro_usd: i64,
     pub total_cache_saved_micro_usd: i64,
     pub catalog: Vec<ModelPricingEntry>,
+    #[serde(default)]
+    pub subscription_allocations: Vec<ProviderSubscriptionAllocation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

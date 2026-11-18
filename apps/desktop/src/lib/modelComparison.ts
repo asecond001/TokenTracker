@@ -16,6 +16,10 @@ export interface ModelComparisonRow {
   cache_saved_micro_usd: number;
   /** Blended API-equivalent cost per 1M tokens, in micro-USD. `null` without tokens. */
   cost_per_m_micro_usd: number | null;
+  /** API list-price cost with prompt caching ignored (all prompt tokens at the input rate). */
+  list_cost_micro_usd: number;
+  /** Prorated subscription fee allocated to this model; `null` without a paid plan. */
+  subscription_cost_micro_usd: number | null;
   /** List price per 1M output tokens from the effective pricing entry. */
   output_price_per_m_micro_usd: number | null;
   cache_hit_ratio: number | null;
@@ -47,8 +51,15 @@ function costPerMillion(costMicro: number, tokens: number): number | null {
   return tokens > 0 ? (costMicro / tokens) * 1_000_000 : null;
 }
 
-function cacheHitRatio(row: Pick<ModelStatRow, 'input_tokens' | 'cache_read_tokens'>): number | null {
-  const denom = row.input_tokens + row.cache_read_tokens;
+/**
+ * Share of prompt tokens served from cache. Cache writes count as prompt tokens:
+ * Anthropic reports `input_tokens` as the uncached remainder only, so leaving
+ * `cache_creation_input_tokens` out pins Claude Code at ~100%.
+ */
+function cacheHitRatio(
+  row: Pick<ModelStatRow, 'input_tokens' | 'cache_read_tokens' | 'cache_write_tokens'>
+): number | null {
+  const denom = row.input_tokens + row.cache_read_tokens + row.cache_write_tokens;
   return denom > 0 ? row.cache_read_tokens / denom : null;
 }
 
@@ -78,6 +89,8 @@ export function buildModelComparison(
       cost_micro_usd: m.estimated_cost_micro_usd,
       cache_saved_micro_usd: m.cache_saved_micro_usd,
       cost_per_m_micro_usd: costPerMillion(m.estimated_cost_micro_usd, m.total_tokens),
+      list_cost_micro_usd: m.list_cost_micro_usd,
+      subscription_cost_micro_usd: m.subscription_cost_micro_usd,
       output_price_per_m_micro_usd: positiveOrNull(m.effective_pricing?.output_per_m_micro_usd),
       cache_hit_ratio: cacheHitRatio(m),
       mean_tps: positiveOrNull(s?.mean_tps ?? m.avg_output_tps),
@@ -101,6 +114,8 @@ export function buildModelComparison(
       cost_micro_usd: 0,
       cache_saved_micro_usd: 0,
       cost_per_m_micro_usd: null,
+      list_cost_micro_usd: 0,
+      subscription_cost_micro_usd: null,
       output_price_per_m_micro_usd: null,
       cache_hit_ratio: null,
       mean_tps: positiveOrNull(s.mean_tps),
@@ -123,11 +138,19 @@ export function buildProviderComparison(
 ): ProviderComparisonRow[] {
   const speedByProvider = new Map((speed?.providers ?? []).map((p) => [p.provider_id, p] as const));
   const totalCost = rows.reduce((acc, r) => acc + r.cost_micro_usd, 0);
-  const cacheByProvider = new Map<string, { input: number; cacheRead: number }>();
+  const cacheByProvider = new Map<
+    string,
+    { input_tokens: number; cache_read_tokens: number; cache_write_tokens: number }
+  >();
   for (const m of models?.rows ?? []) {
-    const e = cacheByProvider.get(m.provider_id) ?? { input: 0, cacheRead: 0 };
-    e.input += m.input_tokens;
-    e.cacheRead += m.cache_read_tokens;
+    const e = cacheByProvider.get(m.provider_id) ?? {
+      input_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    };
+    e.input_tokens += m.input_tokens;
+    e.cache_read_tokens += m.cache_read_tokens;
+    e.cache_write_tokens += m.cache_write_tokens;
     cacheByProvider.set(m.provider_id, e);
   }
 
@@ -161,7 +184,7 @@ export function buildProviderComparison(
     const c = cacheByProvider.get(g.provider_id);
     g.cost_share = totalCost > 0 ? g.cost_micro_usd / totalCost : 0;
     g.cost_per_m_micro_usd = costPerMillion(g.cost_micro_usd, g.total_tokens);
-    g.cache_hit_ratio = c && c.input + c.cacheRead > 0 ? c.cacheRead / (c.input + c.cacheRead) : null;
+    g.cache_hit_ratio = c ? cacheHitRatio(c) : null;
     g.mean_tps = positiveOrNull(s?.mean_tps);
     g.p95_tps = positiveOrNull(s?.p95_tps);
     g.avg_ttft_ms = positiveOrNull(s?.avg_ttft_ms);
@@ -195,4 +218,81 @@ export function sortComparisonRows<T extends Record<ComparisonSortKey, number | 
     if (bv === null) return -1;
     return desc ? bv - av : av - bv;
   });
+}
+
+/** Price basis for the price × speed chart. */
+export type PriceBasis = 'list' | 'actual' | 'subscription';
+
+export const PRICE_BASIS_OPTIONS: Array<{ id: PriceBasis; label: string }> = [
+  { id: 'list', label: 'API 标价' },
+  { id: 'actual', label: 'API 实付' },
+  { id: 'subscription', label: '订阅摊销' },
+];
+
+/** Minimum speed samples before a model takes part in the frontier. */
+export const MIN_FRONTIER_SPEED_SAMPLES = 20;
+
+export interface BasisPrice {
+  /** Cost per 1M tokens in micro-USD under the requested basis. */
+  per_m_micro_usd: number;
+  /** Basis actually used (subscription falls back to `actual` without a paid plan). */
+  basis: PriceBasis;
+}
+
+/** Cost per 1M tokens under `basis`; `null` when the row has no tokens or no price. */
+export function priceForBasis(row: ModelComparisonRow, basis: PriceBasis): BasisPrice | null {
+  if (row.total_tokens <= 0) return null;
+  let cost: number;
+  let used: PriceBasis = basis;
+  if (basis === 'list') {
+    cost = row.list_cost_micro_usd;
+  } else if (basis === 'subscription' && row.subscription_cost_micro_usd !== null) {
+    cost = row.subscription_cost_micro_usd;
+  } else {
+    cost = row.cost_micro_usd;
+    used = 'actual';
+  }
+  if (!(cost > 0)) return null;
+  return { per_m_micro_usd: (cost / row.total_tokens) * 1_000_000, basis: used };
+}
+
+export interface FrontierPoint {
+  key: string;
+  price: number;
+  tps: number;
+}
+
+export interface FrontierResult {
+  /** Keys on the Pareto frontier, cheapest first. */
+  frontier: string[];
+  /** Dominated key → the frontier key that beats it on both price and speed. */
+  dominatedBy: Map<string, string>;
+}
+
+/**
+ * Pareto frontier for "cheaper is better, faster is better": a point is
+ * dominated when another is no more expensive and no slower, and strictly
+ * better on at least one axis.
+ */
+export function computeParetoFrontier(points: FrontierPoint[]): FrontierResult {
+  const sorted = [...points].sort((a, b) => a.price - b.price || b.tps - a.tps);
+  const frontier: FrontierPoint[] = [];
+  let bestTps = -Infinity;
+  for (const p of sorted) {
+    const last = frontier[frontier.length - 1];
+    const tiesLast = last !== undefined && last.price === p.price && last.tps === p.tps;
+    if (p.tps > bestTps || tiesLast) {
+      frontier.push(p);
+      bestTps = p.tps;
+    }
+  }
+  const frontierKeys = new Set(frontier.map((p) => p.key));
+  const dominatedBy = new Map<string, string>();
+  for (const p of points) {
+    if (frontierKeys.has(p.key)) continue;
+    // Cheapest frontier point that is at least as cheap and at least as fast.
+    const by = frontier.find((f) => f.price <= p.price && f.tps >= p.tps);
+    if (by) dominatedBy.set(p.key, by.key);
+  }
+  return { frontier: frontier.map((p) => p.key), dominatedBy };
 }

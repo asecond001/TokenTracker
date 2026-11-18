@@ -1,5 +1,6 @@
 //! Per-model token, cost and efficiency breakdown.
 
+use super::monthly::prorate_monthly_fee;
 use super::*;
 
 impl Storage {
@@ -67,6 +68,19 @@ impl Storage {
                 };
                 let effective_pricing =
                     resolve_pricing(&catalog, &provider_id, &model_id).cloned();
+                let list_cost_micro_usd = effective_pricing
+                    .as_ref()
+                    .map(|rule| {
+                        list_price_cost(
+                            rule,
+                            input_tokens,
+                            output_tokens,
+                            cache_read_tokens,
+                            cache_write_tokens,
+                            reasoning_tokens,
+                        )
+                    })
+                    .unwrap_or(0);
 
                 Ok(ModelStatRow {
                     model_id,
@@ -84,6 +98,8 @@ impl Storage {
                     cost_share_ratio: 0.0,
                     avg_output_tps,
                     effective_pricing,
+                    list_cost_micro_usd,
+                    subscription_cost_micro_usd: None,
                 })
             })?;
 
@@ -101,12 +117,117 @@ impl Storage {
                 }
             }
 
+            // Subscription amortization: same plan selection as the monthly ROI
+            // (enabled, user-configured, paid), prorated to the range up to now.
+            let fee_end_ms = eff_end_ms.min(Utc::now().timestamp_millis());
+            let plans = load_subscription_plans(conn)?;
+            let subscription_allocations =
+                build_subscription_allocations(&plans, &raw_rows, eff_start_ms, fee_end_ms);
+            allocate_subscription_costs(&mut raw_rows, &subscription_allocations);
+
             Ok(ModelStatsReport {
                 rows: raw_rows,
                 total_cost_micro_usd: total_cost,
                 total_cache_saved_micro_usd: total_saved,
                 catalog,
+                subscription_allocations,
             })
         })
+    }
+}
+
+/// Cost at API list price with prompt caching ignored: all prompt tokens at the input rate.
+pub(crate) fn list_price_cost(
+    rule: &ModelPricingEntry,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+    reasoning_tokens: i64,
+) -> i64 {
+    let prompt = input_tokens.max(0) as i128
+        + cache_read_tokens.max(0) as i128
+        + cache_write_tokens.max(0) as i128;
+    let micro = prompt * rule.input_per_m_micro_usd.max(0) as i128
+        + output_tokens.max(0) as i128 * rule.output_per_m_micro_usd.max(0) as i128
+        + reasoning_tokens.max(0) as i128 * rule.reasoning_per_m_micro_usd.max(0) as i128;
+    // Round half away from zero to whole micro-USD, matching `compute_event_cost`.
+    let rounded = (micro + 500_000) / 1_000_000;
+    i64::try_from(rounded).unwrap_or(i64::MAX)
+}
+
+fn build_subscription_allocations(
+    plans: &[SubscriptionPlan],
+    rows: &[ModelStatRow],
+    start_ms: i64,
+    end_ms: i64,
+) -> Vec<ProviderSubscriptionAllocation> {
+    let providers: BTreeSet<&str> = rows.iter().map(|r| r.provider_id.as_str()).collect();
+    let mut out = Vec::new();
+    for provider_id in providers {
+        let paid: Vec<&SubscriptionPlan> = plans
+            .iter()
+            .filter(|p| {
+                p.enabled
+                    && p.is_user_configured
+                    && p.monthly_fee_micro_usd > 0
+                    && p.provider_id.eq_ignore_ascii_case(provider_id)
+            })
+            .collect();
+        if paid.is_empty() {
+            continue;
+        }
+        let monthly_fee_micro_usd: i64 = paid.iter().map(|p| p.monthly_fee_micro_usd).sum();
+        out.push(ProviderSubscriptionAllocation {
+            provider_id: provider_id.to_string(),
+            plan_names: paid.iter().map(|p| p.plan_name.clone()).collect(),
+            monthly_fee_micro_usd,
+            period_fee_micro_usd: prorate_monthly_fee(monthly_fee_micro_usd, start_ms, end_ms),
+        });
+    }
+    out
+}
+
+/// Splits each provider's period fee across its models by API-equivalent cost
+/// (token share when the provider has no priced usage). Rounding remainders go
+/// to the largest row so the shares always sum to the period fee.
+fn allocate_subscription_costs(
+    rows: &mut [ModelStatRow],
+    allocations: &[ProviderSubscriptionAllocation],
+) {
+    for alloc in allocations {
+        let idx: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.provider_id == alloc.provider_id)
+            .map(|(i, _)| i)
+            .collect();
+        let cost_total: i128 = idx.iter().map(|&i| rows[i].estimated_cost_micro_usd.max(0) as i128).sum();
+        let token_total: i128 = idx.iter().map(|&i| rows[i].total_tokens.max(0) as i128).sum();
+        let (weight, total): (fn(&ModelStatRow) -> i128, i128) = if cost_total > 0 {
+            (|r| r.estimated_cost_micro_usd.max(0) as i128, cost_total)
+        } else {
+            (|r| r.total_tokens.max(0) as i128, token_total)
+        };
+        if total <= 0 {
+            continue;
+        }
+        let fee = alloc.period_fee_micro_usd as i128;
+        let mut assigned: i128 = 0;
+        let mut largest: Option<usize> = None;
+        for &i in &idx {
+            let share = fee * weight(&rows[i]) / total;
+            assigned += share;
+            rows[i].subscription_cost_micro_usd = Some(i64::try_from(share).unwrap_or(i64::MAX));
+            if largest.is_none_or(|l| weight(&rows[i]) > weight(&rows[l])) {
+                largest = Some(i);
+            }
+        }
+        if let Some(l) = largest {
+            let remainder = fee - assigned;
+            if let Some(v) = rows[l].subscription_cost_micro_usd.as_mut() {
+                *v = v.saturating_add(i64::try_from(remainder).unwrap_or(0));
+            }
+        }
     }
 }

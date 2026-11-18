@@ -1310,3 +1310,109 @@ fn live_model_speeds_only_include_currently_active_sessions() {
     assert_eq!(live[0].model_id, "m-active");
     assert_eq!(latest, Some(90.0));
 }
+
+#[test]
+fn models_report_includes_list_price_and_subscription_amortization() {
+    let storage = Storage::open_in_memory().expect("db");
+    let base_ts = seed_sample_events(&storage);
+    let dev = storage.local_device().expect("device").device_id;
+    // Second Claude model so the provider fee is split across two rows.
+    storage
+        .ingest_events_with_cursor(
+            &[NormalizedUsageEvent {
+                event_id: compute_event_id("claude_code", "s9", "m9", base_ts + 600_000),
+                device_id: dev,
+                provider_id: "claude_code".to_string(),
+                session_id: "s9".to_string(),
+                project_label: "app".to_string(),
+                model_id: "claude-opus-4-1".to_string(),
+                timestamp_ms: base_ts + 600_000,
+                input_tokens: 10_000,
+                output_tokens: 5_000,
+                cache_read_tokens: 90_000,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                observable_only: false,
+                duration_ms: None,
+                ttft_ms: None,
+                output_tps: None,
+                estimated_cost_micro_usd: 0,
+                cache_saved_micro_usd: 0,
+            }],
+            None,
+            &[],
+        )
+        .expect("ingest");
+    storage
+        .upsert_subscription_plan(&SubscriptionPlan {
+            plan_id: "claude-pro".to_string(),
+            provider_id: "claude_code".to_string(),
+            plan_name: "Claude Pro".to_string(),
+            enabled: true,
+            monthly_fee_micro_usd: 20_000_000,
+            windows: Vec::new(),
+            is_user_configured: true,
+            auto_source: None,
+            updated_at_ms: base_ts,
+        })
+        .expect("plan");
+
+    let filter = AnalyticsFilter {
+        start_ms: base_ts - HOUR_MS,
+        end_ms: base_ts + 4 * HOUR_MS,
+        provider_id: None,
+        device_id: None,
+        tz_offset_minutes: 480,
+        all_time: false,
+    };
+    let report = storage.query_models_pricing(&filter).expect("models");
+
+    // List price bills every prompt token at the input rate, so it is never below actual.
+    for row in &report.rows {
+        let Some(rule) = row.effective_pricing.as_ref() else {
+            assert_eq!(row.list_cost_micro_usd, 0);
+            continue;
+        };
+        let prompt = row.input_tokens + row.cache_read_tokens + row.cache_write_tokens;
+        let expected = (prompt as i128 * rule.input_per_m_micro_usd as i128
+            + row.output_tokens as i128 * rule.output_per_m_micro_usd as i128
+            + row.reasoning_tokens as i128 * rule.reasoning_per_m_micro_usd as i128
+            + 500_000)
+            / 1_000_000;
+        assert_eq!(row.list_cost_micro_usd as i128, expected, "{}", row.model_id);
+        if row.cache_read_tokens > 0 && rule.cache_read_per_m_micro_usd < rule.input_per_m_micro_usd {
+            assert!(row.list_cost_micro_usd > row.estimated_cost_micro_usd, "{}", row.model_id);
+        }
+    }
+
+    // Only claude_code has a paid plan.
+    assert_eq!(report.subscription_allocations.len(), 1);
+    let alloc = &report.subscription_allocations[0];
+    assert_eq!(alloc.provider_id, "claude_code");
+    assert_eq!(alloc.monthly_fee_micro_usd, 20_000_000);
+    assert_eq!(
+        alloc.period_fee_micro_usd,
+        super::monthly::prorate_monthly_fee(20_000_000, filter.start_ms, filter.end_ms)
+    );
+
+    let claude: Vec<&ModelStatRow> =
+        report.rows.iter().filter(|r| r.provider_id == "claude_code").collect();
+    assert_eq!(claude.len(), 2);
+    let allocated: i64 = claude
+        .iter()
+        .map(|r| r.subscription_cost_micro_usd.expect("allocated"))
+        .sum();
+    assert_eq!(allocated, alloc.period_fee_micro_usd);
+    let cost_total: i64 = claude.iter().map(|r| r.estimated_cost_micro_usd).sum();
+    for r in &claude {
+        let expected = alloc.period_fee_micro_usd as f64 * r.estimated_cost_micro_usd as f64
+            / cost_total as f64;
+        let got = r.subscription_cost_micro_usd.expect("allocated") as f64;
+        assert!((got - expected).abs() <= 2.0, "{}: {got} vs {expected}", r.model_id);
+    }
+    assert!(report
+        .rows
+        .iter()
+        .filter(|r| r.provider_id == "codex")
+        .all(|r| r.subscription_cost_micro_usd.is_none()));
+}

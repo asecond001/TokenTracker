@@ -64,6 +64,8 @@ function modelRow(overrides: Partial<ModelStatRow>): ModelStatRow {
     cost_share_ratio: 0.8,
     avg_output_tps: 60,
     effective_pricing: null,
+    list_cost_micro_usd: 20_000_000,
+    subscription_cost_micro_usd: null,
     ...overrides,
   };
 }
@@ -74,6 +76,7 @@ function modelsReport(rows: ModelStatRow[]): ModelStatsReport {
     total_cost_micro_usd: rows.reduce((a, r) => a + r.estimated_cost_micro_usd, 0),
     total_cache_saved_micro_usd: 0,
     catalog: [],
+    subscription_allocations: [],
   };
 }
 

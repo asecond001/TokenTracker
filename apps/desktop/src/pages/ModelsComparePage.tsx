@@ -20,8 +20,13 @@ import { CLOCK_REFRESH_MS } from '../lib/liveRefresh';
 import {
   buildModelComparison,
   buildProviderComparison,
+  computeParetoFrontier,
+  MIN_FRONTIER_SPEED_SAMPLES,
+  PRICE_BASIS_OPTIONS,
+  priceForBasis,
   sortComparisonRows,
   type ComparisonSortKey,
+  type PriceBasis,
 } from '../lib/modelComparison';
 import {
   buildCustomRangeKey,
@@ -102,6 +107,19 @@ export function ModelsComparePage() {
   );
 }
 
+interface ScatterPoint {
+  key: string;
+  model_id: string;
+  provider_id: string;
+  /** Cost per 1M tokens in the display currency. */
+  price: number;
+  tps: number;
+  tokens: number;
+  samples: number;
+  /** Subscription basis requested but the provider has no paid plan, so API 实付 is shown. */
+  fallback: boolean;
+}
+
 function ComparisonView() {
   const {
     timePreset,
@@ -123,6 +141,7 @@ function ComparisonView() {
   const chartTheme = useChartTheme();
   const [sortKey, setSortKey] = useState<ComparisonSortKey>('cost_micro_usd');
   const [sortDesc, setSortDesc] = useState(true);
+  const [priceBasis, setPriceBasis] = useState<PriceBasis>('actual');
 
   const filter = useMemo(
     () => getFilter(),
@@ -173,18 +192,60 @@ function ComparisonView() {
     return { cheapest, fastest, snappiest, top };
   }, [modelRows]);
 
-  const scatterRows = useMemo(
-    () => modelRows.filter((r) => r.cost_per_m_micro_usd !== null && r.mean_tps !== null),
-    [modelRows]
-  );
+  const scatterPoints = useMemo(() => {
+    const points: ScatterPoint[] = [];
+    for (const r of modelRows) {
+      const price = priceForBasis(r, priceBasis);
+      if (!price || r.mean_tps === null) continue;
+      points.push({
+        key: r.key,
+        model_id: r.model_id,
+        provider_id: r.provider_id,
+        price: convertMicroUsd(price.per_m_micro_usd, currency, usdToCnyRate),
+        tps: r.mean_tps,
+        tokens: r.total_tokens,
+        samples: r.speed_samples,
+        fallback: price.basis !== priceBasis,
+      });
+    }
+    return points;
+  }, [modelRows, priceBasis, currency, usdToCnyRate]);
 
   const scatterOption = useMemo<EChartsOption>(() => {
-    const maxTokens = Math.max(1, ...scatterRows.map((r) => r.total_tokens));
-    const byProvider = new Map<string, typeof scatterRows>();
-    for (const r of scatterRows) {
-      byProvider.set(r.provider_id, [...(byProvider.get(r.provider_id) ?? []), r]);
+    const eligible = scatterPoints.filter((p) => p.samples >= MIN_FRONTIER_SPEED_SAMPLES);
+    const { frontier, dominatedBy } = computeParetoFrontier(eligible);
+    const frontierSet = new Set(frontier);
+    const byKey = new Map(scatterPoints.map((p) => [p.key, p] as const));
+    const maxTokens = Math.max(1, ...scatterPoints.map((p) => p.tokens));
+    const byProvider = new Map<string, ScatterPoint[]>();
+    for (const p of scatterPoints) {
+      byProvider.set(p.provider_id, [...(byProvider.get(p.provider_id) ?? []), p]);
     }
     const symbol = currency === 'CNY' ? '¥' : '$';
+    const basisLabel = PRICE_BASIS_OPTIONS.find((o) => o.id === priceBasis)?.label ?? '';
+    const median = (vals: number[]) => {
+      const v = [...vals].sort((a, b) => a - b);
+      if (v.length === 0) return 0;
+      const mid = Math.floor(v.length / 2);
+      return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+    };
+    const prices = eligible.map((p) => p.price);
+    const speeds = eligible.map((p) => p.tps);
+    type AreaCorner = { xAxis: number; yAxis: number };
+    const betterArea: Array<[AreaCorner, AreaCorner]> =
+      eligible.length >= 3
+        ? [
+            [
+              { xAxis: median(prices), yAxis: median(speeds) },
+              { xAxis: Math.min(...prices), yAxis: Math.max(...speeds) },
+            ],
+          ]
+        : [];
+    const frontierLine = frontier
+      .map((k) => byKey.get(k))
+      .filter((p): p is ScatterPoint => p !== undefined)
+      .map((p) => [p.price, p.tps]);
+
     return {
       backgroundColor: 'transparent',
       animationDuration: 280,
@@ -195,22 +256,52 @@ function ComparisonView() {
         borderColor: chartTheme.tooltipBorder,
         textStyle: { color: chartTheme.tooltipText, fontSize: 12 },
         formatter: (params: unknown) => {
-          const p = params as { data?: { name?: string; value?: [number, number, number] } };
-          const v = p.data?.value;
-          if (!v) return '';
-          return `${p.data?.name ?? ''}<br/>每百万 Token ${symbol}${v[0].toFixed(3)}<br/>平均速率 ${v[1].toFixed(1)} tok/s<br/>Token ${formatTokens(v[2])}`;
+          const p = (params as { data?: { point?: ScatterPoint } }).data?.point;
+          if (!p) return '';
+          const priceLine = p.fallback
+            ? `API 实付 ${symbol}${p.price.toFixed(3)} / M`
+            : `${basisLabel} ${symbol}${p.price.toFixed(3)} / M`;
+          let status = '';
+          if (p.samples < MIN_FRONTIER_SPEED_SAMPLES) {
+            status = `速度样本积累中（${p.samples}/${MIN_FRONTIER_SPEED_SAMPLES}）`;
+          } else if (frontierSet.has(p.key)) {
+            status = '性价比前沿';
+          } else {
+            const by = byKey.get(dominatedBy.get(p.key) ?? '');
+            if (by) status = `被 ${by.model_id} 全面超越`;
+          }
+          return [
+            `<b>${p.model_id}</b> · ${providerDisplayName(p.provider_id)}`,
+            priceLine,
+            `平均速率 ${p.tps.toFixed(1)} tok/s · ${p.samples} 样本`,
+            `Token ${formatTokens(p.tokens)}`,
+            status,
+          ]
+            .filter(Boolean)
+            .join('<br/>');
         },
       },
       legend: {
         top: 0,
         right: 0,
+        data: [...byProvider.keys()].map(providerDisplayName),
         textStyle: { color: chartTheme.textSecondary, fontSize: 11 },
         itemWidth: 8,
         itemHeight: 8,
       },
+      graphic: [
+        {
+          type: 'text',
+          right: 24,
+          top: 34,
+          silent: true,
+          style: { text: '更便宜 · 更快 ↗', fill: chartTheme.textMuted, fontSize: 11 },
+        },
+      ],
       grid: { top: 30, right: 20, bottom: 34, left: 56 },
       xAxis: {
-        type: 'value',
+        type: 'log',
+        inverse: true,
         name: `每百万 Token (${currency})`,
         nameLocation: 'middle',
         nameGap: 24,
@@ -221,28 +312,62 @@ function ComparisonView() {
       },
       yAxis: {
         type: 'value',
+        scale: true,
         name: 'tok/s',
         nameTextStyle: { color: chartTheme.textMuted, fontSize: 11 },
         axisLabel: { color: chartTheme.textMuted, fontSize: 11 },
         splitLine: { lineStyle: { color: chartTheme.splitLineColor, type: 'dashed' } },
       },
-      series: [...byProvider.entries()].map(([providerId, rows]) => ({
-        id: `scatter-${providerId}`,
-        name: providerDisplayName(providerId),
-        type: 'scatter' as const,
-        itemStyle: { color: providerAccentColor(providerId), opacity: 0.85 },
-        symbolSize: (value: number[]) => 8 + Math.sqrt((value[2] ?? 0) / maxTokens) * 22,
-        data: rows.map((r) => ({
-          name: r.model_id,
-          value: [
-            convertMicroUsd(r.cost_per_m_micro_usd ?? 0, currency, usdToCnyRate),
-            r.mean_tps ?? 0,
-            r.total_tokens,
-          ],
-        })),
-      })),
+      series: [
+        {
+          id: 'pareto-frontier',
+          name: '性价比前沿',
+          type: 'line' as const,
+          silent: true,
+          symbol: 'none',
+          z: 1,
+          lineStyle: { color: chartTheme.textSecondary, width: 1.5 },
+          data: frontierLine,
+          markArea: {
+            silent: true,
+            itemStyle: { color: chartTheme.splitLineColor, opacity: 0.35 },
+            data: betterArea,
+          },
+        },
+        ...[...byProvider.entries()].map(([providerId, points]) => {
+          const color = providerAccentColor(providerId);
+          return {
+            id: `scatter-${providerId}`,
+            name: providerDisplayName(providerId),
+            type: 'scatter' as const,
+            z: 2,
+            itemStyle: { color },
+            data: points.map((p) => {
+              const sampled = p.samples >= MIN_FRONTIER_SPEED_SAMPLES;
+              const onFrontier = frontierSet.has(p.key);
+              return {
+                name: p.model_id,
+                point: p,
+                value: [p.price, p.tps, p.tokens],
+                symbol: p.fallback ? 'diamond' : 'circle',
+                symbolSize: 8 + Math.sqrt(p.tokens / maxTokens) * 22,
+                itemStyle: sampled
+                  ? { color, opacity: onFrontier ? 0.95 : 0.3 }
+                  : { color: 'transparent', borderColor: color, borderWidth: 1.5, opacity: 0.7 },
+                label: {
+                  show: onFrontier,
+                  position: 'right' as const,
+                  formatter: p.model_id,
+                  color: chartTheme.textSecondary,
+                  fontSize: 10.5,
+                },
+              };
+            }),
+          };
+        }),
+      ],
     };
-  }, [scatterRows, chartTheme, currency, usdToCnyRate]);
+  }, [scatterPoints, chartTheme, currency, priceBasis]);
 
   const loading = (modelsLoading && !models) || (speedLoading && !speed);
   const fmtPerM = (v: number | null) => (v === null ? '—' : formatCost(v, currency, usdToCnyRate));
@@ -351,11 +476,40 @@ function ComparisonView() {
         </div>
       </section>
 
-      {/* Price vs speed scatter */}
-      {scatterRows.length > 0 && (
+      {/* Price vs speed Pareto frontier */}
+      {scatterPoints.length > 0 && (
         <section className="pb-5" style={{ borderBottom: '1px solid var(--border-hairline)' }} data-testid="models-value-scatter">
-          <h2 className="text-[13.5px] font-semibold mb-2">单价 × 速率</h2>
-          <EChartBox option={scatterOption} height={280} />
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <h2 className="text-[13.5px] font-semibold">性价比前沿</h2>
+            <div
+              className="seg-group"
+              role="radiogroup"
+              aria-label="价格口径"
+              style={{ backgroundColor: 'var(--bg-sidebar)', borderColor: 'var(--border-hairline)' }}
+            >
+              {PRICE_BASIS_OPTIONS.map((o) => {
+                const active = priceBasis === o.id;
+                return (
+                  <button
+                    key={o.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    data-active={active}
+                    onClick={() => setPriceBasis(o.id)}
+                    className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer whitespace-nowrap"
+                    style={{
+                      color: active ? 'var(--accent-tonal-text)' : 'var(--text-secondary)',
+                      fontWeight: active ? 500 : 400,
+                    }}
+                  >
+                    {o.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <EChartBox option={scatterOption} height={300} />
         </section>
       )}
 
