@@ -10,7 +10,9 @@ public struct OverviewView: View {
     public var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                if !store.syncConfigConfigured && (store.bootstrap?.syncedDevices.isEmpty ?? true) {
+                if let coreError = store.coreInitError {
+                    coreErrorBanner(coreError)
+                } else if !store.syncConfigConfigured && (store.bootstrap?.syncedDevices.isEmpty ?? true) {
                     unpairedEmptyBanner
                 } else {
                     heroMetricsSection
@@ -34,9 +36,6 @@ public struct OverviewView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("连接自托管云端中枢")
                 .font(.title3.weight(.semibold))
-            Text("TokenVane iOS 通过您部署的 Cloudflare Sync Worker 实时拉取桌面端脱敏统计与订阅滚动窗口快照。")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
             Button {
                 store.selectedTab = .settings
             } label: {
@@ -51,6 +50,20 @@ public struct OverviewView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 28)
+    }
+
+    private func coreErrorBanner(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("本地数据库打开失败")
+                .font(.title3.weight(.semibold))
+            Text(message)
+                .font(.caption.monospaced())
+                .foregroundStyle(SemanticColors.statusDanger)
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 28)
+        .accessibilityIdentifier("overview.coreErrorBanner")
     }
 
     private var heroMetricsSection: some View {
@@ -131,7 +144,7 @@ public struct OverviewView: View {
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("今日实时用量分布")
+                Text(store.timeRange == .today ? "今日用量分布" : "用量分布")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 Text("Tokens 占比")
@@ -142,7 +155,7 @@ public struct OverviewView: View {
             InlineShareBar(segments: segments, height: 6)
 
             if providers.isEmpty {
-                Text("今日暂无同步数据")
+                Text("等待用量数据")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 4)
@@ -209,7 +222,7 @@ public struct OverviewView: View {
             }
 
             if devices.isEmpty {
-                Text("尚未收到任何桌面设备上传的 Rollup 快照")
+                Text("等待桌面端首次同步")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
@@ -263,7 +276,7 @@ public struct OverviewView: View {
             }
 
             if sorted.isEmpty {
-                Text("桌面端未配置或未同步订阅滚动窗口")
+                Text("订阅窗口待同步")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {

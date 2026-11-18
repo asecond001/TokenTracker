@@ -117,7 +117,7 @@ private struct OverviewHomeWidgetEntryView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Text(entry.isPlaceholder ? "等待同步桌面数据" : "暂无订阅窗口")
+                Text(entry.isPlaceholder ? "等待同步桌面数据" : "订阅窗口待同步")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -192,7 +192,7 @@ private struct OverviewHomeWidgetEntryView: View {
                 }
 
                 if snap.primaryQuotas.isEmpty {
-                    Text("暂无远端订阅配额")
+                    Text("订阅窗口待同步")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else {

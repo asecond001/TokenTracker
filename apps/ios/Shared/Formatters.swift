@@ -95,7 +95,7 @@ public enum TokenVaneFormatters {
     }
 
     public static func formatRelativeSync(atMs: Int64?, now: Date = Date()) -> String {
-        guard let atMs, atMs > 0 else { return "未同步" }
+        guard let atMs, atMs > 0 else { return "待同步" }
         let deltaSec = max(0, Int(now.timeIntervalSince1970 - Double(atMs) / 1000.0))
         if deltaSec < 15 { return "刚刚" }
         if deltaSec < 60 { return "\(deltaSec) 秒前" }

@@ -44,13 +44,10 @@ public struct QuotasAndModelsView: View {
                 Text("跨电脑订阅滚动窗口")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Text("支持灵动岛实况盯盘")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
             }
 
             if groupedSubscriptions.isEmpty {
-                Text("暂无远端同步的订阅配额窗口（请确认桌面端已开启订阅推算或官方额度采集并完成一次同步）")
+                Text("订阅窗口待同步")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 6)
@@ -161,7 +158,7 @@ public struct QuotasAndModelsView: View {
             }
 
             if rows.isEmpty {
-                Text("所选周期暂无模型用量明细")
+                Text("等待模型用量数据")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 8)

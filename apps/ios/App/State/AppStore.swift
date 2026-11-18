@@ -99,6 +99,16 @@ public final class AppStore {
     public var pinnedWatchKeys: Set<String> = []
     public var lastErrorMessage: String?
     public var isLoading = false
+    /// Set when the local SQLite core fails to open; views surface it instead of a blank screen.
+    public private(set) var coreInitError: String?
+    /// Pairing payload parsed from a deep link / QR / clipboard, awaiting user confirmation.
+    public var pendingPairing: DesktopPairingPayload?
+    public var pairingStatusMessage: String?
+    /// Bumped after every successful sync-config save so editors can re-hydrate their fields.
+    public private(set) var syncConfigRevision = 0
+
+    /// Monotonic token: only the most recent `reloadAllData` call may publish its results.
+    private var reloadGeneration = 0
 
     private let core: CoreClientActor?
     private let secrets: SecretStoring
@@ -117,15 +127,25 @@ public final class AppStore {
         self.secrets = secrets
         self.isDemoMode = demoMode
 
+        var resolvedCore: CoreClientActor?
+        var initError: String?
         if let provided = core {
-            self.core = provided
-        } else if demoMode {
-            let demoURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("tokenvane-uitest-\(UUID().uuidString).sqlite")
-            self.core = try? CoreClientActor(dbPath: demoURL.path, localDeviceName: "iPhone-UITest")
+            resolvedCore = provided
         } else {
-            self.core = try? CoreClientActor.openDefault()
+            do {
+                if demoMode {
+                    let demoURL = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("tokenvane-uitest-\(UUID().uuidString).sqlite")
+                    resolvedCore = try CoreClientActor(dbPath: demoURL.path, localDeviceName: "iPhone-UITest")
+                } else {
+                    resolvedCore = try CoreClientActor.openDefault()
+                }
+            } catch {
+                initError = error.localizedDescription
+            }
         }
+        self.core = resolvedCore
+        self.coreInitError = initError
 
         if let core = self.core {
             let coordinator = SyncCoordinator(core: core, secrets: secrets)
@@ -198,11 +218,16 @@ public final class AppStore {
 
     public func reloadAllData() async {
         guard let core else { return }
+        reloadGeneration &+= 1
+        let generation = reloadGeneration
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            if generation == reloadGeneration {
+                isLoading = false
+            }
+        }
         do {
             let boot = try await core.getBootstrap()
-            self.bootstrap = boot
 
             let filter = currentFilter
             let trendsQuery = TrendsQueryDTO(
@@ -223,11 +248,17 @@ public final class AppStore {
             async let md = core.queryModelsPricing(filter: filter)
             async let sp = core.querySpeedLatency(filter: filter)
 
-            self.overview = try await ov
-            self.trends = try await tr
-            self.monthly = try await mo
-            self.modelsReport = try await md
-            self.speedReport = try await sp
+            let results = try await (ov, tr, mo, md, sp)
+
+            // A newer reload (filter change, sync update) superseded this one; drop stale results.
+            guard generation == reloadGeneration else { return }
+
+            self.bootstrap = boot
+            self.overview = results.0
+            self.trends = results.1
+            self.monthly = results.2
+            self.modelsReport = results.3
+            self.speedReport = results.4
             self.lastErrorMessage = nil
 
             if !isDemoMode {
@@ -239,7 +270,9 @@ public final class AppStore {
                 pinnedWatchKeys = LiveActivityManager.shared.activeWatchKeys()
             }
         } catch {
-            self.lastErrorMessage = error.localizedDescription
+            if generation == reloadGeneration {
+                self.lastErrorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -315,6 +348,11 @@ public final class AppStore {
                 workerURL: workerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : workerURL,
                 e2eeEnabled: e2eeEnabled
             )
+            // Publish the new config before bumping the revision so editors re-hydrate from it,
+            // and invalidate any in-flight reload that still carries the previous config.
+            self.bootstrap = try await core.getBootstrap()
+            reloadGeneration &+= 1
+            syncConfigRevision &+= 1
             await reloadAllData()
             if enabled && !isDemoMode {
                 await triggerManualSync()
@@ -327,25 +365,40 @@ public final class AppStore {
         }
     }
 
-    public func applyPairingPayload(_ raw: String, passphrase: String?) async -> Result<DesktopPairingPayload, Error> {
+    /// Parses a pairing link / QR / clipboard payload and stages it for explicit confirmation.
+    /// Nothing is written until `confirmPairing(_:)` runs, so an untrusted link cannot silently
+    /// redirect sync to another Worker.
+    @discardableResult
+    public func stagePairing(raw: String) -> Bool {
         do {
-            let parsed = try DesktopPairingPayload.parse(raw)
-            let resolvedPass = parsed.key ?? (passphrase ?? "")
-            let ok = await saveSyncSettings(
-                enabled: true,
-                workerURL: parsed.url,
-                bearerToken: parsed.token,
-                e2eeEnabled: parsed.e2ee,
-                e2eePassphrase: resolvedPass
-            )
-            if ok {
-                return .success(parsed)
-            }
-            return .failure(NSError(domain: "AppStore", code: 1, userInfo: [NSLocalizedDescriptionKey: lastErrorMessage ?? "保存配置失败"]))
+            pendingPairing = try DesktopPairingPayload.parse(raw)
+            return true
         } catch {
-            lastErrorMessage = error.localizedDescription
-            return .failure(error)
+            pairingStatusMessage = error.localizedDescription
+            return false
         }
+    }
+
+    public func cancelPendingPairing() {
+        pendingPairing = nil
+    }
+
+    public func confirmPairing(_ payload: DesktopPairingPayload) async {
+        pendingPairing = nil
+        let ok = await saveSyncSettings(
+            enabled: true,
+            workerURL: payload.url,
+            bearerToken: payload.token,
+            e2eeEnabled: payload.e2ee,
+            // Empty keeps any passphrase already stored in Keychain.
+            e2eePassphrase: payload.key ?? ""
+        )
+        guard ok else {
+            pairingStatusMessage = lastErrorMessage ?? "保存配置失败"
+            return
+        }
+        let needsPassphrase = payload.e2ee && loadSecretMasked(account: .e2eePassphrase).isEmpty
+        pairingStatusMessage = needsPassphrase ? "配对已导入，填写 E2EE 口令后保存" : "配对已完成"
     }
 
     public func loadSecretMasked(account: KeychainSecretAccount) -> String {

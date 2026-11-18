@@ -18,6 +18,11 @@ public final class SyncCoordinator {
     private let monitorQueue = DispatchQueue(label: "com.asecond.tokenvane.network")
 
     private var sseTask: Task<Void, Never>?
+    private var pullTask: Task<Bool, Never>?
+    private var pullRequestedWhileRunning = false
+    private var ssePullDebounceTask: Task<Void, Never>?
+    private let ssePullDebounce: Duration = .milliseconds(800)
+    private static var didRegisterBackgroundTasks = false
     private var isForeground = false
     private var reconnectDelayIndex = 0
     private let backoffSeconds: [TimeInterval] = [2, 5, 15, 60]
@@ -39,9 +44,15 @@ public final class SyncCoordinator {
     deinit {
         pathMonitor.cancel()
         sseTask?.cancel()
+        pullTask?.cancel()
+        ssePullDebounceTask?.cancel()
     }
 
+    /// Must be called before the application finishes launching (see `TokenVaneApp.init`).
+    /// Registering twice raises an exception inside BGTaskScheduler, so the call is idempotent.
     public func registerBackgroundTasks() {
+        guard !Self.didRegisterBackgroundTasks else { return }
+        Self.didRegisterBackgroundTasks = true
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: AppGroupPaths.syncRefreshTaskIdentifier,
             using: nil
@@ -50,7 +61,14 @@ public final class SyncCoordinator {
                 task.setTaskCompleted(success: false)
                 return
             }
-            self?.handleBackgroundRefresh(refreshTask)
+            // Launch handlers run on a background queue; hop to the main actor explicitly.
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    refreshTask.setTaskCompleted(success: false)
+                    return
+                }
+                self.handleBackgroundRefresh(refreshTask)
+            }
         }
     }
 
@@ -96,10 +114,45 @@ public final class SyncCoordinator {
     public func stopSSEStream() {
         sseTask?.cancel()
         sseTask = nil
+        ssePullDebounceTask?.cancel()
+        ssePullDebounceTask = nil
     }
 
+    /// Single-flight incremental pull. Concurrent callers (foreground, network recovery,
+    /// SSE, pull-to-refresh) share the running pull; a request that arrives mid-flight
+    /// schedules exactly one follow-up pass so the newest server state is never missed.
     @discardableResult
     public func pullIncremental() async -> Bool {
+        if let running = pullTask {
+            pullRequestedWhileRunning = true
+            return await running.value
+        }
+        let task = Task { [weak self] () -> Bool in
+            guard let self else { return false }
+            var ok = false
+            repeat {
+                self.pullRequestedWhileRunning = false
+                ok = await self.performPull()
+            } while self.pullRequestedWhileRunning && !Task.isCancelled
+            self.pullTask = nil
+            return ok
+        }
+        pullTask = task
+        return await task.value
+    }
+
+    /// Coalesces bursts of SSE `sync_update` frames into one pull without blocking the stream reader.
+    private func scheduleDebouncedPull() {
+        ssePullDebounceTask?.cancel()
+        ssePullDebounceTask = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: self.ssePullDebounce)
+            guard !Task.isCancelled else { return }
+            await self.pullIncremental()
+        }
+    }
+
+    private func performPull() async -> Bool {
         do {
             let bootstrap = try await core.getBootstrap()
             guard bootstrap.syncConfig.enabled,
@@ -241,11 +294,11 @@ public final class SyncCoordinator {
         for try await byte in bytes {
             if Task.isCancelled || !isForeground { break }
             if let frame = parser.feedByte(byte), frame.event == "sync_update" {
-                await pullIncremental()
+                scheduleDebouncedPull()
             }
         }
         if let trailing = parser.finish(), trailing.event == "sync_update" {
-            await pullIncremental()
+            scheduleDebouncedPull()
         }
     }
 

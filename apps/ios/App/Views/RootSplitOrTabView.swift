@@ -18,6 +18,37 @@ public struct RootSplitOrTabView: View {
         }
         .background(SemanticColors.surfacePrimary.ignoresSafeArea())
         .tint(SemanticColors.accentIndigo)
+        .alert(
+            "连接同步中枢",
+            isPresented: Binding(
+                get: { store.pendingPairing != nil },
+                set: { if !$0 { store.cancelPendingPairing() } }
+            ),
+            presenting: store.pendingPairing
+        ) { payload in
+            // Capture the payload: the binding clears `pendingPairing` as the alert dismisses.
+            Button("连接") {
+                Task { await store.confirmPairing(payload) }
+            }
+            .accessibilityIdentifier("pairing.confirmButton")
+            Button("取消", role: .cancel) {
+                store.cancelPendingPairing()
+            }
+        } message: { payload in
+            Text(pairingSummary(payload))
+        }
+    }
+
+    private func pairingSummary(_ payload: DesktopPairingPayload) -> String {
+        let host = URL(string: payload.url)?.host ?? payload.url
+        let mode = payload.e2ee ? "端到端加密" : "明文聚合"
+        var lines = ["Worker · \(host)", "传输 · \(mode)"]
+        if store.syncConfigConfigured,
+           let current = store.bootstrap?.syncConfig.workerUrl,
+           URL(string: current)?.host != URL(string: payload.url)?.host {
+            lines.append("将替换当前 Worker · \(URL(string: current)?.host ?? current)")
+        }
+        return lines.joined(separator: "\n")
     }
 
     private var iPhoneLayout: some View {

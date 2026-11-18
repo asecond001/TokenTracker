@@ -195,7 +195,7 @@ final class TokenVaneTests: XCTestCase {
                 32
             )
         }
-        XCTAssertEqual(status, kCCSuccess)
+        XCTAssertEqual(status, Int32(kCCSuccess))
 
         let key = SymmetricKey(data: derivedKey)
         let gcmNonce = try AES.GCM.Nonce(data: nonce)

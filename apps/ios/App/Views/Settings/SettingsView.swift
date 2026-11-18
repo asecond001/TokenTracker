@@ -16,7 +16,9 @@ public struct SettingsView: View {
     @State private var showingQRScanner = false
     @State private var showingResetAlert = false
     @State private var statusBanner: String?
-    @State private var didHydrateFields = false
+    @State private var didHydratePreferences = false
+    @State private var hydratedSyncRevision: Int?
+    @State private var scannedPairingRaw: String?
 
     public init(store: AppStore) {
         self.store = store
@@ -38,13 +40,33 @@ public struct SettingsView: View {
         .background(SemanticColors.surfacePrimary)
         .onAppear {
             hydrateFromStore()
+            // A deep link may have failed to parse before this view existed.
+            if let message = store.pairingStatusMessage {
+                statusBanner = message
+                store.pairingStatusMessage = nil
+            }
         }
         .onChange(of: store.bootstrap) { _, _ in
             hydrateFromStore()
         }
-        .sheet(isPresented: $showingQRScanner) {
+        .onChange(of: store.syncConfigRevision) { _, _ in
+            hydrateFromStore()
+        }
+        .onChange(of: store.pairingStatusMessage) { _, message in
+            if let message {
+                statusBanner = message
+                store.pairingStatusMessage = nil
+            }
+        }
+        .sheet(isPresented: $showingQRScanner, onDismiss: {
+            // Stage only after the scanner is gone so the root confirmation alert can present.
+            if let raw = scannedPairingRaw {
+                scannedPairingRaw = nil
+                handlePairingRaw(raw)
+            }
+        }) {
             QRScannerSheet { raw in
-                Task { await handlePairingRaw(raw) }
+                scannedPairingRaw = raw
             }
         }
         .alert("确认重置本地同步缓存？", isPresented: $showingResetAlert) {
@@ -64,9 +86,6 @@ public struct SettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("桌面端一键配对")
                 .font(.subheadline.weight(.semibold))
-            Text("扫码或粘贴桌面端生成的配对链接即可自动完成接入。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
 
             HStack(spacing: 10) {
                 Button {
@@ -83,7 +102,7 @@ public struct SettingsView: View {
 
                 Button {
                     if let paste = UIPasteboard.general.string {
-                        Task { await handlePairingRaw(paste) }
+                        handlePairingRaw(paste)
                     } else {
                         statusBanner = "剪贴板为空"
                     }
@@ -286,6 +305,8 @@ public struct SettingsView: View {
             Toggle("自动同步 USD → CNY 汇率", isOn: $autoExchangeRate)
                 .font(.subheadline)
                 .onChange(of: autoExchangeRate) { _, val in
+                    // Skip the echo produced by hydrating the toggle from stored preferences.
+                    guard val != store.bootstrap?.preferences.exchangeRateAuto else { return }
                     Task { await store.applyPreferencesPatch(MobilePreferencesPatchDTO(exchangeRateAuto: val)) }
                 }
 
@@ -335,6 +356,7 @@ public struct SettingsView: View {
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 220)
                 .onChange(of: selectedTheme) { _, val in
+                    guard val != store.bootstrap?.preferences.theme else { return }
                     Task { await store.applyPreferencesPatch(MobilePreferencesPatchDTO(theme: val)) }
                 }
             }
@@ -356,34 +378,29 @@ public struct SettingsView: View {
     }
 
     private func hydrateFromStore() {
-        guard !didHydrateFields, let boot = store.bootstrap else { return }
-        didHydrateFields = true
-        syncEnabled = boot.syncConfig.enabled
-        workerURL = boot.syncConfig.workerUrl ?? ""
-        e2eeEnabled = boot.syncConfig.e2eeEnabled
-        manualExchangeRate = boot.preferences.usdToCnyRate
-        autoExchangeRate = boot.preferences.exchangeRateAuto
-        selectedTheme = boot.preferences.theme
-        bearerToken = store.loadSecretMasked(account: .syncBearerToken)
-        e2eePassphrase = store.loadSecretMasked(account: .e2eePassphrase)
+        guard let boot = store.bootstrap else { return }
+        if !didHydratePreferences {
+            didHydratePreferences = true
+            manualExchangeRate = boot.preferences.usdToCnyRate
+            autoExchangeRate = boot.preferences.exchangeRateAuto
+            selectedTheme = boot.preferences.theme
+        }
+        // Re-hydrate sync fields whenever the config was saved elsewhere (deep link, QR,
+        // clipboard), so a later tap on "save" never writes stale values over a new pairing.
+        if hydratedSyncRevision != store.syncConfigRevision {
+            hydratedSyncRevision = store.syncConfigRevision
+            syncEnabled = boot.syncConfig.enabled
+            workerURL = boot.syncConfig.workerUrl ?? ""
+            e2eeEnabled = boot.syncConfig.e2eeEnabled
+            bearerToken = store.loadSecretMasked(account: .syncBearerToken)
+            e2eePassphrase = store.loadSecretMasked(account: .e2eePassphrase)
+        }
     }
 
-    private func handlePairingRaw(_ raw: String) async {
-        let res = await store.applyPairingPayload(raw, passphrase: e2eePassphrase)
-        switch res {
-        case .success(let payload):
-            syncEnabled = true
-            workerURL = payload.url
-            bearerToken = payload.token
-            e2eeEnabled = payload.e2ee
-            if let key = payload.key, !key.isEmpty {
-                e2eePassphrase = key
-            }
-            statusBanner = payload.e2ee && e2eePassphrase.isEmpty
-                ? "已导入配对配置；请在下方填写 E2EE 口令后点击保存"
-                : "配对导入成功"
-        case .failure(let err):
-            statusBanner = err.localizedDescription
+    private func handlePairingRaw(_ raw: String) {
+        if !store.stagePairing(raw: raw), let message = store.pairingStatusMessage {
+            statusBanner = message
+            store.pairingStatusMessage = nil
         }
     }
 }
