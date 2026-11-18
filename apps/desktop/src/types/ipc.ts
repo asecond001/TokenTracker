@@ -410,6 +410,12 @@ export interface SubscriptionPlanStatus {
   month_tokens: number;
 }
 
+/**
+ * Caliber behind `*_tps`: `decode` divides by the streaming window after the first
+ * token; `end_to_end` includes queueing / prefill / TTFT and reads systematically lower.
+ */
+export type SpeedBasis = 'decode' | 'end_to_end';
+
 export interface ModelSpeedStats {
   model_id: string;
   provider_id: string;
@@ -422,6 +428,7 @@ export interface ModelSpeedStats {
   latest_tps: number;
   avg_duration_ms: number;
   avg_ttft_ms: number | null;
+  speed_basis?: SpeedBasis;
 }
 
 export interface ProviderSpeedStats {
@@ -434,6 +441,7 @@ export interface ProviderSpeedStats {
   min_tps: number;
   avg_duration_ms: number;
   avg_ttft_ms: number | null;
+  speed_basis?: SpeedBasis;
 }
 
 export interface SpeedLatencyReport {

@@ -21,6 +21,7 @@ import {
   buildModelComparison,
   buildProviderComparison,
   computeParetoFrontier,
+  isFrontierEligible,
   MIN_FRONTIER_SPEED_SAMPLES,
   PRICE_BASIS_OPTIONS,
   priceForBasis,
@@ -35,7 +36,7 @@ import {
   selectCustomRange,
   useWorkspaceStore,
 } from '../stores/workspaceStore';
-import type { AnalyticsFilter } from '../types/ipc';
+import type { AnalyticsFilter, SpeedBasis } from '../types/ipc';
 import { ModelsPricingPage } from './ModelsPricingPage';
 import { SpeedLatencyPage } from './SpeedLatencyPage';
 
@@ -118,6 +119,7 @@ interface ScatterPoint {
   samples: number;
   /** Subscription basis requested but the provider has no paid plan, so API 实付 is shown. */
   fallback: boolean;
+  speed_basis: SpeedBasis | null;
 }
 
 function ComparisonView() {
@@ -206,13 +208,14 @@ function ComparisonView() {
         tokens: r.total_tokens,
         samples: r.speed_samples,
         fallback: price.basis !== priceBasis,
+        speed_basis: r.speed_basis,
       });
     }
     return points;
   }, [modelRows, priceBasis, currency, usdToCnyRate]);
 
   const scatterOption = useMemo<EChartsOption>(() => {
-    const eligible = scatterPoints.filter((p) => p.samples >= MIN_FRONTIER_SPEED_SAMPLES);
+    const eligible = scatterPoints.filter(isFrontierEligible);
     const { frontier, dominatedBy } = computeParetoFrontier(eligible);
     const frontierSet = new Set(frontier);
     const byKey = new Map(scatterPoints.map((p) => [p.key, p] as const));
@@ -262,7 +265,9 @@ function ComparisonView() {
             ? `API 实付 ${symbol}${p.price.toFixed(3)} / M`
             : `${basisLabel} ${symbol}${p.price.toFixed(3)} / M`;
           let status = '';
-          if (p.samples < MIN_FRONTIER_SPEED_SAMPLES) {
+          if (p.speed_basis === 'end_to_end') {
+            status = '端到端口径 · 含首字延迟，单独展示';
+          } else if (p.samples < MIN_FRONTIER_SPEED_SAMPLES) {
             status = `速度样本积累中（${p.samples}/${MIN_FRONTIER_SPEED_SAMPLES}）`;
           } else if (frontierSet.has(p.key)) {
             status = '性价比前沿';
@@ -343,6 +348,7 @@ function ComparisonView() {
             z: 2,
             itemStyle: { color },
             data: points.map((p) => {
+              const endToEnd = p.speed_basis === 'end_to_end';
               const sampled = p.samples >= MIN_FRONTIER_SPEED_SAMPLES;
               const onFrontier = frontierSet.has(p.key);
               return {
@@ -351,9 +357,17 @@ function ComparisonView() {
                 value: [p.price, p.tps, p.tokens],
                 symbol: p.fallback ? 'diamond' : 'circle',
                 symbolSize: 8 + Math.sqrt(p.tokens / maxTokens) * 22,
-                itemStyle: sampled
-                  ? { color, opacity: onFrontier ? 0.95 : 0.3 }
-                  : { color: 'transparent', borderColor: color, borderWidth: 1.5, opacity: 0.7 },
+                itemStyle: endToEnd
+                  ? {
+                      color: 'transparent',
+                      borderColor: color,
+                      borderWidth: 1.5,
+                      borderType: 'dashed' as const,
+                      opacity: 0.7,
+                    }
+                  : sampled
+                    ? { color, opacity: onFrontier ? 0.95 : 0.3 }
+                    : { color: 'transparent', borderColor: color, borderWidth: 1.5, opacity: 0.7 },
                 label: {
                   show: onFrontier,
                   position: 'right' as const,

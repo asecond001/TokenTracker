@@ -3,10 +3,12 @@ import {
   buildModelComparison,
   buildProviderComparison,
   computeParetoFrontier,
+  isFrontierEligible,
+  MIN_FRONTIER_SPEED_SAMPLES,
   priceForBasis,
   type ModelComparisonRow,
 } from '../lib/modelComparison';
-import type { ModelStatRow, ModelStatsReport } from '../types/ipc';
+import type { ModelSpeedStats, ModelStatRow, ModelStatsReport, SpeedLatencyReport } from '../types/ipc';
 
 function statRow(overrides: Partial<ModelStatRow>): ModelStatRow {
   return {
@@ -104,5 +106,39 @@ describe('model comparison data', () => {
     expect(frontier).toEqual(['cheap-slow', 'mid', 'twin', 'pricey-fast']);
     expect(dominatedBy.get('dominated')).toBe('mid');
     expect(dominatedBy.size).toBe(1);
+  });
+
+  it('carries the speed caliber and keeps end-to-end speeds off the frontier', () => {
+    const speedRow = (overrides: Partial<ModelSpeedStats>): ModelSpeedStats => ({
+      model_id: 'gpt-6-astra',
+      provider_id: 'codex',
+      sample_count: 120,
+      mean_tps: 42,
+      p50_tps: 40,
+      p95_tps: 70,
+      max_tps: 90,
+      min_tps: 12,
+      latest_tps: 41,
+      avg_duration_ms: 9_000,
+      avg_ttft_ms: 3_000,
+      ...overrides,
+    });
+    const speed: SpeedLatencyReport = {
+      providers: [],
+      models: [
+        speedRow({ speed_basis: 'decode' }),
+        speedRow({ model_id: 'gemini-pro', provider_id: 'antigravity', speed_basis: 'end_to_end' }),
+        speedRow({ model_id: 'legacy', provider_id: 'claude_code' }),
+      ],
+    };
+    const rows = buildModelComparison(report([]), speed);
+    const basisByModel = Object.fromEntries(rows.map((r) => [r.model_id, r.speed_basis]));
+    expect(basisByModel).toEqual({ 'gpt-6-astra': 'decode', 'gemini-pro': 'end_to_end', legacy: null });
+
+    const enough = MIN_FRONTIER_SPEED_SAMPLES;
+    expect(isFrontierEligible({ samples: enough, speed_basis: 'decode' })).toBe(true);
+    expect(isFrontierEligible({ samples: enough, speed_basis: null })).toBe(true);
+    expect(isFrontierEligible({ samples: enough, speed_basis: 'end_to_end' })).toBe(false);
+    expect(isFrontierEligible({ samples: enough - 1, speed_basis: 'decode' })).toBe(false);
   });
 });

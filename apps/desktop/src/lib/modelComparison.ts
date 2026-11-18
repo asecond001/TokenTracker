@@ -1,6 +1,7 @@
 import type {
   ModelStatRow,
   ModelStatsReport,
+  SpeedBasis,
   SpeedLatencyReport,
 } from '../types/ipc';
 
@@ -28,6 +29,8 @@ export interface ModelComparisonRow {
   avg_ttft_ms: number | null;
   avg_duration_ms: number | null;
   speed_samples: number;
+  /** Caliber of `mean_tps` / `p95_tps`; `null` when the speed report has no row for the model. */
+  speed_basis: SpeedBasis | null;
 }
 
 /** Provider-level roll-up of the same metrics. */
@@ -98,6 +101,7 @@ export function buildModelComparison(
       avg_ttft_ms: positiveOrNull(s?.avg_ttft_ms),
       avg_duration_ms: positiveOrNull(s?.avg_duration_ms),
       speed_samples: s?.sample_count ?? 0,
+      speed_basis: s?.speed_basis ?? null,
     });
   }
 
@@ -123,6 +127,7 @@ export function buildModelComparison(
       avg_ttft_ms: positiveOrNull(s.avg_ttft_ms),
       avg_duration_ms: positiveOrNull(s.avg_duration_ms),
       speed_samples: s.sample_count,
+      speed_basis: s.speed_basis ?? null,
     });
   }
 
@@ -231,6 +236,17 @@ export const PRICE_BASIS_OPTIONS: Array<{ id: PriceBasis; label: string }> = [
 
 /** Minimum speed samples before a model takes part in the frontier. */
 export const MIN_FRONTIER_SPEED_SAMPLES = 20;
+
+/**
+ * Whether a point's speed can be ranked against the others: enough samples and a
+ * decode-window caliber. End-to-end speeds include TTFT and would always look slower.
+ */
+export function isFrontierEligible(point: {
+  samples: number;
+  speed_basis: SpeedBasis | null;
+}): boolean {
+  return point.samples >= MIN_FRONTIER_SPEED_SAMPLES && point.speed_basis !== 'end_to_end';
+}
 
 export interface BasisPrice {
   /** Cost per 1M tokens in micro-USD under the requested basis. */
