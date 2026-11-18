@@ -99,6 +99,8 @@ fn file_backed_analytics_run_on_read_only_pool() {
             provider_id: None,
             device_id: None,
             tz_offset_minutes: 480,
+            start_ms: None,
+            end_ms: None,
         })
         .expect("monthly");
     storage.query_models_pricing(&filter).expect("models");
@@ -174,6 +176,8 @@ fn overview_monthly_models_and_speed_queries_align() {
             provider_id: None,
             device_id: None,
             tz_offset_minutes: 480,
+            start_ms: None,
+            end_ms: None,
         })
         .expect("monthly");
     assert_eq!(monthly.month_total_tokens, 685_000);
@@ -372,6 +376,8 @@ fn heatmap_365d_aligns_with_daily_ledger_and_includes_observable_only() {
             provider_id: None,
             device_id: None,
             tz_offset_minutes: 480,
+            start_ms: None,
+            end_ms: None,
         })
         .expect("monthly +8");
     assert_eq!(m_plus8.daily_ledger.len(), 2);
@@ -402,6 +408,8 @@ fn heatmap_365d_aligns_with_daily_ledger_and_includes_observable_only() {
             provider_id: None,
             device_id: None,
             tz_offset_minutes: -300,
+            start_ms: None,
+            end_ms: None,
         })
         .expect("monthly -5");
     assert!(m_minus5
@@ -724,6 +732,8 @@ fn multi_device_filter_isolates_overview_trends_monthly_and_models() {
             provider_id: None,
             device_id: Some("remote-mbp".to_string()),
             tz_offset_minutes: 480,
+            start_ms: None,
+            end_ms: None,
         })
         .expect("remote monthly");
     assert_eq!(remote_monthly.month_total_tokens, 50_000);
@@ -1181,6 +1191,8 @@ fn trends_daily_buckets_and_comparisons_align_to_local_timezone() {
             provider_id: None,
             device_id: None,
             tz_offset_minutes: 480,
+            start_ms: None,
+            end_ms: None,
         })
         .expect("monthly");
     assert_eq!(monthly.provider_shares.len(), 1);
@@ -1211,4 +1223,90 @@ fn auto_granularity_uses_fifteen_minute_buckets_for_short_drag_ranges() {
         resolve_trend_granularity(TrendGranularity::Hourly, 60_000),
         TrendGranularity::Hourly
     );
+}
+
+#[test]
+fn monthly_custom_range_overrides_calendar_month_and_prorates_fee() {
+    let storage = Storage::open_in_memory().expect("db");
+    let base_ts = seed_sample_events(&storage);
+    let base = MonthlyQuery {
+        year: 2026,
+        month: 11,
+        provider_id: None,
+        device_id: None,
+        tz_offset_minutes: 480,
+        start_ms: None,
+        end_ms: None,
+    };
+    let month = storage.query_monthly(&base).expect("month");
+
+    let covering = storage
+        .query_monthly(&MonthlyQuery {
+            start_ms: Some(base_ts - HOUR_MS),
+            end_ms: Some(base_ts + 4 * HOUR_MS),
+            ..base.clone()
+        })
+        .expect("covering range");
+    assert_eq!(covering.month_total_tokens, month.month_total_tokens);
+    assert_eq!(covering.range_start_ms, base_ts - HOUR_MS);
+    assert_eq!(covering.range_end_ms, base_ts + 4 * HOUR_MS);
+
+    let before = storage
+        .query_monthly(&MonthlyQuery {
+            start_ms: Some(base_ts - 3 * DAY_MS),
+            end_ms: Some(base_ts - 2 * DAY_MS),
+            ..base.clone()
+        })
+        .expect("empty range");
+    assert_eq!(before.month_total_tokens, 0);
+    assert!(before.daily_ledger.is_empty());
+
+    let inverted = storage.query_monthly(&MonthlyQuery {
+        start_ms: Some(base_ts),
+        end_ms: Some(base_ts - 1),
+        ..base
+    });
+    assert!(inverted.is_err());
+
+    // 30 USD/month prorated to one day ≈ 0.9857 USD.
+    let one_day = super::monthly::prorate_monthly_fee(30_000_000, 0, DAY_MS - 1);
+    assert!((one_day - 985_647).abs() <= 1, "prorated {one_day}");
+    assert_eq!(super::monthly::prorate_monthly_fee(0, 0, DAY_MS), 0);
+}
+
+#[test]
+fn live_model_speeds_only_include_currently_active_sessions() {
+    let mk = |state: &str, tps: f64| ActiveSessionSummary {
+        session_key: format!("k-{state}"),
+        session_title: None,
+        provider_id: "codex".to_string(),
+        model_id: format!("m-{state}"),
+        project_label: "p".to_string(),
+        activity_state: state.to_string(),
+        started_at_ms: 0,
+        last_active_at_ms: 0,
+        request_count: 1,
+        total_tokens: 1,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_read_tokens: 0,
+        estimated_cost_micro_usd: 0,
+        latest_output_tps: Some(tps),
+    };
+
+    // Only recent (idle) sessions: no live readout, latest keeps history.
+    let (latest, live) = super::overview::compute_live_model_speeds_and_tps(
+        &[mk("recent", 70.0)],
+        Some((55.0, "m".to_string(), "codex".to_string())),
+    );
+    assert!(live.is_empty());
+    assert_eq!(latest, Some(55.0));
+
+    let (latest, live) = super::overview::compute_live_model_speeds_and_tps(
+        &[mk("active", 90.0), mk("recent", 30.0)],
+        None,
+    );
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].model_id, "m-active");
+    assert_eq!(latest, Some(90.0));
 }

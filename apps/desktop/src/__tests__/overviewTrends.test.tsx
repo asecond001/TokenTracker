@@ -65,9 +65,11 @@ describe('Overview & Trends defaults, Today Live Pulse, and all-time preset', ()
       'data-active',
       'true'
     );
-    expect(screen.getByTestId('echart-stub')).toHaveAttribute(
-      'data-series-names',
-      'Claude Code,Antigravity'
+    await waitFor(() =>
+      expect(screen.getByTestId('echart-stub')).toHaveAttribute(
+        'data-series-names',
+        'Claude Code,Antigravity,上一周期'
+      )
     );
     expect(trendsSpy).toHaveBeenCalledWith(
       expect.objectContaining({

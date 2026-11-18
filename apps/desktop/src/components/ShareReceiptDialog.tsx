@@ -11,6 +11,8 @@ export interface ShareReceiptDialogProps {
   report: MonthlyReport;
   currency: CurrencyCode;
   usdToCnyRate: string;
+  /** Human-readable statistics range printed on the receipt. */
+  periodLabel?: string;
   onClose: () => void;
 }
 
@@ -24,7 +26,13 @@ function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
 }
 
 /** Receipt-style usage bill that can be copied or saved as a PNG for sharing. */
-export function ShareReceiptDialog({ report, currency, usdToCnyRate, onClose }: ShareReceiptDialogProps) {
+export function ShareReceiptDialog({
+  report,
+  currency,
+  usdToCnyRate,
+  periodLabel,
+  onClose,
+}: ShareReceiptDialogProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -32,8 +40,8 @@ export function ShareReceiptDialog({ report, currency, usdToCnyRate, onClose }: 
   const clearNotice = useCallback(() => setNotice(null), []);
 
   const model = useMemo(
-    () => buildReceiptModel(report, currency, usdToCnyRate),
-    [report, currency, usdToCnyRate]
+    () => buildReceiptModel(report, currency, usdToCnyRate, new Date(), periodLabel),
+    [report, currency, usdToCnyRate, periodLabel]
   );
 
   useEffect(() => {

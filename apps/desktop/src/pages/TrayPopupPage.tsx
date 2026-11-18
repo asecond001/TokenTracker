@@ -92,7 +92,6 @@ export function TrayPopupPage() {
             <LiveSpeedBadge
               activeSessions={summary?.active_sessions}
               liveModelSpeeds={summary?.live_model_speeds}
-              fallbackTps={summary?.latest_output_tps}
               align="right"
               placement="bottom"
               className="cursor-default"

@@ -4,7 +4,6 @@ import {
   CalendarDays,
   Cpu,
   Database,
-  Gauge,
   LayoutDashboard,
   Settings,
 } from 'lucide-react';
@@ -22,10 +21,9 @@ export interface SidebarProps {
 const ANALYTICS_NAV: Array<{ id: NavPage; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'overview', label: '概览', icon: LayoutDashboard },
   { id: 'trends', label: '趋势分析', icon: Activity },
-  { id: 'monthly', label: '月度统计', icon: CalendarDays },
-  { id: 'models', label: '模型与价格', icon: Cpu },
+  { id: 'monthly', label: '统计', icon: CalendarDays },
+  { id: 'models', label: '模型对比', icon: Cpu },
   { id: 'subscriptions', label: '用量', icon: BarChart3 },
-  { id: 'speed', label: '速度监测', icon: Gauge },
 ];
 
 const SYSTEM_NAV: Array<{ id: NavPage; label: string; icon: typeof Database }> = [
@@ -107,7 +105,7 @@ export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
                 </button>
               )}
               <span className="font-mono text-[10px] font-normal lowercase tabular-nums">
-                v0.4.5
+                v0.4.6
               </span>
             </div>
           </div>

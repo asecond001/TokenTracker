@@ -25,9 +25,11 @@ import {
   type BackgroundPresetId,
 } from '../components/WorkspaceBackdrop';
 import {
+  FLOATING_MODULES,
   computeFloatingDimensions,
+  toggleFloatingModule,
   useFloatingConfig,
-  type FloatingWindowConfig,
+  type FloatingModuleId,
 } from '../lib/floatingConfig';
 import { formatRelativeTime } from '../lib/format';
 import { ipc, isTauriRuntime, onCloudSyncProvisionProgress } from '../lib/ipc';
@@ -101,19 +103,6 @@ const BG_MODE_OPTIONS: ReadonlyArray<{ id: BackgroundMode; label: string }> = [
   { id: 'image', label: '本地壁纸' },
 ];
 
-const FLOATING_ELEMENT_TOGGLES: ReadonlyArray<{
-  key: keyof Pick<
-    FloatingWindowConfig,
-    'showTokens' | 'showCost' | 'showSpeed' | 'showSession' | 'showSubscriptions'
-  >;
-  label: string;
-}> = [
-  { key: 'showTokens', label: 'Token 用量' },
-  { key: 'showCost', label: '等效费用' },
-  { key: 'showSpeed', label: '生成速率' },
-  { key: 'showSession', label: '活跃会话' },
-  { key: 'showSubscriptions', label: '配额窗口' },
-];
 
 function normalizeThemeMode(raw: string | undefined | null): ThemeMode {
   return raw === 'light' || raw === 'dark' || raw === 'system' ? raw : 'dark';
@@ -697,13 +686,10 @@ export function PreferencesPage({
       });
   };
 
-  const handleFloatingElementToggle = (
-    key: keyof Pick<
-      FloatingWindowConfig,
-      'showTokens' | 'showCost' | 'showSpeed' | 'showSession' | 'showSubscriptions'
-    >
-  ) => {
-    const nextCfg = updateFloatingConfig({ [key]: !floatingConfig[key] });
+  const handleFloatingElementToggle = (id: FloatingModuleId) => {
+    const nextCfg = updateFloatingConfig({
+      modules: toggleFloatingModule(floatingConfig.modules, id),
+    });
     if (!nextCfg.compact) {
       const dims = computeFloatingDimensions(nextCfg);
       void ipc.setFloatingWindowCompact(false, dims.width, dims.height);
@@ -909,7 +895,7 @@ export function PreferencesPage({
               color: 'var(--accent-tonal-text)',
             }}
           >
-            v0.4.5
+            v0.4.6
           </span>
         </div>
 
@@ -1247,14 +1233,14 @@ export function PreferencesPage({
             {floatingWindowEnabled && (
               <>
                 <div className="flex flex-wrap items-center gap-1.5">
-                  {FLOATING_ELEMENT_TOGGLES.map((item) => {
-                    const enabled = floatingConfig[item.key];
+                  {FLOATING_MODULES.map((item) => {
+                    const enabled = floatingConfig.modules.includes(item.id);
                     return (
                       <button
-                        key={item.key}
+                        key={item.id}
                         type="button"
                         aria-pressed={enabled}
-                        onClick={() => handleFloatingElementToggle(item.key)}
+                        onClick={() => handleFloatingElementToggle(item.id)}
                         className="btn-interactive px-2 py-0.5 rounded-lg text-[11px] cursor-pointer"
                         style={{
                           backgroundColor: enabled ? 'var(--bg-hover)' : 'var(--bg-input)',

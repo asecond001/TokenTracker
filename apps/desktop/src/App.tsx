@@ -17,14 +17,11 @@ const TrendsPage = lazy(() => import('./pages/TrendsPage').then((m) => ({ defaul
 const MonthlyPage = lazy(() =>
   import('./pages/MonthlyPage').then((m) => ({ default: m.MonthlyPage }))
 );
-const ModelsPricingPage = lazy(() =>
-  import('./pages/ModelsPricingPage').then((m) => ({ default: m.ModelsPricingPage }))
+const ModelsComparePage = lazy(() =>
+  import('./pages/ModelsComparePage').then((m) => ({ default: m.ModelsComparePage }))
 );
 const SubscriptionsPage = lazy(() =>
   import('./pages/SubscriptionsPage').then((m) => ({ default: m.SubscriptionsPage }))
-);
-const SpeedLatencyPage = lazy(() =>
-  import('./pages/SpeedLatencyPage').then((m) => ({ default: m.SpeedLatencyPage }))
 );
 const DataSourcesPage = lazy(() =>
   import('./pages/DataSourcesPage').then((m) => ({ default: m.DataSourcesPage }))
@@ -58,7 +55,6 @@ const VALID_NAV_PAGES: ReadonlyArray<NavPage> = [
   'monthly',
   'models',
   'subscriptions',
-  'speed',
   'sources',
   'preferences',
 ];
@@ -221,8 +217,10 @@ export function App() {
     void listen<WorkspaceNavigatePayload>('navigate-workspace', (event) => {
       const payload = event.payload;
       if (!payload) return;
-      if (payload.page && VALID_NAV_PAGES.includes(payload.page as NavPage)) {
-        setActivePage(payload.page as NavPage);
+      // `speed` was merged into the 模型对比 page in v0.4.6.
+      const requestedPage = payload.page === 'speed' ? 'models' : payload.page;
+      if (requestedPage && VALID_NAV_PAGES.includes(requestedPage as NavPage)) {
+        setActivePage(requestedPage as NavPage);
       }
       if (payload.provider_id !== undefined) {
         setProviderFilter(payload.provider_id || 'all');
@@ -399,11 +397,9 @@ export function App() {
       case 'monthly':
         return <MonthlyPage />;
       case 'models':
-        return <ModelsPricingPage />;
+        return <ModelsComparePage />;
       case 'subscriptions':
         return <SubscriptionsPage />;
-      case 'speed':
-        return <SpeedLatencyPage />;
       case 'sources':
         return <DataSourcesPage />;
       case 'preferences':

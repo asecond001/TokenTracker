@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { formatTps, providerAccentColor, providerDisplayName } from '../lib/format';
 import type { ActiveSessionSummary, LiveModelSpeed } from '../types/ipc';
 
@@ -8,94 +8,87 @@ export interface LiveSpeedBreakdown {
   isMultiModel: boolean;
 }
 
+/** A session counts as live only while its last request is this recent. */
+export const LIVE_ACTIVE_WINDOW_MS = 120_000;
+
+function isSessionLive(session: ActiveSessionSummary, nowMs: number): boolean {
+  return (
+    session.activity_state === 'active' &&
+    nowMs - session.last_active_at_ms <= LIVE_ACTIVE_WINDOW_MS
+  );
+}
+
+/**
+ * Live generation speed derived from *currently active* sessions only. Once no
+ * session has produced output within `LIVE_ACTIVE_WINDOW_MS` the readout is
+ * empty, rather than freezing on the last observed value.
+ */
 export function computeLiveSpeedBreakdown(
   activeSessions?: ActiveSessionSummary[] | null,
   liveModelSpeeds?: LiveModelSpeed[] | null,
-  fallbackTps?: number | null
+  nowMs: number = Date.now()
 ): LiveSpeedBreakdown {
+  const sessions = Array.isArray(activeSessions) ? activeSessions : [];
+  const liveSessions = sessions.filter((s) => isSessionLive(s, nowMs));
+  const liveKeys = new Set(liveSessions.map((s) => `${s.provider_id}::${s.model_id}`));
+
   if (Array.isArray(liveModelSpeeds) && liveModelSpeeds.length > 0) {
     const valid = liveModelSpeeds.filter(
-      (m) => Number.isFinite(m.output_tps) && m.output_tps > 0
+      (m) =>
+        Number.isFinite(m.output_tps) &&
+        m.output_tps > 0 &&
+        m.activity_state === 'active' &&
+        liveKeys.has(`${m.provider_id}::${m.model_id}`)
     );
     if (valid.length > 0) {
       const mean = valid.reduce((sum, item) => sum + item.output_tps, 0) / valid.length;
-      return {
-        primaryTps: mean,
-        items: valid,
-        isMultiModel: valid.length > 1,
-      };
+      return { primaryTps: mean, items: valid, isMultiModel: valid.length > 1 };
     }
   }
 
-  const sessions = Array.isArray(activeSessions) ? activeSessions : [];
-  const withTps = sessions.filter(
-    (s): s is ActiveSessionSummary & { latest_output_tps: number } =>
-      typeof s.latest_output_tps === 'number' &&
-      Number.isFinite(s.latest_output_tps) &&
-      s.latest_output_tps > 0
-  );
-
-  if (withTps.length > 0) {
-    const hasActive = withTps.some((s) => s.activity_state === 'active');
-    const sourceList = hasActive
-      ? withTps.filter((s) => s.activity_state === 'active')
-      : withTps;
-
-    const grouped = new Map<
-      string,
-      { provider_id: string; model_id: string; values: number[]; isActive: boolean }
-    >();
-    for (const sess of sourceList) {
-      const key = `${sess.provider_id}::${sess.model_id}`;
-      const existing = grouped.get(key);
-      if (existing) {
-        existing.values.push(sess.latest_output_tps);
-        if (sess.activity_state === 'active') {
-          existing.isActive = true;
-        }
-      } else {
-        grouped.set(key, {
-          provider_id: sess.provider_id,
-          model_id: sess.model_id,
-          values: [sess.latest_output_tps],
-          isActive: sess.activity_state === 'active',
-        });
-      }
+  const grouped = new Map<string, { provider_id: string; model_id: string; values: number[] }>();
+  for (const sess of liveSessions) {
+    const tps = sess.latest_output_tps;
+    if (typeof tps !== 'number' || !Number.isFinite(tps) || tps <= 0) continue;
+    const key = `${sess.provider_id}::${sess.model_id}`;
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.values.push(tps);
+    } else {
+      grouped.set(key, { provider_id: sess.provider_id, model_id: sess.model_id, values: [tps] });
     }
-
-    const items: LiveModelSpeed[] = Array.from(grouped.values()).map((entry) => ({
-      provider_id: entry.provider_id,
-      model_id: entry.model_id,
-      output_tps: entry.values.reduce((a, b) => a + b, 0) / entry.values.length,
-      activity_state: entry.isActive ? 'active' : 'recent',
-    }));
-
-    const primaryTps =
-      items.reduce((sum, item) => sum + item.output_tps, 0) / items.length;
-
-    return {
-      primaryTps,
-      items,
-      isMultiModel: items.length > 1,
-    };
   }
 
-  const safeFallback =
-    typeof fallbackTps === 'number' && Number.isFinite(fallbackTps) && fallbackTps > 0
-      ? fallbackTps
-      : null;
+  const items: LiveModelSpeed[] = Array.from(grouped.values()).map((entry) => ({
+    provider_id: entry.provider_id,
+    model_id: entry.model_id,
+    output_tps: entry.values.reduce((a, b) => a + b, 0) / entry.values.length,
+    activity_state: 'active',
+  }));
 
+  if (items.length === 0) {
+    return { primaryTps: null, items: [], isMultiModel: false };
+  }
   return {
-    primaryTps: safeFallback,
-    items: [],
-    isMultiModel: false,
+    primaryTps: items.reduce((sum, item) => sum + item.output_tps, 0) / items.length,
+    items,
+    isMultiModel: items.length > 1,
   };
+}
+
+/** Re-renders every `intervalMs` so live readouts fade out on wall-clock time. */
+export function useNowTick(intervalMs = 5_000): number {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), intervalMs);
+    return () => window.clearInterval(timer);
+  }, [intervalMs]);
+  return nowMs;
 }
 
 export interface LiveSpeedBadgeProps {
   activeSessions?: ActiveSessionSummary[] | null;
   liveModelSpeeds?: LiveModelSpeed[] | null;
-  fallbackTps?: number | null;
   align?: 'left' | 'right';
   placement?: 'top' | 'bottom';
   className?: string;
@@ -105,18 +98,14 @@ export interface LiveSpeedBadgeProps {
 export function LiveSpeedBadge({
   activeSessions,
   liveModelSpeeds,
-  fallbackTps,
   align = 'right',
   placement = 'bottom',
   className = '',
   children,
 }: LiveSpeedBadgeProps) {
   const [hovered, setHovered] = useState(false);
-  const breakdown = computeLiveSpeedBreakdown(
-    activeSessions,
-    liveModelSpeeds,
-    fallbackTps
-  );
+  const nowMs = useNowTick();
+  const breakdown = computeLiveSpeedBreakdown(activeSessions, liveModelSpeeds, nowMs);
 
   const tooltipSummary =
     breakdown.items.length > 0
@@ -128,7 +117,7 @@ export function LiveSpeedBadge({
           .join(' | ')
       : breakdown.primaryTps !== null
         ? `实时生成速率: ${formatTps(breakdown.primaryTps)}`
-        : '实时生成速率待采样';
+        : '等待活跃会话';
 
   const hasDetails = breakdown.items.length > 0 || breakdown.primaryTps !== null;
 

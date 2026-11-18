@@ -47,6 +47,12 @@ pub struct MonthlyQuery {
     #[serde(default)]
     pub device_id: Option<String>,
     pub tz_offset_minutes: i32,
+    /// Optional custom statistics range (inclusive, epoch ms). When both are set
+    /// they override the calendar month given by `year` / `month`.
+    #[serde(default)]
+    pub start_ms: Option<i64>,
+    #[serde(default)]
+    pub end_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -240,6 +246,15 @@ pub struct MonthlyReport {
     pub model_shares: Vec<UsageShareItem>,
     pub daily_ledger: Vec<MonthlyDailyLedgerRow>,
     pub heatmap_365d: Vec<HeatmapDayCell>,
+    /// Resolved statistics range (inclusive, epoch ms).
+    #[serde(default)]
+    pub range_start_ms: i64,
+    #[serde(default)]
+    pub range_end_ms: i64,
+    /// Subscription fees prorated to the statistics range (equals the monthly
+    /// fee for a calendar-month query). `roi_multiplier` is computed from this.
+    #[serde(default)]
+    pub subscription_period_fee_micro_usd: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

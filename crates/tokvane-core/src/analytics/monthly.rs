@@ -18,22 +18,36 @@ impl Storage {
                     CoreError::Validation("Invalid next month date".to_string())
                 })?;
 
-            let start_ms = month_start_date
+            let month_start_ms = month_start_date
                 .and_hms_opt(0, 0, 0)
                 .and_then(|ndt| offset.from_local_datetime(&ndt).single())
                 .map(|d| d.timestamp_millis())
                 .ok_or_else(|| CoreError::TimeOverflow("Month start timestamp".to_string()))?;
-            let end_ms = next_month_date
+            let month_end_ms = next_month_date
                 .and_hms_opt(0, 0, 0)
                 .and_then(|ndt| offset.from_local_datetime(&ndt).single())
                 .map(|d| d.timestamp_millis() - 1)
                 .ok_or_else(|| CoreError::TimeOverflow("Month end timestamp".to_string()))?;
+
+            let custom_range = match (query.start_ms, query.end_ms) {
+                (Some(s), Some(e)) if e >= s => Some((s, e)),
+                (Some(_), Some(_)) => {
+                    return Err(CoreError::Validation(
+                        "Statistics range end precedes start".to_string(),
+                    ))
+                }
+                _ => None,
+            };
+            let (start_ms, end_ms) = custom_range.unwrap_or((month_start_ms, month_end_ms));
 
             let provider = normalized_optional_filter(&query.provider_id);
             let device_id = normalized_optional_filter(&query.device_id);
 
             // Query hourly rollups for exact local-timezone day grouping.
             let rows = fetch_hourly_rows(conn, start_ms, end_ms, provider, device_id)?;
+            // Open-ended ranges (e.g. "all history" starting at epoch 0) prorate
+            // subscription fees from the first observed bucket instead.
+            let first_bucket_ms = rows.iter().map(|r| r.bucket_start_ms).min();
 
             #[derive(Default)]
             struct DayAccum {
@@ -163,14 +177,29 @@ impl Storage {
                 .map(|p| p.monthly_fee_micro_usd)
                 .sum();
 
-            let roi_multiplier = if subscription_monthly_fee_micro_usd > 0 {
-                Some(month_cost as f64 / subscription_monthly_fee_micro_usd as f64)
+            let subscription_period_fee_micro_usd = if custom_range.is_some() {
+                let fee_start_ms = if start_ms <= 0 {
+                    first_bucket_ms.unwrap_or(start_ms)
+                } else {
+                    start_ms
+                };
+                prorate_monthly_fee(subscription_monthly_fee_micro_usd, fee_start_ms, end_ms)
+            } else {
+                subscription_monthly_fee_micro_usd
+            };
+
+            let roi_multiplier = if subscription_period_fee_micro_usd > 0 {
+                Some(month_cost as f64 / subscription_period_fee_micro_usd as f64)
             } else {
                 None
             };
 
-            // 365-day heatmap ending at the last local day of the queried month, aligned via hourly rollups.
-            let end_date = next_month_date.pred_opt().unwrap_or(month_start_date);
+            // 365-day heatmap ending at the last local day of the statistics range, aligned via hourly rollups.
+            let end_date = if custom_range.is_some() {
+                local_date_from_ms(end_ms, offset).unwrap_or(month_start_date)
+            } else {
+                next_month_date.pred_opt().unwrap_or(month_start_date)
+            };
             let heatmap_start_date = end_date - chrono::Duration::days(364);
             let heatmap_start_str = heatmap_start_date.format("%Y-%m-%d").to_string();
             let end_date_str = end_date.format("%Y-%m-%d").to_string();
@@ -238,9 +267,28 @@ impl Storage {
                 model_shares,
                 daily_ledger,
                 heatmap_365d,
+                range_start_ms: start_ms,
+                range_end_ms: end_ms,
+                subscription_period_fee_micro_usd,
             })
         })
     }
+}
+
+/// Average Gregorian month length used to prorate monthly subscription fees.
+const AVG_MONTH_MS: f64 = 30.436_875 * DAY_MS as f64;
+
+/// Prorates a monthly fee to the inclusive `[start_ms, end_ms]` range.
+pub(crate) fn prorate_monthly_fee(monthly_fee_micro_usd: i64, start_ms: i64, end_ms: i64) -> i64 {
+    if monthly_fee_micro_usd <= 0 || end_ms < start_ms {
+        return 0;
+    }
+    let span_ms = (end_ms - start_ms + 1) as f64;
+    (monthly_fee_micro_usd as f64 * span_ms / AVG_MONTH_MS).round() as i64
+}
+
+fn local_date_from_ms(ms: i64, offset: FixedOffset) -> Option<NaiveDate> {
+    chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&offset).date_naive())
 }
 
 /// Export a `MonthlyReport` as deterministic RFC-4180 CSV matching displayed totals.

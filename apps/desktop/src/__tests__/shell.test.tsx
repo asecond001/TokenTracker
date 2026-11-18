@@ -363,21 +363,23 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
     fireEvent.click(within(screen.getByTestId('time-range-control')).getByRole('button', { name: '30 天' }));
     expect(useWorkspaceStore.getState().timePreset).toBe('30d');
 
-    // Models & Pricing: visible
-    fireEvent.click(screen.getByRole('button', { name: '模型与价格' }));
-    expect(await screen.findByTestId('time-range-control')).toBeInTheDocument();
-
-    // Speed & Latency: visible even on empty state
-    fireEvent.click(screen.getByRole('button', { name: '速度监测' }));
+    // 模型对比 (merged models & speed): visible; the 速度 view keeps it on empty state
+    fireEvent.click(screen.getByRole('button', { name: '模型对比' }));
+    expect(await screen.findByRole('heading', { name: '模型对比' })).toBeInTheDocument();
+    expect(screen.getByTestId('time-range-control')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: '速度' }));
     expect(
       await screen.findByText(/当前时间窗等待有效耗时样本/)
     ).toBeInTheDocument();
     expect(screen.getByTestId('time-range-control')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '速度监测' })).not.toBeInTheDocument();
 
-    // Monthly, Usage, DataSources, Preferences: absent
-    fireEvent.click(screen.getByRole('button', { name: '月度统计' }));
-    expect(await screen.findByRole('heading', { name: '月度统计' })).toBeInTheDocument();
-    expect(screen.queryByTestId('time-range-control')).not.toBeInTheDocument();
+    // 统计: every figure follows the shared range control
+    fireEvent.click(screen.getByRole('button', { name: '统计' }));
+    expect(await screen.findByRole('heading', { name: '统计' })).toBeInTheDocument();
+    expect(screen.getByTestId('time-range-control')).toBeInTheDocument();
+
+    // Usage, DataSources, Preferences: absent
 
     fireEvent.click(screen.getByRole('button', { name: '用量' }));
     expect(
@@ -478,9 +480,25 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
 
     renderWithQuery(<TrendsPage />);
     const chart = await screen.findByTestId('echart-stub');
-    expect(chart).toHaveAttribute('data-series-names', 'Claude Code,Antigravity');
+    // Line is the default; the dashed previous-period overlay follows the real series.
+    await waitFor(() =>
+      expect(screen.getByTestId('echart-stub')).toHaveAttribute(
+        'data-series-names',
+        'Claude Code,Antigravity,上一周期'
+      )
+    );
+    expect(chart).toBeInTheDocument();
 
-    const barOption = JSON.parse(chart.getAttribute('data-option-json') || '{}') as EChartMockOption;
+    fireEvent.click(screen.getByRole('button', { name: '对比上一周期' }));
+    expect(screen.getByTestId('echart-stub')).toHaveAttribute(
+      'data-series-names',
+      'Claude Code,Antigravity'
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '柱状' }));
+    const barOption = JSON.parse(
+      screen.getByTestId('echart-stub').getAttribute('data-option-json') || '{}'
+    ) as EChartMockOption;
     for (const s of barOption.series ?? []) {
       expect(s.type).toBe('bar');
       expect(s.stack).toBe('total');

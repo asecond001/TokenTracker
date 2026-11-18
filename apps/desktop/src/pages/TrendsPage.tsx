@@ -68,6 +68,23 @@ function resolveSeriesColor(dimension: StackDimension, key: string, index: numbe
   return PALETTE[index % PALETTE.length];
 }
 
+/** Percent change, `null` when there is no baseline to compare against. */
+export function percentChange(current: number, previous: number): number | null {
+  if (!Number.isFinite(previous) || previous <= 0) return null;
+  return ((current - previous) / previous) * 100;
+}
+
+/** The window of equal length immediately preceding `[startMs, endMs]` (end clamped to now). */
+export function previousPeriodRange(
+  startMs: number,
+  endMs: number,
+  nowMs: number
+): { start_ms: number; end_ms: number } {
+  const effectiveEnd = Math.max(startMs, Math.min(endMs, nowMs));
+  const span = effectiveEnd - startMs + 1;
+  return { start_ms: startMs - span, end_ms: startMs - 1 };
+}
+
 function DeltaCell({ pct }: { pct: number | null | undefined }) {
   if (pct === null || pct === undefined || !Number.isFinite(pct)) {
     return <span style={{ color: 'var(--text-muted)' }}>—</span>;
@@ -105,7 +122,8 @@ export function TrendsPage() {
   const [granularity, setGranularity] = useState<TrendGranularity>('auto');
   const [dimension, setDimension] = useState<StackDimension>('provider');
   const [metric, setMetric] = useState<TrendMetric>('tokens');
-  const [chartStyle, setChartStyle] = useState<TrendChartStyle>('bar');
+  const [chartStyle, setChartStyle] = useState<TrendChartStyle>('line');
+  const [comparePrevious, setComparePrevious] = useState(true);
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
 
   const resolvedSpanLabel = formatResolvedDateSpan(timePreset, customRange);
@@ -138,6 +156,39 @@ export function TrendsPage() {
   });
 
   const isAllTime = timePreset === 'all';
+  const previousEnabled = comparePrevious && !isAllTime;
+
+  // Same span immediately before the current window (mirrors the backend's
+  // comparison rows), used for the dashed "上一周期" overlay.
+  const { data: previousData } = useQuery({
+    queryKey: [
+      'trends-previous',
+      timePreset,
+      customRangeKey,
+      providerFilter,
+      deviceFilter,
+      tzOffsetMinutes,
+      granularity,
+      dimension,
+    ],
+    queryFn: () => {
+      const range = computeTimeRange(timePreset, customRange);
+      const prev = previousPeriodRange(range.start_ms, range.end_ms, Date.now());
+      const filter: AnalyticsFilter = {
+        start_ms: prev.start_ms,
+        end_ms: prev.end_ms,
+        provider_id: providerFilter === 'all' ? null : providerFilter,
+        device_id: deviceFilter === 'all' ? null : deviceFilter,
+        tz_offset_minutes: tzOffsetMinutes,
+        all_time: false,
+      };
+      return ipc.getTrends({ filter, granularity, dimension });
+    },
+    enabled: previousEnabled,
+    placeholderData: keepPreviousData,
+    refetchInterval: CLOCK_REFRESH_MS,
+  });
+
   const effectiveGranularity: TrendGranularity = data?.effective_granularity ?? granularity;
 
   const nonZeroSeries = useMemo(
@@ -196,9 +247,15 @@ export function TrendsPage() {
       }
     });
 
+    const comparisons = data?.comparisons ?? [];
+    const prevTokens = comparisons.reduce((acc, r) => acc + r.previous_tokens, 0);
+    const prevCost = comparisons.reduce((acc, r) => acc + r.previous_cost_micro_usd, 0);
+
     return {
       totalTokens,
       totalCostMicro,
+      tokensDeltaPct: isAllTime ? null : percentChange(totalTokens, prevTokens),
+      costDeltaPct: isAllTime ? null : percentChange(totalCostMicro, prevCost),
       avgDailyTokens: Math.round(totalTokens / dayCount),
       avgDailyCostMicro: Math.round(totalCostMicro / dayCount),
       peakBucketLabel,
@@ -212,6 +269,37 @@ export function TrendsPage() {
     effectiveGranularity,
     tzOffsetMinutes,
   ]);
+
+  const previousOverlay = useMemo(() => {
+    if (!previousEnabled || !previousData || metric === 'cache_hit') return null;
+    const bucketCount = data?.buckets.length ?? 0;
+    if (bucketCount === 0) return null;
+    const source = activeFocusedKey
+      ? previousData.series.filter((s) => s.key === activeFocusedKey)
+      : previousData.series;
+    const values = Array.from({ length: bucketCount }, (_, idx) =>
+      source.reduce((acc, s) => {
+        const p = s.points[idx];
+        if (!p) return acc;
+        if (metric === 'cost') return acc + p.cost_micro_usd;
+        if (metric === 'requests') return acc + p.requests;
+        return acc + p.tokens;
+      }, 0)
+    );
+    if (values.every((v) => v === 0)) return null;
+    return {
+      id: `previous-${metric}`,
+      name: '上一周期',
+      type: 'line' as const,
+      smooth: 0.25,
+      showSymbol: false,
+      z: 1,
+      universalTransition: true,
+      lineStyle: { width: 1.5, type: 'dashed' as const, color: chartTheme.dashedTrendColor, opacity: 0.55 },
+      itemStyle: { color: chartTheme.dashedTrendColor },
+      data: values,
+    };
+  }, [previousEnabled, previousData, metric, data, activeFocusedKey, chartTheme]);
 
   const chartOption = useMemo<EChartsOption>(() => {
     const buckets = data?.buckets ?? [];
@@ -275,7 +363,8 @@ export function TrendsPage() {
           },
         },
       },
-      series: visibleSeries.map((s, idx) => {
+      series: [
+        ...visibleSeries.map((s, idx) => {
         const color = seriesColorMap.get(s.key) ?? resolveSeriesColor(dimension, s.key, idx);
         const values = s.points.map((p) => {
           if (metric === 'cost') {
@@ -318,8 +407,11 @@ export function TrendsPage() {
           data: values,
         };
       }),
+        ...(previousOverlay ? [previousOverlay] : []),
+      ],
     };
   }, [
+    previousOverlay,
     data,
     effectiveGranularity,
     tzOffsetMinutes,
@@ -484,8 +576,8 @@ export function TrendsPage() {
           >
             {(
               [
-                { id: 'bar', label: '柱状' },
                 { id: 'line', label: '折线' },
+                { id: 'bar', label: '柱状' },
               ] as const
             ).map((kind) => {
               const active = chartStyle === kind.id;
@@ -506,6 +598,27 @@ export function TrendsPage() {
               );
             })}
           </div>
+
+          {!isAllTime && (
+            <button
+              type="button"
+              aria-pressed={comparePrevious}
+              onClick={() => setComparePrevious((v) => !v)}
+              className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1 text-[11.5px] rounded-lg cursor-pointer whitespace-nowrap"
+              style={{
+                border: '1px solid var(--border-hairline)',
+                backgroundColor: comparePrevious ? 'var(--bg-hover)' : 'transparent',
+                color: comparePrevious ? 'var(--text-primary)' : 'var(--text-secondary)',
+              }}
+            >
+              <span
+                aria-hidden="true"
+                className="inline-block w-3.5 border-t border-dashed"
+                style={{ borderColor: comparePrevious ? 'var(--text-primary)' : 'var(--text-muted)' }}
+              />
+              对比上一周期
+            </button>
+          )}
         </div>
       </section>
 
@@ -515,16 +628,30 @@ export function TrendsPage() {
           <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
             区间总 Token
           </div>
-          <div className="mt-1 text-[20px] font-semibold tabular-nums">
-            {formatTokens(periodSummary.totalTokens)}
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="text-[20px] font-semibold tabular-nums">
+              {formatTokens(periodSummary.totalTokens)}
+            </span>
+            {periodSummary.tokensDeltaPct !== null && (
+              <span className="text-[11.5px] tabular-nums" data-testid="trends-tokens-delta">
+                <DeltaCell pct={periodSummary.tokensDeltaPct} />
+              </span>
+            )}
           </div>
         </div>
         <div className="lg:px-5" style={{ borderLeft: '1px solid var(--border-hairline)' }}>
           <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
             区间等效费用 ({currency})
           </div>
-          <div className="mt-1 text-[20px] font-semibold tabular-nums">
-            {formatCost(periodSummary.totalCostMicro, currency, usdToCnyRate)}
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="text-[20px] font-semibold tabular-nums">
+              {formatCost(periodSummary.totalCostMicro, currency, usdToCnyRate)}
+            </span>
+            {periodSummary.costDeltaPct !== null && (
+              <span className="text-[11.5px] tabular-nums" data-testid="trends-cost-delta">
+                <DeltaCell pct={periodSummary.costDeltaPct} />
+              </span>
+            )}
           </div>
         </div>
         <div className="lg:px-5" style={{ borderLeft: '1px solid var(--border-hairline)' }}>

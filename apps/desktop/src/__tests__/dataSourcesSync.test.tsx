@@ -705,11 +705,11 @@ describe('v0.3.0 Analytics Differentiation, Sync Pairing QR, TZ & UX Fixes', () 
     expect(await screen.findByTestId('trends-date-span')).toBeInTheDocument();
     expect(screen.getByText('区间总 Token')).toBeInTheDocument();
 
-    // Switch metric to 缓存命中率 -> keeps 柱状 / 折线 switcher visible, defaults to grouped bars, and switches cleanly to line
+    // Switch metric to 缓存命中率 -> keeps 柱状 / 折线 switcher visible, grouped (unstacked) bars, and switches cleanly back to line
     fireEvent.click(screen.getByRole('button', { name: '缓存命中率' }));
     expect(screen.getByRole('button', { name: '按 Token 类型' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: '柱状' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '折线' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '折线' })).toHaveAttribute('data-active', 'true');
+    fireEvent.click(screen.getByRole('button', { name: '柱状' }));
 
     const cacheBarOpt = JSON.parse(
       screen.getByTestId('echart-stub').getAttribute('data-option-json') || '{}'
@@ -729,7 +729,7 @@ describe('v0.3.0 Analytics Differentiation, Sync Pairing QR, TZ & UX Fixes', () 
     vi.spyOn(ipc, 'getMonthly').mockResolvedValue(makeMonthlyReport());
     renderWithQuery(<MonthlyPage />);
     expect(await screen.findByRole('columnheader', { name: '缓存节省 (USD)' })).toBeInTheDocument();
-    expect(screen.getByText('当月账单构成')).toBeInTheDocument();
+    expect(screen.getByText('账单构成')).toBeInTheDocument();
     expect(screen.getByText('提供商账单占比')).toBeInTheDocument();
     expect(screen.getByText('主力模型账单 Top 5')).toBeInTheDocument();
 

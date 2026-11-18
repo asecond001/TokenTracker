@@ -488,72 +488,53 @@ pub(crate) fn query_latest_tps_with_model(
     }
 }
 
+/// Returns `(latest_output_tps, live_model_speeds)`.
+///
+/// `live_model_speeds` only ever contains sessions that are *currently active*
+/// (last request within `ACTIVE_STATE_WINDOW_MS`), so the live readout drops
+/// to empty as soon as generation stops instead of freezing on a stale value.
+/// `latest_output_tps` keeps the most recent observed speed as a historical
+/// reference (active mean when available, otherwise the latest sample).
 pub(super) fn compute_live_model_speeds_and_tps(
     active_sessions: &[ActiveSessionSummary],
     fallback_recent: Option<(f64, String, String)>,
 ) -> (Option<f64>, Vec<LiveModelSpeed>) {
-    let has_active_with_tps = active_sessions.iter().any(|s| {
-        s.activity_state == "active"
-            && s.latest_output_tps.is_some_and(|v| v.is_finite() && v > 0.0)
-    });
-
     let mut grouped_order: Vec<(String, String)> = Vec::new();
-    let mut grouped_vals: HashMap<(String, String), (Vec<f64>, bool)> = HashMap::new();
+    let mut grouped_vals: HashMap<(String, String), Vec<f64>> = HashMap::new();
 
     for sess in active_sessions {
+        if sess.activity_state != "active" {
+            continue;
+        }
         let Some(tps) = sess.latest_output_tps.filter(|v| v.is_finite() && *v > 0.0) else {
             continue;
         };
-        if has_active_with_tps && sess.activity_state != "active" {
-            continue;
-        }
         let key = (sess.provider_id.clone(), sess.model_id.clone());
         if !grouped_vals.contains_key(&key) {
             grouped_order.push(key.clone());
         }
-        let entry = grouped_vals.entry(key).or_insert_with(|| (Vec::new(), false));
-        entry.0.push(tps);
-        if sess.activity_state == "active" {
-            entry.1 = true;
+        grouped_vals.entry(key).or_default().push(tps);
+    }
+
+    let mut items = Vec::with_capacity(grouped_order.len());
+    for key in grouped_order {
+        if let Some(vals) = grouped_vals.remove(&key) {
+            let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+            items.push(LiveModelSpeed {
+                provider_id: key.0,
+                model_id: key.1,
+                output_tps: mean,
+                activity_state: "active".to_string(),
+            });
         }
     }
 
-    if !grouped_order.is_empty() {
-        let mut items = Vec::with_capacity(grouped_order.len());
-        for (provider_id, model_id) in grouped_order {
-            if let Some((vals, is_active)) =
-                grouped_vals.remove(&(provider_id.clone(), model_id.clone()))
-            {
-                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
-                items.push(LiveModelSpeed {
-                    provider_id,
-                    model_id,
-                    output_tps: mean,
-                    activity_state: if is_active {
-                        "active".to_string()
-                    } else {
-                        "recent".to_string()
-                    },
-                });
-            }
-        }
+    if !items.is_empty() {
         let primary_tps = items.iter().map(|i| i.output_tps).sum::<f64>() / items.len() as f64;
         return (Some(primary_tps), items);
     }
 
-    if let Some((tps, model_id, provider_id)) = fallback_recent {
-        return (
-            Some(tps),
-            vec![LiveModelSpeed {
-                provider_id,
-                model_id,
-                output_tps: tps,
-                activity_state: "recent".to_string(),
-            }],
-        );
-    }
-
-    (None, Vec::new())
+    (fallback_recent.map(|(tps, _, _)| tps), Vec::new())
 }
 
 pub(crate) fn query_provider_shares(

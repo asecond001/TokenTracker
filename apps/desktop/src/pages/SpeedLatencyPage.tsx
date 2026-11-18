@@ -69,7 +69,12 @@ function escapeHtml(text: string): string {
     .replaceAll("'", '&#39;');
 }
 
-export function SpeedLatencyPage() {
+export interface SpeedLatencyPageProps {
+  /** Rendered inside the merged 模型对比 page: header and range control are owned by the host. */
+  embedded?: boolean;
+}
+
+export function SpeedLatencyPage({ embedded = false }: SpeedLatencyPageProps = {}) {
   const {
     timePreset,
     customStartDate,
@@ -492,15 +497,17 @@ export function SpeedLatencyPage() {
 
   return (
     <div className="space-y-7">
-      <section
-        className="flex flex-wrap items-center justify-between gap-3 pb-5"
-        style={{ borderBottom: '1px solid var(--border-hairline)' }}
-      >
-        <div>
-          <h1 className="text-[16px] font-semibold tracking-tight">速度监测</h1>
-        </div>
-        <TimeRangeControl />
-      </section>
+      {!embedded && (
+        <section
+          className="flex flex-wrap items-center justify-between gap-3 pb-5"
+          style={{ borderBottom: '1px solid var(--border-hairline)' }}
+        >
+          <div>
+            <h1 className="text-[16px] font-semibold tracking-tight">速度监测</h1>
+          </div>
+          <TimeRangeControl />
+        </section>
+      )}
 
       {isLoading && !data ? (
         <div className="py-12 text-center" style={{ color: 'var(--text-muted)' }}>

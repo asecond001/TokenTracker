@@ -46,7 +46,7 @@ interface PricingFormState {
   recompute_history: boolean;
 }
 
-type ModelsSubView = 'efficiency' | 'catalog';
+export type ModelsSubView = 'efficiency' | 'catalog';
 type EfficiencyChartMode = 'token_mix' | 'cost_saved';
 
 function modelCacheHitRatio(row: ModelStatRow): number {
@@ -65,7 +65,13 @@ const DEFAULT_PRICING_FORM: PricingFormState = {
   recompute_history: true,
 };
 
-export function ModelsPricingPage() {
+export interface ModelsPricingPageProps {
+  /** Rendered inside the merged 模型对比 page: title, sub-view switch and range control are owned by the host. */
+  embedded?: boolean;
+  view?: ModelsSubView;
+}
+
+export function ModelsPricingPage({ embedded = false, view }: ModelsPricingPageProps = {}) {
   const queryClient = useQueryClient();
   const {
     timePreset,
@@ -87,7 +93,8 @@ export function ModelsPricingPage() {
   const [sorting, setSorting] = useState<SortingState>([
     { id: 'estimated_cost_micro_usd', desc: true },
   ]);
-  const [subView, setSubView] = useState<ModelsSubView>('efficiency');
+  const [localSubView, setSubView] = useState<ModelsSubView>('efficiency');
+  const subView: ModelsSubView = view ?? localSubView;
   const [efficiencyChartMode, setEfficiencyChartMode] =
     useState<EfficiencyChartMode>('token_mix');
   const [catalogSearch, setCatalogSearch] = useState('');
@@ -681,7 +688,10 @@ export function ModelsPricingPage() {
         style={{ borderBottom: '1px solid var(--border-subtle)' }}
       >
         <div className="flex flex-wrap items-center gap-2.5">
-          <h1 className="text-[16px] font-semibold tracking-tight">模型开销统计</h1>
+          {!embedded && (
+            <h1 className="text-[16px] font-semibold tracking-tight">模型开销统计</h1>
+          )}
+          {!embedded && (
           <div
             className="seg-group"
             style={{
@@ -713,6 +723,7 @@ export function ModelsPricingPage() {
               );
             })}
           </div>
+          )}
           <span
             className="px-2 py-0.5 text-[11px] rounded-md tabular-nums"
             style={{
@@ -729,7 +740,7 @@ export function ModelsPricingPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          {subView === 'efficiency' && <TimeRangeControl />}
+          {!embedded && subView === 'efficiency' && <TimeRangeControl />}
 
           <div className="text-right tabular-nums">
             <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>

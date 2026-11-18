@@ -31,11 +31,11 @@ describe('MonthlyPage ROI reference visibility', () => {
     renderWithQuery(<MonthlyPage />);
 
     expect(await screen.findByText('$30.00')).toBeInTheDocument();
-    expect(screen.getByText('当月按量 API 等效价值 (USD)')).toBeInTheDocument();
+    expect(screen.getByText('API 等效价值 (USD)')).toBeInTheDocument();
     expect(
       screen.queryByText('订阅回本参考（基于您录入的订阅月费计算）')
     ).not.toBeInTheDocument();
-    expect(screen.queryByText('订阅月费基准')).not.toBeInTheDocument();
+    expect(screen.queryByText('订阅费基准')).not.toBeInTheDocument();
     expect(screen.queryByText(/等效产出/)).not.toBeInTheDocument();
   });
 
@@ -54,14 +54,14 @@ describe('MonthlyPage ROI reference visibility', () => {
       name: /订阅回本参考/,
     });
     expect(toggleBtn).toBeInTheDocument();
-    expect(screen.getByText('已录入月费 $20.00')).toBeInTheDocument();
+    expect(screen.getByText('区间订阅费 $20.00')).toBeInTheDocument();
     expect(screen.getByText('等效产出 1.50x')).toBeInTheDocument();
-    expect(screen.getByText('当月 API 等效产出')).toBeInTheDocument();
-    expect(screen.getByText('订阅月费基准')).toBeInTheDocument();
+    expect(screen.getByText('API 等效产出')).toBeInTheDocument();
+    expect(screen.getByText('订阅费基准')).toBeInTheDocument();
 
     // Collapsing hides the inner comparison bars cleanly
     fireEvent.click(toggleBtn);
-    expect(screen.queryByText('订阅月费基准')).not.toBeInTheDocument();
+    expect(screen.queryByText('订阅费基准')).not.toBeInTheDocument();
   });
 });
 

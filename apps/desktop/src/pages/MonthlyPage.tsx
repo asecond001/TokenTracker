@@ -1,7 +1,9 @@
 import { useCallback, useMemo, useState } from 'react';
 import { ShareReceiptDialog } from '../components/ShareReceiptDialog';
 import { ActionNotice } from '../components/ActionNotice';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { TimeRangeControl } from '../components/TimeRangeControl';
+import { CLOCK_REFRESH_MS } from '../lib/liveRefresh';
 import {
   createColumnHelper,
   flexRender,
@@ -12,13 +14,7 @@ import {
 } from '@tanstack/react-table';
 import { save } from '@tauri-apps/plugin-dialog';
 import type { EChartsOption } from 'echarts';
-import {
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  Download,
-  ReceiptText,
-} from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, ReceiptText } from 'lucide-react';
 import { AnimatedNumber } from '../components/AnimatedNumber';
 import { EChartBox } from '../components/EChartBox';
 import { InlineProgressBar } from '../components/InlineProgressBar';
@@ -31,8 +27,14 @@ import {
   providerDisplayName,
 } from '../lib/format';
 import { ipc, isTauriRuntime } from '../lib/ipc';
-import { useWorkspaceStore } from '../stores/workspaceStore';
-import type { HeatmapDayCell, MonthlyDailyLedgerRow } from '../types/ipc';
+import {
+  buildCustomRangeKey,
+  computeTimeRange,
+  formatResolvedDateSpan,
+  selectCustomRange,
+  useWorkspaceStore,
+} from '../stores/workspaceStore';
+import type { HeatmapDayCell, MonthlyDailyLedgerRow, MonthlyQuery } from '../types/ipc';
 
 const colHelper = createColumnHelper<MonthlyDailyLedgerRow>();
 
@@ -89,10 +91,16 @@ function escapeHtml(text: string): string {
     .replaceAll("'", '&#39;');
 }
 
+const DAY_MS = 86_400_000;
+
+function localYmd(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** 统计 page: every figure follows the shared time-range control. */
 export function MonthlyPage() {
   const now = new Date();
-  const [year, setYear] = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth() + 1);
   const [sorting, setSorting] = useState<SortingState>([{ id: 'date', desc: true }]);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
   const clearExportNotice = useCallback(() => setExportNotice(null), []);
@@ -100,24 +108,45 @@ export function MonthlyPage() {
   const [shareOpen, setShareOpen] = useState(false);
   const closeShare = useCallback(() => setShareOpen(false), []);
 
-  const { providerFilter, deviceFilter, currency, usdToCnyRate, tzOffsetMinutes } =
-    useWorkspaceStore();
+  const {
+    timePreset,
+    customStartDate,
+    customEndDate,
+    customPrecise,
+    customStartMs,
+    customEndMs,
+    providerFilter,
+    deviceFilter,
+    currency,
+    usdToCnyRate,
+    tzOffsetMinutes,
+  } = useWorkspaceStore();
+  const rangeFields = { customStartDate, customEndDate, customPrecise, customStartMs, customEndMs };
+  const customRange = selectCustomRange(rangeFields);
+  const customRangeKey = buildCustomRangeKey(rangeFields);
   const chartTheme = useChartTheme();
+  const spanLabel = formatResolvedDateSpan(timePreset, customRange);
 
-  const query = useMemo(
-    () => ({
-      year,
-      month,
+  const buildQuery = useCallback((): MonthlyQuery => {
+    const range = computeTimeRange(timePreset, customRange);
+    const anchor = new Date(Math.min(range.end_ms, Date.now()));
+    return {
+      year: anchor.getFullYear(),
+      month: anchor.getMonth() + 1,
       provider_id: providerFilter === 'all' ? null : providerFilter,
       device_id: deviceFilter === 'all' ? null : deviceFilter,
       tz_offset_minutes: tzOffsetMinutes,
-    }),
-    [year, month, providerFilter, deviceFilter, tzOffsetMinutes]
-  );
+      start_ms: range.start_ms,
+      end_ms: range.end_ms,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timePreset, customRangeKey, providerFilter, deviceFilter, tzOffsetMinutes]);
 
   const { data, isLoading } = useQuery({
-    queryKey: ['monthly', query],
-    queryFn: () => ipc.getMonthly(query),
+    queryKey: ['monthly', timePreset, customRangeKey, providerFilter, deviceFilter, tzOffsetMinutes],
+    queryFn: () => ipc.getMonthly(buildQuery()),
+    placeholderData: keepPreviousData,
+    refetchInterval: CLOCK_REFRESH_MS,
   });
 
   const costFormatter = useCallback(
@@ -125,15 +154,18 @@ export function MonthlyPage() {
     [currency, usdToCnyRate]
   );
 
-  const shiftMonth = (delta: number) => {
-    const d = new Date(year, month - 1 + delta, 1);
-    setYear(d.getFullYear());
-    setMonth(d.getMonth() + 1);
-  };
-
   const handleExport = async (format: 'csv' | 'json') => {
     setExportNotice(null);
-    const defaultName = `tokenvane-${year}-${String(month).padStart(2, '0')}.${format}`;
+    const query = buildQuery();
+    const range = computeTimeRange(timePreset, customRange);
+    const startLabel = range.all_time
+      ? (data?.daily_ledger[0]?.date ?? localYmd(Date.now()))
+      : localYmd(range.start_ms);
+    const endLabel = localYmd(Math.min(range.end_ms, Date.now()));
+    const defaultName =
+      startLabel === endLabel
+        ? `tokenvane-${startLabel}.${format}`
+        : `tokenvane-${startLabel}_${endLabel}.${format}`;
     let savePath: string | null = null;
     if (isTauriRuntime()) {
       savePath = await save({
@@ -162,14 +194,12 @@ export function MonthlyPage() {
 
   const heatmapOption = useMemo<EChartsOption>(() => {
     const cells = data?.heatmap_365d ?? [];
-    const endDay = `${year}-${String(month).padStart(2, '0')}-${String(
-      new Date(year, month, 0).getDate()
-    ).padStart(2, '0')}`;
-    const startDateObj = new Date(year, month, 0);
-    startDateObj.setDate(startDateObj.getDate() - 364);
-    const startDay = `${startDateObj.getFullYear()}-${String(
-      startDateObj.getMonth() + 1
-    ).padStart(2, '0')}-${String(startDateObj.getDate()).padStart(2, '0')}`;
+    const endMs = data?.range_end_ms ?? Date.now();
+    const endDateObj = new Date(endMs);
+    const endDay = localYmd(endMs);
+    const startDay = localYmd(
+      new Date(endDateObj.getFullYear(), endDateObj.getMonth(), endDateObj.getDate() - 364).getTime()
+    );
 
     const intensityLevels = computeHeatmapIntensityLevels(cells);
     const seriesData = cells.map((c) => [
@@ -239,7 +269,7 @@ export function MonthlyPage() {
         },
       ],
     };
-  }, [data, year, month, currency, usdToCnyRate, chartTheme]);
+  }, [data, currency, usdToCnyRate, chartTheme]);
 
   const columns = useMemo(
     () => [
@@ -318,18 +348,27 @@ export function MonthlyPage() {
   });
 
   const apiVal = data?.api_equivalent_cost_micro_usd ?? 0;
-  const subFee = data?.subscription_monthly_fee_micro_usd ?? 0;
+  const subFee =
+    data?.subscription_period_fee_micro_usd ?? data?.subscription_monthly_fee_micro_usd ?? 0;
   const hasUserSubscriptionFee = subFee > 0;
   const maxVal = Math.max(1, apiVal, subFee);
   const apiBarWidth = (apiVal / maxVal) * 100;
   const feeBarWidth = (subFee / maxVal) * 100;
 
-  const isOngoingCurrentMonth = year === now.getFullYear() && month === now.getMonth() + 1;
-  const daysInSelectedMonth = new Date(year, month, 0).getDate();
-  const elapsedDays = isOngoingCurrentMonth ? Math.max(1, now.getDate()) : daysInSelectedMonth;
+  const resolvedRange = computeTimeRange(timePreset, customRange, now);
+  const firstLedgerMs = data?.daily_ledger[0]
+    ? new Date(`${data.daily_ledger[0].date}T00:00:00`).getTime()
+    : now.getTime();
+  const effectiveStartMs = resolvedRange.all_time
+    ? Math.min(firstLedgerMs, now.getTime())
+    : resolvedRange.start_ms;
+  const effectiveEndMs = Math.min(resolvedRange.end_ms, now.getTime());
+  const elapsedDays = Math.max(1, Math.ceil((effectiveEndMs - effectiveStartMs + 1) / DAY_MS));
   const dailyAvgCostMicro = Math.round(apiVal / elapsedDays);
+  const isOngoingCurrentMonth = timePreset === 'month';
+  const daysInCurrentMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const projectedMonthCostMicro = isOngoingCurrentMonth
-    ? Math.round((apiVal / elapsedDays) * daysInSelectedMonth)
+    ? Math.round((apiVal / elapsedDays) * daysInCurrentMonth)
     : apiVal;
   const dailyAvgTokens = Math.round((data?.month_total_tokens ?? 0) / elapsedDays);
   const monthCacheSaved = data?.month_cache_saved_micro_usd ?? 0;
@@ -360,38 +399,23 @@ export function MonthlyPage() {
         className="flex flex-wrap items-center justify-between gap-4 pb-5"
         style={{ borderBottom: '1px solid var(--border-hairline)' }}
       >
-        <div>
-          <h1 className="text-[16px] font-semibold tracking-tight">月度统计</h1>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <div
-            className="seg-group"
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-[16px] font-semibold tracking-tight">统计</h1>
+          <span
+            data-testid="stats-date-span"
+            className="px-2 py-0.5 text-[11px] rounded-md tabular-nums"
             style={{
               backgroundColor: 'var(--bg-sidebar)',
-              borderColor: 'var(--border-hairline)',
+              border: '1px solid var(--border-hairline)',
+              color: 'var(--text-secondary)',
             }}
           >
-            <button
-              type="button"
-              onClick={() => shiftMonth(-1)}
-              className="btn-interactive p-1.5 rounded-lg cursor-pointer"
-              aria-label="上一个月"
-            >
-              <ChevronLeft className="w-3.5 h-3.5" />
-            </button>
-            <span className="px-3 text-[12.5px] font-medium tabular-nums">
-              {year}-{String(month).padStart(2, '0')}
-            </span>
-            <button
-              type="button"
-              onClick={() => shiftMonth(1)}
-              className="btn-interactive p-1.5 rounded-lg cursor-pointer"
-              aria-label="下一个月"
-            >
-              <ChevronRight className="w-3.5 h-3.5" />
-            </button>
-          </div>
+            {spanLabel}
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <TimeRangeControl />
 
           <button
             type="button"
@@ -440,6 +464,7 @@ export function MonthlyPage() {
           report={data}
           currency={currency}
           usdToCnyRate={usdToCnyRate}
+          periodLabel={spanLabel}
           onClose={closeShare}
         />
       )}
@@ -451,7 +476,7 @@ export function MonthlyPage() {
       >
         <div className="lg:pr-5">
           <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
-            当月按量 API 等效价值 ({currency})
+            API 等效价值 ({currency})
           </div>
           <div className="mt-1.5 text-[24px] font-semibold tracking-tight tabular-nums">
             {isLoading && !data ? (
@@ -473,7 +498,7 @@ export function MonthlyPage() {
           style={{ borderLeft: '1px solid var(--border-hairline)' }}
         >
           <div className="text-[11.5px] font-medium" style={{ color: 'var(--text-secondary)' }}>
-            当月总 Token
+            总 Token
           </div>
           <div className="mt-1.5 text-[24px] font-semibold tracking-tight tabular-nums">
             {isLoading && !data ? (
@@ -530,7 +555,7 @@ export function MonthlyPage() {
             )}
           </div>
           <div className="mt-1 text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-            {data?.daily_ledger.length ?? 0} 个活跃记账日
+            {data?.daily_ledger.length ?? 0} 个活跃日
           </div>
         </div>
       </section>
@@ -541,7 +566,7 @@ export function MonthlyPage() {
         style={{ borderBottom: '1px solid var(--border-hairline)' }}
       >
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-[13.5px] font-semibold">当月账单构成</h2>
+          <h2 className="text-[13.5px] font-semibold">账单构成</h2>
           <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
             按 {currency} API 等效费用占比排序
           </span>
@@ -590,7 +615,7 @@ export function MonthlyPage() {
               </div>
             ) : (
               <div className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                等待本月提供商账单数据
+                等待提供商账单数据
               </div>
             )}
           </div>
@@ -634,7 +659,7 @@ export function MonthlyPage() {
               </div>
             ) : (
               <div className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
-                等待本月模型账单数据
+                等待模型账单数据
               </div>
             )}
           </div>
@@ -670,7 +695,7 @@ export function MonthlyPage() {
             </div>
           </div>
           <span className="text-[11.5px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-            本月累计 {formatTokens(data?.month_total_tokens ?? 0)} ·{' '}
+            区间累计 {formatTokens(data?.month_total_tokens ?? 0)} ·{' '}
             {formatExactInt(data?.month_total_requests ?? 0)} 次请求
           </span>
         </div>
@@ -682,7 +707,7 @@ export function MonthlyPage() {
         <h2 className="text-[13.5px] font-semibold mb-3">按日账单明细</h2>
         {(data?.daily_ledger.length ?? 0) === 0 ? (
           <div className="py-10 text-center text-[12.5px]" style={{ color: 'var(--text-muted)' }}>
-            {year} 年 {month} 月等待用量记录
+            {spanLabel} 等待用量记录
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -769,7 +794,7 @@ export function MonthlyPage() {
 
             <div className="flex items-center gap-4 text-[12px] tabular-nums">
               <span style={{ color: 'var(--text-muted)' }}>
-                已录入月费 {formatCost(subFee, currency, usdToCnyRate)}
+                区间订阅费 {formatCost(subFee, currency, usdToCnyRate)}
               </span>
               {data?.roi_multiplier !== null && data?.roi_multiplier !== undefined && (
                 <span className="font-medium" style={{ color: 'var(--accent-emerald)' }}>
@@ -783,7 +808,7 @@ export function MonthlyPage() {
             <div className="mt-3 pl-6 pr-1 space-y-2.5">
               <div className="flex items-center gap-3">
                 <span className="w-28 text-[11.5px]" style={{ color: 'var(--text-secondary)' }}>
-                  当月 API 等效产出
+                  API 等效产出
                 </span>
                 <div
                   className="flex-1 h-1.5 rounded-full overflow-hidden"
@@ -808,7 +833,7 @@ export function MonthlyPage() {
 
               <div className="flex items-center gap-3">
                 <span className="w-28 text-[11.5px]" style={{ color: 'var(--text-secondary)' }}>
-                  订阅月费基准
+                  订阅费基准
                 </span>
                 <div
                   className="flex-1 h-1.5 rounded-full overflow-hidden"

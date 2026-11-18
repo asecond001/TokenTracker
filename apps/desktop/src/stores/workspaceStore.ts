@@ -9,7 +9,6 @@ export type NavPage =
   | 'monthly'
   | 'models'
   | 'subscriptions'
-  | 'speed'
   | 'sources'
   | 'preferences';
 

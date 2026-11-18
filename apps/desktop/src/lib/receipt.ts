@@ -64,10 +64,15 @@ export function buildReceiptModel(
   report: MonthlyReport,
   currency: CurrencyCode,
   usdToCnyRate: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  periodLabel?: string
 ): ReceiptModel {
   const cost = (micro: number) => formatCost(micro, currency, usdToCnyRate);
-  const period = `${report.year}-${pad2(report.month)}`;
+  const period = periodLabel?.trim() || `${report.year}-${pad2(report.month)}`;
+  const fileStem = period
+    .replace(/[\\/:*?"<>|]+/g, '')
+    .replace(/\s*~\s*/g, '_')
+    .replace(/\s+/g, '-');
   const lines: ReceiptLine[] = [
     { kind: 'title', text: 'TOKENVANE' },
     { kind: 'subtitle', text: `AI 用量小票 · ${period}` },
@@ -104,7 +109,7 @@ export function buildReceiptModel(
     });
   }
   if (models.length === 0) {
-    lines.push({ kind: 'note', text: '本月等待第一笔消费' });
+    lines.push({ kind: 'note', text: '等待第一笔消费' });
   }
 
   lines.push(
@@ -115,8 +120,10 @@ export function buildReceiptModel(
     { kind: 'divider' },
     { kind: 'row', left: 'API 等效合计', right: cost(report.api_equivalent_cost_micro_usd), strong: true }
   );
-  if (report.subscription_monthly_fee_micro_usd > 0) {
-    lines.push({ kind: 'row', left: '订阅实付', right: cost(report.subscription_monthly_fee_micro_usd) });
+  const subscriptionFee =
+    report.subscription_period_fee_micro_usd ?? report.subscription_monthly_fee_micro_usd;
+  if (subscriptionFee > 0) {
+    lines.push({ kind: 'row', left: '订阅实付', right: cost(subscriptionFee) });
     if (report.roi_multiplier !== null && Number.isFinite(report.roi_multiplier)) {
       lines.push({ kind: 'row', left: '回本倍数', right: `${report.roi_multiplier.toFixed(1)}×`, strong: true });
     }
@@ -146,10 +153,10 @@ export function buildReceiptModel(
 
   lines.push(
     { kind: 'barcode', seed: receiptNo(report) },
-    { kind: 'note', text: '谢谢惠顾 · 欢迎下月再来' }
+    { kind: 'note', text: '谢谢惠顾 · 欢迎再来' }
   );
 
-  return { lines, fileName: `tokenvane-receipt-${period}.png` };
+  return { lines, fileName: `tokenvane-receipt-${fileStem}.png` };
 }
 
 export interface ReceiptPalette {

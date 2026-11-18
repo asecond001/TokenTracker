@@ -670,8 +670,13 @@ describe('v0.2.7 Unified 用量 Account Hub & Positive UI Copy', () => {
     expect(screen.getAllByText('官方 CLI 实时').length).toBe(2);
     expect(screen.getByText('已用 36.5%')).toBeInTheDocument();
     expect(screen.getByText('已用 0.5%')).toBeInTheDocument();
-    expect(screen.getByText(/剩余 63\.5%/)).toBeInTheDocument();
-    expect(screen.getByText(/剩余 99\.5%/)).toBeInTheDocument();
+    // Right column keeps a single reset countdown line per window, nothing else.
+    const resetLines = screen.getAllByTestId('quota-reset-line');
+    expect(resetLines.length).toBe(2);
+    for (const line of resetLines) {
+      expect(line.textContent).toMatch(/后重置$/);
+    }
+    expect(screen.queryByText(/剩余 63\.5%/)).not.toBeInTheDocument();
   });
 
   it('renders Antigravity CLI quota refresh button and synced readout in DataSourcesPage without API key', async () => {

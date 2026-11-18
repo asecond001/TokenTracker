@@ -242,6 +242,9 @@ export interface MonthlyQuery {
   provider_id: string | null;
   device_id?: string | null;
   tz_offset_minutes: number;
+  /** Optional inclusive statistics range; overrides year/month when both are set. */
+  start_ms?: number | null;
+  end_ms?: number | null;
 }
 
 export interface MonthlyDailyLedgerRow {
@@ -280,6 +283,10 @@ export interface MonthlyReport {
   model_shares?: UsageShareItem[];
   daily_ledger: MonthlyDailyLedgerRow[];
   heatmap_365d: HeatmapDayCell[];
+  range_start_ms?: number;
+  range_end_ms?: number;
+  /** Subscription fee prorated to the statistics range; ROI is based on this. */
+  subscription_period_fee_micro_usd?: number;
 }
 
 export interface ModelPricingEntry {

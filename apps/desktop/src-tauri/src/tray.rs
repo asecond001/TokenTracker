@@ -178,6 +178,10 @@ fn position_floating_window(win: &tauri::WebviewWindow) {
     }
 }
 
+/// Upper bound for the modular floating monitor (wide windows show a 3-column module grid).
+const FLOATING_MAX_WIDTH: f64 = 960.0;
+const FLOATING_MAX_HEIGHT: f64 = 900.0;
+
 fn ensure_floating_window_on_screen(win: &tauri::WebviewWindow) {
     let Ok(pos) = win.outer_position() else {
         position_floating_window(win);
@@ -221,7 +225,7 @@ fn ensure_floating_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     .title("TokenVane 实时悬浮窗")
     .inner_size(304.0, 248.0)
     .min_inner_size(148.0, 44.0)
-    .max_inner_size(640.0, 640.0)
+    .max_inner_size(FLOATING_MAX_WIDTH, FLOATING_MAX_HEIGHT)
     .decorations(false)
     .transparent(true)
     .shadow(false)
@@ -318,7 +322,7 @@ pub fn resize_floating_window_internal(
     if let Some(win) = app.get_webview_window(FLOATING_MONITOR_LABEL) {
         let (w, h) = match (width, height) {
             (Some(cw), Some(ch)) if cw.is_finite() && ch.is_finite() => {
-                (cw.clamp(148.0, 640.0), ch.clamp(44.0, 640.0))
+                (cw.clamp(148.0, FLOATING_MAX_WIDTH), ch.clamp(44.0, FLOATING_MAX_HEIGHT))
             }
             _ if compact => (264.0, 48.0),
             _ => (304.0, 248.0),

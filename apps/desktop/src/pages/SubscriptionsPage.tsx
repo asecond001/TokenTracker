@@ -917,38 +917,21 @@ export function SubscriptionsPage() {
 
                       {/* Right Column: Reset Countdown & Actions */}
                       <div className="col-span-12 lg:col-span-3 flex items-center justify-between gap-3">
-                        <div className="space-y-2 text-[11.5px] tabular-nums">
-                          {windows.map((w) => {
-                            const remainingPct = Math.max(0, 100 - w.used_percent).toFixed(1);
-                            const hasBurnRate =
-                              w.burn_rate_per_hour > 0 || w.projected_exhaustion_hours !== null;
-                            const burnRateStr =
-                              w.unit === 'micro_usd'
-                                ? `${formatCost(w.burn_rate_per_hour, currency, usdToCnyRate)}/h`
-                                : `${formatTokens(w.burn_rate_per_hour)}/h`;
-                            return (
-                              <div key={w.window_id} className="space-y-0.5">
-                                <div style={{ color: 'var(--text-secondary)' }}>
-                                  {w.window_id} · 剩余 {remainingPct}% · 重置{' '}
-                                  <strong style={{ color: 'var(--text-primary)' }}>
-                                    {formatCountdown(
-                                      computeLiveResetSeconds(w, plansUpdatedAt, nowMs)
-                                    )}
-                                  </strong>
-                                </div>
-                                {hasBurnRate && (
-                                  <div style={{ color: 'var(--text-muted)' }}>
-                                    流速 {burnRateStr}
-                                    {w.projected_exhaustion_hours !== null
-                                      ? w.projected_exhaustion_hours <= 0
-                                        ? ' · 已触及上限'
-                                        : ` · 约 ${w.projected_exhaustion_hours.toFixed(1)}h 触顶`
-                                      : ''}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
+                        <div className="space-y-1 text-[11.5px] tabular-nums">
+                          {windows.map((w) => (
+                            <div
+                              key={w.window_id}
+                              data-testid="quota-reset-line"
+                              className="whitespace-nowrap"
+                              style={{ color: 'var(--text-muted)' }}
+                            >
+                              {windows.length > 1 ? `${w.window_id} · ` : ''}
+                              <strong style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
+                                {formatCountdown(computeLiveResetSeconds(w, plansUpdatedAt, nowMs))}
+                              </strong>{' '}
+                              后重置
+                            </div>
+                          ))}
                         </div>
 
                         <div className="flex items-center gap-1.5 shrink-0">
@@ -1068,27 +1051,32 @@ export function SubscriptionsPage() {
                       })}
                     </div>
 
-                    <div className="col-span-12 lg:col-span-3 space-y-1.5 text-[11.5px] tabular-nums">
+                    <div className="col-span-12 lg:col-span-3 space-y-1 text-[11.5px] tabular-nums">
                       {group.windows.map((obs) => {
-                        const pct = Number.isFinite(obs.used_percent)
-                          ? Math.max(0, Math.min(100, obs.used_percent))
-                          : 0;
                         const resetSecs =
                           obs.resets_at_ms !== null
                             ? Math.max(0, Math.floor((obs.resets_at_ms - nowMs) / 1000))
                             : null;
                         return (
-                          <div key={`${obs.provider_id}-${obs.window_name}-reset`}>
-                            <div style={{ color: 'var(--text-secondary)' }}>
-                              {formatObservedWindowLabel(obs).replace(' 官方限额', '')} · 剩余{' '}
-                              {Math.max(0, 100 - pct).toFixed(1)}% · 重置{' '}
-                              <strong style={{ color: 'var(--text-primary)' }}>
-                                {resetSecs !== null ? formatCountdown(resetSecs) : '待刷新'}
-                              </strong>
-                            </div>
-                            <div style={{ color: 'var(--text-muted)' }}>
-                              观测于 {formatRelativeTime(obs.observed_at_ms)}
-                            </div>
+                          <div
+                            key={`${obs.provider_id}-${obs.window_name}-reset`}
+                            data-testid="quota-reset-line"
+                            className="whitespace-nowrap"
+                            style={{ color: 'var(--text-muted)' }}
+                          >
+                            {group.windows.length > 1
+                              ? `${formatObservedWindowLabel(obs).replace(' 官方限额', '')} · `
+                              : ''}
+                            {resetSecs !== null ? (
+                              <>
+                                <strong style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
+                                  {formatCountdown(resetSecs)}
+                                </strong>{' '}
+                                后重置
+                              </>
+                            ) : (
+                              '待刷新'
+                            )}
                           </div>
                         );
                       })}

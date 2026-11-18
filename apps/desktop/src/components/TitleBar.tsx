@@ -31,10 +31,9 @@ export interface TitleBarProps {
 const PAGE_TITLES: Record<NavPage, string> = {
   overview: '概览',
   trends: '趋势分析',
-  monthly: '月度统计',
-  models: '模型与价格',
+  monthly: '统计',
+  models: '模型对比',
   subscriptions: '用量',
-  speed: '速度监测',
   sources: '数据源与合规',
   preferences: '偏好设置',
 };

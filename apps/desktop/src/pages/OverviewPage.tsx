@@ -318,17 +318,19 @@ export function OverviewPage() {
             <LiveSpeedBadge
               activeSessions={data?.active_sessions}
               liveModelSpeeds={data?.live_model_speeds}
-              fallbackTps={data?.latest_output_tps ?? data?.avg_output_tps}
               align="right"
               placement="bottom"
               className="cursor-default"
             >
               {(breakdown) => (
                 <span
+                  data-testid="overview-live-tps"
                   className="text-[23px] font-semibold tracking-tight tabular-nums"
-                  style={{ color: 'var(--accent-sky)' }}
+                  style={{
+                    color: breakdown.primaryTps !== null ? 'var(--accent-sky)' : 'var(--text-muted)',
+                  }}
                 >
-                  {formatTps(breakdown.primaryTps ?? data?.avg_output_tps ?? 0)}
+                  {breakdown.primaryTps !== null ? formatTps(breakdown.primaryTps) : '空闲'}
                 </span>
               )}
             </LiveSpeedBadge>
@@ -492,7 +494,6 @@ export function OverviewPage() {
             <LiveSpeedBadge
               activeSessions={data?.active_sessions}
               liveModelSpeeds={data?.live_model_speeds}
-              fallbackTps={data?.latest_output_tps}
               align="right"
               placement="bottom"
               className="tabular-nums cursor-default"
