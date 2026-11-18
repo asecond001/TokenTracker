@@ -87,6 +87,7 @@ public struct WidgetQuotaWindowItem: Codable, Equatable, Identifiable, Sendable 
 public struct WidgetDashboardSnapshot: Codable, Equatable, Sendable {
     public let schemaVersion: UInt32
     public let generatedAtMs: Int64
+    public let dayKey: String?
     public let currency: String
     public let usdToCnyRate: String
     public let todayTokens: Int64
@@ -103,6 +104,7 @@ public struct WidgetDashboardSnapshot: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case generatedAtMs = "generated_at_ms"
+        case dayKey = "day_key"
         case currency
         case usdToCnyRate = "usd_to_cny_rate"
         case todayTokens = "today_tokens"
@@ -120,6 +122,7 @@ public struct WidgetDashboardSnapshot: Codable, Equatable, Sendable {
     public init(
         schemaVersion: UInt32 = 1,
         generatedAtMs: Int64,
+        dayKey: String? = nil,
         currency: String,
         usdToCnyRate: String,
         todayTokens: Int64,
@@ -135,6 +138,7 @@ public struct WidgetDashboardSnapshot: Codable, Equatable, Sendable {
     ) {
         self.schemaVersion = schemaVersion
         self.generatedAtMs = generatedAtMs
+        self.dayKey = dayKey
         self.currency = currency
         self.usdToCnyRate = usdToCnyRate
         self.todayTokens = todayTokens
@@ -149,10 +153,89 @@ public struct WidgetDashboardSnapshot: Codable, Equatable, Sendable {
         self.primaryQuotas = primaryQuotas
     }
 
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.schemaVersion = try container.decode(UInt32.self, forKey: .schemaVersion)
+        self.generatedAtMs = try container.decode(Int64.self, forKey: .generatedAtMs)
+        self.dayKey = try container.decodeIfPresent(String.self, forKey: .dayKey)
+        self.currency = try container.decode(String.self, forKey: .currency)
+        self.usdToCnyRate = try container.decode(String.self, forKey: .usdToCnyRate)
+        self.todayTokens = try container.decode(Int64.self, forKey: .todayTokens)
+        self.todayCostMicroUsd = try container.decode(Int64.self, forKey: .todayCostMicroUsd)
+        self.todayRequests = try container.decode(Int64.self, forKey: .todayRequests)
+        self.monthTokens = try container.decode(Int64.self, forKey: .monthTokens)
+        self.monthCostMicroUsd = try container.decode(Int64.self, forKey: .monthCostMicroUsd)
+        self.activeDeviceCount = try container.decode(Int64.self, forKey: .activeDeviceCount)
+        self.latestOutputTps = try container.decodeIfPresent(Double.self, forKey: .latestOutputTps)
+        self.lastSyncAtMs = try container.decodeIfPresent(Int64.self, forKey: .lastSyncAtMs)
+        self.topProviders = try container.decode([WidgetProviderShare].self, forKey: .topProviders)
+        self.primaryQuotas = try container.decode([WidgetQuotaWindowItem].self, forKey: .primaryQuotas)
+    }
+
+    /// Returns a display-safe snapshot that zeroes daily/monthly counters across midnight or month
+    /// boundaries and resets quota windows whose reset timestamp has already elapsed.
+    public func effectiveForDisplay(at now: Date, calendar: Calendar = .current) -> WidgetDashboardSnapshot {
+        let snapDate = Date(timeIntervalSince1970: Double(generatedAtMs) / 1000.0)
+        let currentDayKey = TokenVaneFormatters.formatDayKey(now, timeZone: calendar.timeZone)
+        let resolvedSnapDayKey: String
+        if let dayKey, !dayKey.isEmpty {
+            resolvedSnapDayKey = dayKey
+        } else {
+            resolvedSnapDayKey = TokenVaneFormatters.formatDayKey(snapDate, timeZone: calendar.timeZone)
+        }
+
+        let sameDay = (resolvedSnapDayKey == currentDayKey)
+        let sameMonth: Bool
+        if resolvedSnapDayKey.count >= 7 && currentDayKey.count >= 7 {
+            sameMonth = resolvedSnapDayKey.prefix(7) == currentDayKey.prefix(7)
+        } else {
+            sameMonth = calendar.isDate(snapDate, equalTo: now, toGranularity: .month)
+        }
+
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        let adjustedQuotas = primaryQuotas.map { item -> WidgetQuotaWindowItem in
+            if let resetsAtMs = item.resetsAtMs, resetsAtMs <= nowMs {
+                return WidgetQuotaWindowItem(
+                    deviceId: item.deviceId,
+                    deviceDisplayName: item.deviceDisplayName,
+                    planId: item.planId,
+                    providerId: item.providerId,
+                    planName: item.planName,
+                    windowId: item.windowId,
+                    windowLabel: item.windowLabel,
+                    usedPercent: 0.0,
+                    resetsAtMs: nil,
+                    updatedAtMs: item.updatedAtMs
+                )
+            }
+            return item
+        }
+
+        return WidgetDashboardSnapshot(
+            schemaVersion: schemaVersion,
+            generatedAtMs: generatedAtMs,
+            dayKey: currentDayKey,
+            currency: currency,
+            usdToCnyRate: usdToCnyRate,
+            todayTokens: sameDay ? todayTokens : 0,
+            todayCostMicroUsd: sameDay ? todayCostMicroUsd : 0,
+            todayRequests: sameDay ? todayRequests : 0,
+            monthTokens: sameMonth ? monthTokens : 0,
+            monthCostMicroUsd: sameMonth ? monthCostMicroUsd : 0,
+            activeDeviceCount: activeDeviceCount,
+            latestOutputTps: sameDay ? latestOutputTps : nil,
+            lastSyncAtMs: lastSyncAtMs,
+            topProviders: sameDay ? topProviders : [],
+            primaryQuotas: adjustedQuotas
+        )
+    }
+
     public static var placeholder: WidgetDashboardSnapshot {
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let now = Date()
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
         return WidgetDashboardSnapshot(
             generatedAtMs: nowMs,
+            dayKey: TokenVaneFormatters.formatDayKey(now),
             currency: "USD",
             usdToCnyRate: "7.25",
             todayTokens: 3_420_000,

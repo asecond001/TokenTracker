@@ -1,6 +1,7 @@
 import SwiftUI
 
 public struct OverviewView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Bindable var store: AppStore
 
     public init(store: AppStore) {
@@ -34,12 +35,12 @@ public struct OverviewView: View {
 
     private var unpairedEmptyBanner: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("连接自托管云端中枢")
+            Text(L10n.tr("overview.empty.title", default: "连接同步中枢"))
                 .font(.title3.weight(.semibold))
             Button {
                 store.selectedTab = .settings
             } label: {
-                Text("前往扫码或配置配对")
+                Text(L10n.tr("overview.empty.action", default: "配置配对"))
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 16)
@@ -54,7 +55,7 @@ public struct OverviewView: View {
 
     private func coreErrorBanner(_ message: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("本地数据库打开失败")
+            Text(L10n.tr("overview.core_error.title", default: "数据库打开异常"))
                 .font(.title3.weight(.semibold))
             Text(message)
                 .font(.caption.monospaced())
@@ -74,46 +75,70 @@ public struct OverviewView: View {
         return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(store.timeRange == .today ? "今日实时态势" : "所选周期累计等效花费")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
+                    Text(
+                        store.timeRange == .today
+                            ? L10n.tr("overview.hero.today", default: "今日花费")
+                            : L10n.tr("overview.hero.period", default: "周期花费")
+                    )
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+
                     Text(TokenVaneFormatters.formatCurrency(ov?.totalCostMicroUsd ?? 0, currency: cur, rateString: rate))
-                        .font(.system(size: 32, weight: .semibold))
+                        .font(.largeTitle.weight(.semibold))
                         .tabularMetrics()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                         .accessibilityIdentifier("overview.totalCost")
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 4) {
-                    Text("今日花费")
+                    Text(L10n.tr("overview.hero.today_cost", default: "今日"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Text(TokenVaneFormatters.formatCurrency(ov?.todayCostMicroUsd ?? 0, currency: cur, rateString: rate))
                         .font(.callout.weight(.semibold))
                         .tabularMetrics()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
             }
 
-            HStack(spacing: 0) {
-                metricCell(
-                    title: "总 Token",
-                    value: TokenVaneFormatters.formatCompactTokens(ov?.totalTokens ?? 0)
-                )
-                metricCell(
-                    title: "缓存命中率",
-                    value: TokenVaneFormatters.formatPercent((ov?.cacheHitRatio ?? 0) * 100.0)
-                )
-                metricCell(
-                    title: "最新速率",
-                    value: TokenVaneFormatters.formatTps(ov?.latestOutputTps)
-                )
-                metricCell(
-                    title: "有效请求",
-                    value: TokenVaneFormatters.formatExactInt(ov?.totalRequests ?? 0)
-                )
+            if dynamicTypeSize.isAccessibilitySize {
+                LazyVGrid(
+                    columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+                    alignment: .leading,
+                    spacing: 10
+                ) {
+                    metricCells(ov: ov)
+                }
+            } else {
+                HStack(spacing: 0) {
+                    metricCells(ov: ov)
+                }
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 16)
+    }
+
+    @ViewBuilder
+    private func metricCells(ov: OverviewReportDTO?) -> some View {
+        metricCell(
+            title: L10n.tr("overview.metric.tokens", default: "总 Token"),
+            value: TokenVaneFormatters.formatCompactTokens(ov?.totalTokens ?? 0)
+        )
+        metricCell(
+            title: L10n.tr("overview.metric.cache_hit", default: "缓存命中"),
+            value: TokenVaneFormatters.formatPercent((ov?.cacheHitRatio ?? 0) * 100.0)
+        )
+        metricCell(
+            title: L10n.tr("overview.metric.tps", default: "最新速率"),
+            value: TokenVaneFormatters.formatTps(ov?.latestOutputTps)
+        )
+        metricCell(
+            title: L10n.tr("overview.metric.requests", default: "请求数"),
+            value: TokenVaneFormatters.formatExactInt(ov?.totalRequests ?? 0)
+        )
     }
 
     private func metricCell(title: String, value: String) -> some View {
@@ -121,11 +146,12 @@ public struct OverviewView: View {
             Text(title)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
             Text(value)
                 .font(.subheadline.weight(.semibold))
                 .tabularMetrics()
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .minimumScaleFactor(0.75)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -144,10 +170,14 @@ public struct OverviewView: View {
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(store.timeRange == .today ? "今日用量分布" : "用量分布")
-                    .font(.subheadline.weight(.semibold))
+                Text(
+                    store.timeRange == .today
+                        ? L10n.tr("overview.shares.today", default: "今日分布")
+                        : L10n.tr("overview.shares.period", default: "用量分布")
+                )
+                .font(.subheadline.weight(.semibold))
                 Spacer()
-                Text("Tokens 占比")
+                Text(L10n.tr("overview.shares.unit", default: "Tokens"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -155,14 +185,14 @@ public struct OverviewView: View {
             InlineShareBar(segments: segments, height: 6)
 
             if providers.isEmpty {
-                Text("等待用量数据")
+                Text(L10n.tr("overview.shares.waiting", default: "等待数据"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 4)
             } else {
                 HStack(alignment: .top, spacing: 16) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("按 Provider")
+                        Text(L10n.tr("overview.shares.by_provider", default: "服务商"))
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.secondary)
                         ForEach(providers.prefix(4)) { item in
@@ -184,7 +214,7 @@ public struct OverviewView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Top 模型")
+                        Text(L10n.tr("overview.shares.top_models", default: "Top 模型"))
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.secondary)
                         ForEach(models.prefix(4)) { item in
@@ -212,17 +242,17 @@ public struct OverviewView: View {
         let devices = store.bootstrap?.syncedDevices ?? []
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("已同步桌面终端")
+                Text(L10n.tr("overview.devices.title", default: "同步设备"))
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Text("\(devices.count) 台")
+                Text(L10n.trFormat("overview.devices.count", default: "%lld 台", Int64(devices.count)))
                     .font(.caption2)
                     .tabularMetrics()
                     .foregroundStyle(.secondary)
             }
 
             if devices.isEmpty {
-                Text("等待桌面端首次同步")
+                Text(L10n.tr("overview.devices.waiting", default: "等待设备同步"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
@@ -234,20 +264,32 @@ public struct OverviewView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(dev.deviceName)
                                 .font(.subheadline.weight(.medium))
-                            Text("最近活跃 · \(TokenVaneFormatters.formatRelativeSync(atMs: dev.lastActivityMs))")
-                                .font(.caption2)
-                                .tabularMetrics()
-                                .foregroundStyle(.secondary)
+                            Text(
+                                L10n.trFormat(
+                                    "overview.devices.last_active",
+                                    default: "活跃 · %@",
+                                    TokenVaneFormatters.formatRelativeSync(atMs: dev.lastActivityMs)
+                                )
+                            )
+                            .font(.caption2)
+                            .tabularMetrics()
+                            .foregroundStyle(.secondary)
                         }
                         Spacer()
                         VStack(alignment: .trailing, spacing: 2) {
                             Text(TokenVaneFormatters.formatCurrency(dev.todayCostMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))
                                 .font(.subheadline.weight(.medium))
                                 .tabularMetrics()
-                            Text("今日 \(TokenVaneFormatters.formatCompactTokens(dev.todayTokens))")
-                                .font(.caption2)
-                                .tabularMetrics()
-                                .foregroundStyle(.secondary)
+                            Text(
+                                L10n.trFormat(
+                                    "overview.devices.today_prefix",
+                                    default: "今日 %@",
+                                    TokenVaneFormatters.formatCompactTokens(dev.todayTokens)
+                                )
+                            )
+                            .font(.caption2)
+                            .tabularMetrics()
+                            .foregroundStyle(.secondary)
                         }
                     }
                     .padding(.vertical, 4)
@@ -266,17 +308,17 @@ public struct OverviewView: View {
             .sorted { $0.usedPercent > $1.usedPercent }
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("核心订阅窗口速览")
+                Text(L10n.tr("overview.quotas.title", default: "订阅配额"))
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Button("全部") {
+                Button(L10n.tr("overview.quotas.all", default: "全部")) {
                     store.selectedTab = .quotas
                 }
                 .font(.caption)
             }
 
             if sorted.isEmpty {
-                Text("订阅窗口待同步")
+                Text(L10n.tr("overview.quotas.waiting", default: "配额待同步"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
@@ -299,14 +341,21 @@ public struct OverviewView: View {
                             tint: TokenVaneFormatters.quotaSeverityColor(usedPercent: sub.usedPercent)
                         )
                         HStack {
-                            Text(sub.source == "official_header" ? "官方接口" : "本地推算")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                            Text(
+                                sub.source == "official_header"
+                                    ? L10n.tr("overview.quotas.source.official", default: "官方")
+                                    : L10n.tr("overview.quotas.source.estimated", default: "推算")
+                            )
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                             Spacer()
-                            Text("重置 · \(TokenVaneFormatters.formatCountdown(untilMs: sub.resetsAtMs))")
-                                .font(.caption2)
-                                .tabularMetrics()
-                                .foregroundStyle(.secondary)
+                            HStack(spacing: 0) {
+                                Text(L10n.tr("overview.quotas.reset_prefix", default: "重置 · "))
+                                QuotaCountdownText(resetsAtMs: sub.resetsAtMs)
+                            }
+                            .font(.caption2)
+                            .tabularMetrics()
+                            .foregroundStyle(.secondary)
                         }
                     }
                     .padding(.vertical, 4)

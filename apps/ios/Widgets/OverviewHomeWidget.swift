@@ -2,7 +2,7 @@ import AppIntents
 import SwiftUI
 import WidgetKit
 
-public struct DashboardWidgetEntry: TimelineEntry {
+public struct DashboardWidgetEntry: TimelineEntry, Sendable {
     public let date: Date
     public let snapshot: WidgetDashboardSnapshot
     public let isPlaceholder: Bool
@@ -10,28 +10,61 @@ public struct DashboardWidgetEntry: TimelineEntry {
 
 public struct DashboardTimelineProvider: TimelineProvider {
     public func placeholder(in context: Context) -> DashboardWidgetEntry {
-        DashboardWidgetEntry(date: Date(), snapshot: .placeholder, isPlaceholder: true)
+        let now = Date()
+        return DashboardWidgetEntry(date: now, snapshot: .placeholder.effectiveForDisplay(at: now), isPlaceholder: true)
     }
 
     public func getSnapshot(in context: Context, completion: @escaping (DashboardWidgetEntry) -> Void) {
+        let now = Date()
         let loaded = AppGroupPaths.loadWidgetSnapshot()
+        let effective = (loaded ?? .placeholder).effectiveForDisplay(at: now)
         completion(DashboardWidgetEntry(
-            date: Date(),
-            snapshot: loaded ?? .placeholder,
+            date: now,
+            snapshot: effective,
             isPlaceholder: loaded == nil
         ))
     }
 
     public func getTimeline(in context: Context, completion: @escaping (Timeline<DashboardWidgetEntry>) -> Void) {
         let now = Date()
+        let cal = Calendar.current
         let loaded = AppGroupPaths.loadWidgetSnapshot()
-        let entry = DashboardWidgetEntry(
-            date: now,
-            snapshot: loaded ?? .placeholder,
-            isPlaceholder: loaded == nil
-        )
-        let nextRefresh = Calendar.current.date(byAdding: .minute, value: 15, to: now) ?? now.addingTimeInterval(900)
-        completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
+        let base = loaded ?? .placeholder
+        let isPlaceholder = (loaded == nil)
+
+        let nextRefresh = cal.date(byAdding: .minute, value: 15, to: now) ?? now.addingTimeInterval(900)
+        let nextMidnight = cal.nextDate(
+            after: now,
+            matching: DateComponents(hour: 0, minute: 0, second: 0),
+            matchingPolicy: .nextTime
+        ) ?? now.addingTimeInterval(86_400)
+
+        var entryDates: [Date] = [now, nextMidnight]
+        for quota in base.primaryQuotas {
+            if let resetsAtMs = quota.resetsAtMs {
+                let resetDate = Date(timeIntervalSince1970: Double(resetsAtMs) / 1000.0)
+                if resetDate > now && resetDate <= nextMidnight {
+                    entryDates.append(resetDate)
+                }
+            }
+        }
+
+        // Deduplicate closely spaced timestamps (< 1s) and sort chronologically.
+        let sortedDates = entryDates.sorted().reduce(into: [Date]()) { acc, candidate in
+            if let last = acc.last, candidate.timeIntervalSince(last) < 1.0 {
+                return
+            }
+            acc.append(candidate)
+        }
+
+        let entries = sortedDates.map { date in
+            DashboardWidgetEntry(
+                date: date,
+                snapshot: base.effectiveForDisplay(at: date, calendar: cal),
+                isPlaceholder: isPlaceholder
+            )
+        }
+        completion(Timeline(entries: entries, policy: .after(nextRefresh)))
     }
 }
 
@@ -45,8 +78,8 @@ public struct OverviewHomeWidget: Widget {
             OverviewHomeWidgetEntryView(entry: entry)
                 .containerBackground(.background, for: .widget)
         }
-        .configurationDisplayName("TokenVane 今日总览")
-        .description("实时查看今日 AI 花费、Provider 分布与核心订阅滚动窗口配额。")
+        .configurationDisplayName(LocalizedStringKey("widget.overview.title"))
+        .description(LocalizedStringKey("widget.overview.desc"))
         .supportedFamilies([.systemSmall, .systemMedium])
     }
 }
@@ -71,7 +104,7 @@ private struct OverviewHomeWidgetEntryView: View {
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("今日花费")
+                Text(L10n.tr("widget.today_cost", default: "今日花费"))
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -111,15 +144,19 @@ private struct OverviewHomeWidgetEntryView: View {
                             .foregroundStyle(TokenVaneFormatters.quotaSeverityColor(usedPercent: quota.usedPercent))
                     }
                     widgetBar(percent: quota.usedPercent)
-                    Text(TokenVaneFormatters.formatCountdown(untilMs: quota.resetsAtMs, now: entry.date))
+                    QuotaCountdownText(resetsAtMs: quota.resetsAtMs, referenceDate: entry.date)
                         .font(.system(size: 10))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Text(entry.isPlaceholder ? "等待同步桌面数据" : "订阅窗口待同步")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                Text(
+                    entry.isPlaceholder
+                        ? L10n.tr("widget.waiting_sync", default: "等待同步")
+                        : L10n.tr("widget.quotas_pending", default: "配额待同步")
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
         }
     }
@@ -132,7 +169,7 @@ private struct OverviewHomeWidgetEntryView: View {
             // Left column: Cost + Top 3 Providers
             VStack(alignment: .leading, spacing: 5) {
                 HStack {
-                    Text("今日总览")
+                    Text(L10n.tr("widget.today_overview", default: "今日总览"))
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -179,7 +216,7 @@ private struct OverviewHomeWidgetEntryView: View {
             // Right column: Top subscription windows
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text("订阅窗口")
+                    Text(L10n.tr("widget.quotas", default: "订阅窗口"))
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -192,7 +229,7 @@ private struct OverviewHomeWidgetEntryView: View {
                 }
 
                 if snap.primaryQuotas.isEmpty {
-                    Text("订阅窗口待同步")
+                    Text(L10n.tr("widget.quotas_pending", default: "配额待同步"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else {
@@ -213,10 +250,16 @@ private struct OverviewHomeWidgetEntryView: View {
                     }
                 }
                 Spacer(minLength: 0)
-                Text("同步 · \(TokenVaneFormatters.formatRelativeSync(atMs: snap.lastSyncAtMs, now: entry.date))")
-                    .font(.system(size: 9.5))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
+                Text(
+                    L10n.trFormat(
+                        "widget.sync_prefix",
+                        default: "同步 · %@",
+                        TokenVaneFormatters.formatRelativeSync(atMs: snap.lastSyncAtMs, now: entry.date)
+                    )
+                )
+                .font(.system(size: 9.5))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

@@ -1,17 +1,49 @@
 import Foundation
-import TokenVaneCore
+@preconcurrency import TokenVaneCore
 import UIKit
 import WidgetKit
+
+public struct SyncIngestOutcomeDTO: Equatable, Sendable {
+    public let itemsReceived: UInt64
+    public let envelopesApplied: UInt64
+    public let hourlyBucketsApplied: UInt64
+    public let subscriptionSnapshotsApplied: UInt64
+    public let nextSinceMs: Int64
+    public let serverSeqMs: Int64
+    public let hasMore: Bool
+    public let appliedDeviceIds: [String]
+
+    public init(
+        itemsReceived: UInt64,
+        envelopesApplied: UInt64,
+        hourlyBucketsApplied: UInt64,
+        subscriptionSnapshotsApplied: UInt64,
+        nextSinceMs: Int64,
+        serverSeqMs: Int64,
+        hasMore: Bool,
+        appliedDeviceIds: [String]
+    ) {
+        self.itemsReceived = itemsReceived
+        self.envelopesApplied = envelopesApplied
+        self.hourlyBucketsApplied = hourlyBucketsApplied
+        self.subscriptionSnapshotsApplied = subscriptionSnapshotsApplied
+        self.nextSinceMs = nextSinceMs
+        self.serverSeqMs = serverSeqMs
+        self.hasMore = hasMore
+        self.appliedDeviceIds = appliedDeviceIds
+    }
+}
 
 public actor CoreClientActor {
     private let engine: MobileCoreEngine
     private let snapshotURL: URL?
 
-    public init(dbPath: String, localDeviceName: String = UIDevice.current.name, snapshotURL: URL? = nil) throws {
+    public init(dbPath: String, localDeviceName: String = "iPhone", snapshotURL: URL? = nil) throws {
         self.engine = try MobileCoreEngine.open(dbPath: dbPath, localDeviceName: localDeviceName)
         self.snapshotURL = snapshotURL
     }
 
+    @MainActor
     public static func openDefault() throws -> CoreClientActor {
         let dbURL = try AppGroupPaths.databaseFileURL()
         return try CoreClientActor(dbPath: dbURL.path, localDeviceName: UIDevice.current.name, snapshotURL: nil)
@@ -31,14 +63,15 @@ public actor CoreClientActor {
     }
 
     @discardableResult
-    public func ingestPullResponse(bodyJSON: String, e2eePassphrase: String?) async throws -> FfiSyncIngestOutcome {
-        let taskID = await MainActor.run {
-            UIApplication.shared.beginBackgroundTask(withName: "tokenvane.ingest", expirationHandler: nil)
+    public func ingestPullResponse(bodyJSON: String, e2eePassphrase: String?) async throws -> SyncIngestOutcomeDTO {
+        let rawTaskID = await MainActor.run {
+            UIApplication.shared.beginBackgroundTask(withName: "tokenvane.ingest", expirationHandler: nil).rawValue
         }
         defer {
-            if taskID != .invalid {
+            let invalidRaw = UIBackgroundTaskIdentifier.invalid.rawValue
+            if rawTaskID != invalidRaw {
                 Task { @MainActor in
-                    UIApplication.shared.endBackgroundTask(taskID)
+                    UIApplication.shared.endBackgroundTask(UIBackgroundTaskIdentifier(rawValue: rawTaskID))
                 }
             }
         }
@@ -48,7 +81,16 @@ public actor CoreClientActor {
             nowMs: Self.nowMs()
         )
         _ = try? refreshWidgetSnapshot(reloadTimelines: false)
-        return outcome
+        return SyncIngestOutcomeDTO(
+            itemsReceived: outcome.itemsReceived,
+            envelopesApplied: outcome.envelopesApplied,
+            hourlyBucketsApplied: outcome.hourlyBucketsApplied,
+            subscriptionSnapshotsApplied: outcome.subscriptionSnapshotsApplied,
+            nextSinceMs: outcome.nextSinceMs,
+            serverSeqMs: outcome.serverSeqMs,
+            hasMore: outcome.hasMore,
+            appliedDeviceIds: outcome.appliedDeviceIds
+        )
     }
 
     public func queryOverview(filter: AnalyticsFilterDTO) throws -> OverviewReportDTO {

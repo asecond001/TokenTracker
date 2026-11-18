@@ -135,7 +135,7 @@ pub(super) fn pct_change(current: f64, previous: f64) -> Option<f64> {
     }
 }
 
-pub(super) fn local_offset(tz_offset_minutes: i32) -> FixedOffset {
+pub(crate) fn local_offset(tz_offset_minutes: i32) -> FixedOffset {
     use chrono::Offset;
     FixedOffset::east_opt(tz_offset_minutes.clamp(-720, 840) * 60).unwrap_or_else(|| Utc.fix())
 }
@@ -184,7 +184,7 @@ pub(crate) fn local_day_bounds_ms(now_ms: i64, tz_offset_minutes: i32) -> (i64, 
     (start_dt, month_start_ms)
 }
 
-pub(super) fn date_key_from_ms(ts_ms: i64, offset: FixedOffset) -> String {
+pub(crate) fn date_key_from_ms(ts_ms: i64, offset: FixedOffset) -> String {
     Utc.timestamp_millis_opt(ts_ms)
         .single()
         .map(|dt| dt.with_timezone(&offset).format("%Y-%m-%d").to_string())

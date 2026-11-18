@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import SwiftUI
 
 public struct QRScannerSheet: View {
@@ -44,7 +44,7 @@ public struct QRScannerSheet: View {
 
                 HairlineDivider()
 
-                Text("或手动粘贴桌面端导出的配对 JSON 串")
+                Text(L10n.tr("scanner.paste_prompt", default: "或粘贴配对链接 / JSON"))
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
 
@@ -61,7 +61,7 @@ public struct QRScannerSheet: View {
                     onScanned(manualPayload)
                     dismiss()
                 } label: {
-                    Text("确认导入配对信息")
+                    Text(L10n.tr("scanner.import_button", default: "导入配对"))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity)
@@ -74,11 +74,11 @@ public struct QRScannerSheet: View {
             }
             .padding(16)
             .background(SemanticColors.surfacePrimary)
-            .navigationTitle("扫码配对")
+            .navigationTitle(L10n.tr("scanner.title", default: "扫码配对"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { dismiss() }
+                    Button(L10n.tr("scanner.close", default: "关闭")) { dismiss() }
                 }
             }
         }
@@ -86,9 +86,9 @@ public struct QRScannerSheet: View {
 
     private var simulatorPlaceholder: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("模拟器环境无物理摄像头", systemImage: "camera.viewfinder")
+            Label(L10n.tr("scanner.sim.title", default: "模拟器相机占位"), systemImage: "camera.viewfinder")
                 .font(.subheadline.weight(.medium))
-            Text("真机运行将直接打开后置相机扫描二维码；请在下方直接粘贴配对 JSON 进行导入。")
+            Text(L10n.tr("scanner.sim.body", default: "请在下方粘贴配对链接或 JSON。"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -99,9 +99,9 @@ public struct QRScannerSheet: View {
 
     private var cameraDeniedBanner: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("未授予相机权限")
+            Text(L10n.tr("scanner.denied.title", default: "需要相机权限"))
                 .font(.subheadline.weight(.semibold))
-            Text("请在系统设置中允许 TokenVane 访问相机，或在下方直接粘贴配对 JSON。")
+            Text(L10n.tr("scanner.denied.body", default: "请在系统设置允许相机访问，或粘贴配对信息。"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -111,9 +111,95 @@ public struct QRScannerSheet: View {
     }
 }
 
+private final class CaptureSessionWorker: NSObject, AVCaptureMetadataOutputObjectsDelegate, @unchecked Sendable {
+    private let queue = DispatchQueue(label: "com.asecond.tokenvane.qr-capture")
+    private let session = AVCaptureSession()
+    private let onDetect: @Sendable (String) -> Void
+    private let onFailure: @Sendable (String) -> Void
+    private var didConfigure = false
+    private var didEmit = false
+
+    init(
+        onDetect: @escaping @Sendable (String) -> Void,
+        onFailure: @escaping @Sendable (String) -> Void
+    ) {
+        self.onDetect = onDetect
+        self.onFailure = onFailure
+        super.init()
+    }
+
+    @MainActor
+    func makePreviewLayer(bounds: CGRect) -> AVCaptureVideoPreviewLayer {
+        let layer = AVCaptureVideoPreviewLayer(session: session)
+        layer.videoGravity = .resizeAspectFill
+        layer.frame = bounds
+        return layer
+    }
+
+    func start() {
+        let inputErrMsg = L10n.tr("scanner.error.input", default: "相机初始化受限")
+        let outputErrMsg = L10n.tr("scanner.error.output", default: "二维码识别初始化受限")
+        queue.async { [self] in
+            if !didConfigure {
+                guard let device = AVCaptureDevice.default(for: .video),
+                      let input = try? AVCaptureDeviceInput(device: device),
+                      session.canAddInput(input) else {
+                    Task { @MainActor in
+                        self.onFailure(inputErrMsg)
+                    }
+                    return
+                }
+                session.addInput(input)
+
+                let output = AVCaptureMetadataOutput()
+                guard session.canAddOutput(output) else {
+                    Task { @MainActor in
+                        self.onFailure(outputErrMsg)
+                    }
+                    return
+                }
+                session.addOutput(output)
+                output.setMetadataObjectsDelegate(self, queue: queue)
+                if output.availableMetadataObjectTypes.contains(.qr) {
+                    output.metadataObjectTypes = [.qr]
+                }
+                didConfigure = true
+            }
+            if !session.isRunning {
+                session.startRunning()
+            }
+        }
+    }
+
+    func stop() {
+        queue.async { [self] in
+            if session.isRunning {
+                session.stopRunning()
+            }
+        }
+    }
+
+    func metadataOutput(
+        _ output: AVCaptureMetadataOutput,
+        didOutput metadataObjects: [AVMetadataObject],
+        from connection: AVCaptureConnection
+    ) {
+        guard !didEmit,
+              let readable = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+              let value = readable.stringValue else {
+            return
+        }
+        didEmit = true
+        session.stopRunning()
+        Task { @MainActor in
+            self.onDetect(value)
+        }
+    }
+}
+
 private struct CameraQRPreview: UIViewControllerRepresentable {
-    let onDetect: (String) -> Void
-    let onFailure: (String) -> Void
+    let onDetect: @MainActor (String) -> Void
+    let onFailure: @MainActor (String) -> Void
 
     func makeUIViewController(context: Context) -> ScannerController {
         let vc = ScannerController()
@@ -124,45 +210,31 @@ private struct CameraQRPreview: UIViewControllerRepresentable {
 
     func updateUIViewController(_ uiViewController: ScannerController, context: Context) {}
 
-    final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
-        var onDetect: ((String) -> Void)?
-        var onFailure: ((String) -> Void)?
-        private var session: AVCaptureSession?
+    final class ScannerController: UIViewController {
+        var onDetect: (@MainActor (String) -> Void)?
+        var onFailure: (@MainActor (String) -> Void)?
+        private var worker: CaptureSessionWorker?
         private var previewLayer: AVCaptureVideoPreviewLayer?
-        private var didEmit = false
 
         override func viewDidLoad() {
             super.viewDidLoad()
-            let session = AVCaptureSession()
-            guard let device = AVCaptureDevice.default(for: .video),
-                  let input = try? AVCaptureDeviceInput(device: device),
-                  session.canAddInput(input) else {
-                onFailure?("无法初始化摄像头输入设备")
-                return
-            }
-            session.addInput(input)
-
-            let output = AVCaptureMetadataOutput()
-            guard session.canAddOutput(output) else {
-                onFailure?("无法初始化二维码识别输出")
-                return
-            }
-            session.addOutput(output)
-            output.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
-            if output.availableMetadataObjectTypes.contains(.qr) {
-                output.metadataObjectTypes = [.qr]
-            }
-
-            let layer = AVCaptureVideoPreviewLayer(session: session)
-            layer.videoGravity = .resizeAspectFill
-            layer.frame = view.bounds
+            let worker = CaptureSessionWorker(
+                onDetect: { [weak self] code in
+                    Task { @MainActor [weak self] in
+                        self?.onDetect?(code)
+                    }
+                },
+                onFailure: { [weak self] msg in
+                    Task { @MainActor [weak self] in
+                        self?.onFailure?(msg)
+                    }
+                }
+            )
+            let layer = worker.makePreviewLayer(bounds: view.bounds)
             view.layer.addSublayer(layer)
-
-            self.session = session
+            self.worker = worker
             self.previewLayer = layer
-            DispatchQueue.global(qos: .userInitiated).async {
-                session.startRunning()
-            }
+            worker.start()
         }
 
         override func viewDidLayoutSubviews() {
@@ -172,25 +244,7 @@ private struct CameraQRPreview: UIViewControllerRepresentable {
 
         override func viewWillDisappear(_ animated: Bool) {
             super.viewWillDisappear(animated)
-            let cap = session
-            DispatchQueue.global(qos: .userInitiated).async {
-                cap?.stopRunning()
-            }
-        }
-
-        func metadataOutput(
-            _ output: AVCaptureMetadataOutput,
-            didOutput metadataObjects: [AVMetadataObject],
-            from connection: AVCaptureConnection
-        ) {
-            guard !didEmit,
-                  let readable = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
-                  let value = readable.stringValue else {
-                return
-            }
-            didEmit = true
-            session?.stopRunning()
-            onDetect?(value)
+            worker?.stop()
         }
     }
 }

@@ -10,6 +10,10 @@ struct TokenVaneApp: App {
         // BGTaskScheduler requires every launch handler to be registered before
         // the application finishes launching; App.init runs early enough, `.task` does not.
         store.registerBackgroundTasks()
+        WidgetRefreshBridge.shared.register { [weak store] in
+            guard let store else { return false }
+            return await store.performBackgroundSyncRefresh()
+        }
         _store = State(initialValue: store)
     }
 

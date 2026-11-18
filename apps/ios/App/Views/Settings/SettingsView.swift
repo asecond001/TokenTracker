@@ -12,6 +12,7 @@ public struct SettingsView: View {
     @State private var manualExchangeRate = "7.25"
     @State private var autoExchangeRate = true
     @State private var selectedTheme = "system"
+    @State private var resetNotifications = true
 
     @State private var showingQRScanner = false
     @State private var showingResetAlert = false
@@ -40,6 +41,7 @@ public struct SettingsView: View {
         .background(SemanticColors.surfacePrimary)
         .onAppear {
             hydrateFromStore()
+            resetNotifications = store.resetNotificationsEnabled
             // A deep link may have failed to parse before this view existed.
             if let message = store.pairingStatusMessage {
                 statusBanner = message
@@ -69,29 +71,29 @@ public struct SettingsView: View {
                 scannedPairingRaw = raw
             }
         }
-        .alert("确认重置本地同步缓存？", isPresented: $showingResetAlert) {
-            Button("取消", role: .cancel) {}
-            Button("清空并重拉", role: .destructive) {
+        .alert(L10n.tr("settings.sync.reset_title", default: "确认重置本地缓存？"), isPresented: $showingResetAlert) {
+            Button(L10n.tr("pairing.alert.cancel", default: "取消"), role: .cancel) {}
+            Button(L10n.tr("settings.sync.reset_confirm", default: "清空并重拉"), role: .destructive) {
                 Task {
                     await store.resetSyncCache()
-                    statusBanner = "已清空本地远端缓存与水位线"
+                    statusBanner = L10n.tr("settings.sync.reset_done", default: "已重置本地缓存")
                 }
             }
         } message: {
-            Text("将删除所有已同步的远端设备聚合数据与订阅快照，并从 watermark=0 重新全量拉取。")
+            Text(L10n.tr("settings.sync.reset_message", default: "将清除已同步设备记录并从头拉取。"))
         }
     }
 
     private var pairingActionsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("桌面端一键配对")
+            Text(L10n.tr("settings.pair.title", default: "快捷配对"))
                 .font(.subheadline.weight(.semibold))
 
             HStack(spacing: 10) {
                 Button {
                     showingQRScanner = true
                 } label: {
-                    Label("扫码一键配对", systemImage: "qrcode.viewfinder")
+                    Label(L10n.tr("settings.pair.scan_qr", default: "扫码配对"), systemImage: "qrcode.viewfinder")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity)
@@ -104,10 +106,10 @@ public struct SettingsView: View {
                     if let paste = UIPasteboard.general.string {
                         handlePairingRaw(paste)
                     } else {
-                        statusBanner = "剪贴板为空"
+                        statusBanner = L10n.tr("settings.pair.clipboard_empty", default: "剪贴板为空")
                     }
                 } label: {
-                    Label("从剪贴板导入", systemImage: "doc.on.clipboard")
+                    Label(L10n.tr("settings.pair.paste", default: "剪贴板导入"), systemImage: "doc.on.clipboard")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.primary)
                         .frame(maxWidth: .infinity)
@@ -132,11 +134,11 @@ public struct SettingsView: View {
 
     private var syncConfigurationSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Toggle("启用 Cloudflare 云同步", isOn: $syncEnabled)
+            Toggle(L10n.tr("settings.sync.enable", default: "启用云同步"), isOn: $syncEnabled)
                 .font(.subheadline.weight(.medium))
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Worker URL")
+                Text(L10n.tr("settings.sync.worker_url", default: "Worker URL"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 TextField("https://tokenvane-sync.workers.dev", text: $workerURL)
@@ -149,13 +151,14 @@ public struct SettingsView: View {
                         RoundedRectangle(cornerRadius: 5, style: .continuous)
                             .strokeBorder(SemanticColors.hairline, lineWidth: 1)
                     )
+                    .accessibilityIdentifier("settings.workerURLField")
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Bearer Sync Token（Keychain 安全存储）")
+                Text(L10n.tr("settings.sync.token", default: "Sync Token（Keychain）"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                SecureField("粘贴 Sync Token", text: $bearerToken)
+                SecureField(L10n.tr("settings.sync.token_placeholder", default: "输入 Sync Token"), text: $bearerToken)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .font(.subheadline.monospaced())
@@ -166,15 +169,15 @@ public struct SettingsView: View {
                     )
             }
 
-            Toggle("端到端加密（E2EE AES-256-GCM）", isOn: $e2eeEnabled)
+            Toggle(L10n.tr("settings.sync.e2ee_enable", default: "端到端加密（E2EE）"), isOn: $e2eeEnabled)
                 .font(.subheadline.weight(.medium))
 
             if e2eeEnabled {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("E2EE 解密口令（Keychain 安全存储）")
+                    Text(L10n.tr("settings.sync.e2ee_passphrase", default: "E2EE 口令（Keychain）"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    SecureField("输入与桌面端一致的口令", text: $e2eePassphrase)
+                    SecureField(L10n.tr("settings.sync.e2ee_placeholder", default: "输入解密口令"), text: $e2eePassphrase)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .font(.subheadline.monospaced())
@@ -195,10 +198,12 @@ public struct SettingsView: View {
                         e2eeEnabled: e2eeEnabled,
                         e2eePassphrase: e2eePassphrase
                     )
-                    statusBanner = ok ? "同步配置已保存" : (store.lastErrorMessage ?? "保存失败")
+                    statusBanner = ok
+                        ? L10n.tr("settings.sync.saved", default: "配置已保存")
+                        : (store.lastErrorMessage ?? L10n.tr("pairing.status.save_failed", default: "保存失败"))
                 }
             } label: {
-                Text("保存并连接云同步")
+                Text(L10n.tr("settings.sync.save", default: "保存并连接"))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
@@ -215,12 +220,21 @@ public struct SettingsView: View {
         let syncedCount = store.bootstrap?.syncedDevices.count ?? 0
 
         return VStack(alignment: .leading, spacing: 10) {
-            Text("同步诊断与水位线")
+            Text(L10n.tr("settings.diag.title", default: "同步状态"))
                 .font(.subheadline.weight(.semibold))
 
-            diagnosticRow(title: "Pull 水位线", value: "\(cfg?.lastPullWatermarkMs ?? 0)")
-            diagnosticRow(title: "已同步终端", value: "\(syncedCount) 台")
-            diagnosticRow(title: "最近同步时间", value: TokenVaneFormatters.formatRelativeSync(atMs: cfg?.lastSyncAtMs))
+            diagnosticRow(
+                title: L10n.tr("settings.diag.watermark", default: "同步水位"),
+                value: TokenVaneFormatters.formatWatermarkTimestamp(cfg?.lastPullWatermarkMs)
+            )
+            diagnosticRow(
+                title: L10n.tr("settings.diag.devices", default: "已同步终端"),
+                value: L10n.trFormat("overview.devices.count", default: "%lld 台", Int64(syncedCount))
+            )
+            diagnosticRow(
+                title: L10n.tr("settings.diag.last_sync", default: "最近同步"),
+                value: TokenVaneFormatters.formatRelativeSync(atMs: cfg?.lastSyncAtMs)
+            )
 
             if let err = store.lastErrorMessage ?? cfg?.lastSyncError {
                 Text(err)
@@ -234,13 +248,13 @@ public struct SettingsView: View {
                         let res = await store.testWorkerHealth(url: workerURL, token: bearerToken)
                         switch res {
                         case .success(let txt):
-                            statusBanner = "/healthz 正常: \(txt)"
+                            statusBanner = L10n.trFormat("settings.diag.health_ok", default: "/healthz 正常: %@", txt)
                         case .failure(let err):
-                            statusBanner = "/healthz 失败: \(err.localizedDescription)"
+                            statusBanner = L10n.trFormat("settings.diag.health_fail", default: "/healthz 异常: %@", err.localizedDescription)
                         }
                     }
                 } label: {
-                    Text("测试 /healthz")
+                    Text(L10n.tr("settings.diag.test_health", default: "健康检查"))
                         .font(.caption.weight(.medium))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
@@ -253,10 +267,10 @@ public struct SettingsView: View {
                 Button {
                     Task {
                         await store.triggerManualSync()
-                        statusBanner = "已完成增量拉取"
+                        statusBanner = L10n.tr("settings.sync.now_done", default: "同步完成")
                     }
                 } label: {
-                    Text("立即增量同步")
+                    Text(L10n.tr("settings.sync.now", default: "立即同步"))
                         .font(.caption.weight(.medium))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
@@ -270,7 +284,7 @@ public struct SettingsView: View {
             Button(role: .destructive) {
                 showingResetAlert = true
             } label: {
-                Text("清空本地同步缓存并重拉")
+                Text(L10n.tr("settings.sync.reset_button", default: "重置同步缓存"))
                     .font(.caption.weight(.medium))
                     .foregroundStyle(SemanticColors.statusDanger)
             }
@@ -282,14 +296,14 @@ public struct SettingsView: View {
 
     private var currencyAndAppearanceSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("币种、汇率与外观")
+            Text(L10n.tr("settings.prefs.title", default: "偏好设置"))
                 .font(.subheadline.weight(.semibold))
 
             HStack {
-                Text("显示币种")
+                Text(L10n.tr("settings.prefs.currency", default: "币种"))
                     .font(.subheadline)
                 Spacer()
-                Picker("币种", selection: Binding(
+                Picker(L10n.tr("settings.prefs.currency", default: "币种"), selection: Binding(
                     get: { store.currency },
                     set: { next in
                         Task { await store.applyPreferencesPatch(MobilePreferencesPatchDTO(currency: next)) }
@@ -302,56 +316,74 @@ public struct SettingsView: View {
                 .frame(maxWidth: 180)
             }
 
-            Toggle("自动同步 USD → CNY 汇率", isOn: $autoExchangeRate)
+            Toggle(L10n.tr("settings.prefs.auto_rate", default: "自动汇率 (12h)"), isOn: $autoExchangeRate)
                 .font(.subheadline)
                 .onChange(of: autoExchangeRate) { _, val in
-                    // Skip the echo produced by hydrating the toggle from stored preferences.
                     guard val != store.bootstrap?.preferences.exchangeRateAuto else { return }
-                    Task { await store.applyPreferencesPatch(MobilePreferencesPatchDTO(exchangeRateAuto: val)) }
+                    Task {
+                        await store.setAutoExchangeRate(val)
+                        manualExchangeRate = store.manualRateDraft
+                    }
                 }
 
-            HStack(spacing: 8) {
-                Text("USD → CNY")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextField("7.25", text: $manualExchangeRate)
-                    .keyboardType(.decimalPad)
-                    .font(.subheadline.monospacedDigit())
-                    .padding(6)
-                    .frame(width: 90)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .strokeBorder(SemanticColors.hairline, lineWidth: 1)
-                    )
-                Button("应用") {
-                    Task {
-                        await store.applyPreferencesPatch(MobilePreferencesPatchDTO(usdToCnyRate: manualExchangeRate))
-                        statusBanner = "已更新汇率 \(manualExchangeRate)"
-                    }
-                }
-                .font(.caption.weight(.medium))
-                Spacer()
-                Button("在线获取") {
-                    Task {
-                        if let rate = await store.syncExchangeRateNow() {
-                            manualExchangeRate = String(format: "%.4f", rate)
-                            statusBanner = "汇率已更新: \(manualExchangeRate)"
-                        } else {
-                            statusBanner = "获取在线汇率失败"
+            if autoExchangeRate {
+                HStack(spacing: 8) {
+                    Text(L10n.tr("settings.prefs.rate_label", default: "USD → CNY"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(store.usdToCnyRate)
+                        .font(.subheadline.monospacedDigit().weight(.medium))
+                        .tabularMetrics()
+                    Spacer()
+                    Button(L10n.tr("settings.prefs.rate_fetch", default: "更新汇率")) {
+                        Task {
+                            if let rate = await store.syncExchangeRateNow() {
+                                let formatted = String(format: "%.4f", rate)
+                                statusBanner = L10n.trFormat("settings.prefs.rate_updated", default: "汇率已更新: %@", formatted)
+                            } else {
+                                statusBanner = L10n.tr("settings.prefs.rate_failed", default: "汇率获取异常")
+                            }
                         }
                     }
+                    .font(.caption.weight(.medium))
                 }
-                .font(.caption.weight(.medium))
+            } else {
+                HStack(spacing: 8) {
+                    Text(L10n.tr("settings.prefs.rate_label", default: "USD → CNY"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("7.25", text: $manualExchangeRate)
+                        .keyboardType(.decimalPad)
+                        .font(.subheadline.monospacedDigit())
+                        .padding(6)
+                        .frame(width: 90)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .strokeBorder(SemanticColors.hairline, lineWidth: 1)
+                        )
+                    Button(L10n.tr("settings.prefs.rate_apply", default: "应用")) {
+                        Task {
+                            if await store.applyManualExchangeRate(manualExchangeRate) {
+                                manualExchangeRate = store.manualRateDraft
+                                statusBanner = L10n.trFormat("settings.prefs.rate_updated", default: "汇率已更新: %@", manualExchangeRate)
+                            } else {
+                                statusBanner = L10n.tr("settings.prefs.rate_invalid", default: "请输入 0.1 ~ 100 之间的有效汇率")
+                            }
+                        }
+                    }
+                    .font(.caption.weight(.medium))
+                    Spacer()
+                }
             }
 
             HStack {
-                Text("界面主题")
+                Text(L10n.tr("settings.prefs.theme", default: "外观"))
                     .font(.subheadline)
                 Spacer()
-                Picker("主题", selection: $selectedTheme) {
-                    Text("跟随系统").tag("system")
-                    Text("浅色").tag("light")
-                    Text("深色").tag("dark")
+                Picker(L10n.tr("settings.prefs.theme", default: "外观"), selection: $selectedTheme) {
+                    Text(L10n.tr("settings.prefs.theme.system", default: "系统")).tag("system")
+                    Text(L10n.tr("settings.prefs.theme.light", default: "浅色")).tag("light")
+                    Text(L10n.tr("settings.prefs.theme.dark", default: "深色")).tag("dark")
                 }
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 220)
@@ -360,6 +392,12 @@ public struct SettingsView: View {
                     Task { await store.applyPreferencesPatch(MobilePreferencesPatchDTO(theme: val)) }
                 }
             }
+
+            Toggle(L10n.tr("settings.prefs.reset_notifications", default: "配额重置通知"), isOn: $resetNotifications)
+                .font(.subheadline)
+                .onChange(of: resetNotifications) { _, val in
+                    store.resetNotificationsEnabled = val
+                }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 16)
@@ -381,7 +419,7 @@ public struct SettingsView: View {
         guard let boot = store.bootstrap else { return }
         if !didHydratePreferences {
             didHydratePreferences = true
-            manualExchangeRate = boot.preferences.usdToCnyRate
+            manualExchangeRate = store.manualRateDraft
             autoExchangeRate = boot.preferences.exchangeRateAuto
             selectedTheme = boot.preferences.theme
         }

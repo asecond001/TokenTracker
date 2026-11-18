@@ -19,7 +19,7 @@ public struct RootSplitOrTabView: View {
         .background(SemanticColors.surfacePrimary.ignoresSafeArea())
         .tint(SemanticColors.accentIndigo)
         .alert(
-            "连接同步中枢",
+            L10n.tr("pairing.alert.title", default: "连接同步中枢"),
             isPresented: Binding(
                 get: { store.pendingPairing != nil },
                 set: { if !$0 { store.cancelPendingPairing() } }
@@ -27,11 +27,11 @@ public struct RootSplitOrTabView: View {
             presenting: store.pendingPairing
         ) { payload in
             // Capture the payload: the binding clears `pendingPairing` as the alert dismisses.
-            Button("连接") {
+            Button(L10n.tr("pairing.alert.connect", default: "连接")) {
                 Task { await store.confirmPairing(payload) }
             }
             .accessibilityIdentifier("pairing.confirmButton")
-            Button("取消", role: .cancel) {
+            Button(L10n.tr("pairing.alert.cancel", default: "取消"), role: .cancel) {
                 store.cancelPendingPairing()
             }
         } message: { payload in
@@ -41,12 +41,19 @@ public struct RootSplitOrTabView: View {
 
     private func pairingSummary(_ payload: DesktopPairingPayload) -> String {
         let host = URL(string: payload.url)?.host ?? payload.url
-        let mode = payload.e2ee ? "端到端加密" : "明文聚合"
-        var lines = ["Worker · \(host)", "传输 · \(mode)"]
+        let mode = payload.e2ee
+            ? L10n.tr("pairing.summary.mode.e2ee", default: "端到端加密")
+            : L10n.tr("pairing.summary.mode.plain", default: "明文聚合")
+        var lines = [
+            L10n.trFormat("pairing.summary.worker", default: "Worker · %@", host),
+            L10n.trFormat("pairing.summary.mode", default: "传输 · %@", mode)
+        ]
         if store.syncConfigConfigured,
            let current = store.bootstrap?.syncConfig.workerUrl,
            URL(string: current)?.host != URL(string: payload.url)?.host {
-            lines.append("将替换当前 Worker · \(URL(string: current)?.host ?? current)")
+            lines.append(
+                L10n.trFormat("pairing.summary.replace", default: "将替换 · %@", URL(string: current)?.host ?? current)
+            )
         }
         return lines.joined(separator: "\n")
     }
@@ -57,14 +64,15 @@ public struct RootSplitOrTabView: View {
                 VStack(spacing: 0) {
                     globalContextStrip
                     HairlineDivider()
+                    resetAlertBanner
                     OverviewView(store: store)
                 }
                 .background(SemanticColors.surfacePrimary)
-                .navigationTitle("概览")
+                .navigationTitle(MainTab.overview.navTitle)
                 .navigationBarTitleDisplayMode(.inline)
             }
             .tabItem {
-                Label("概览", systemImage: MainTab.overview.systemImage)
+                Label(MainTab.overview.title, systemImage: MainTab.overview.systemImage)
             }
             .tag(MainTab.overview)
 
@@ -72,14 +80,15 @@ public struct RootSplitOrTabView: View {
                 VStack(spacing: 0) {
                     globalContextStrip
                     HairlineDivider()
+                    resetAlertBanner
                     AnalyticsView(store: store)
                 }
                 .background(SemanticColors.surfacePrimary)
-                .navigationTitle("趋势与月报")
+                .navigationTitle(MainTab.analytics.navTitle)
                 .navigationBarTitleDisplayMode(.inline)
             }
             .tabItem {
-                Label("趋势", systemImage: MainTab.analytics.systemImage)
+                Label(MainTab.analytics.title, systemImage: MainTab.analytics.systemImage)
             }
             .tag(MainTab.analytics)
 
@@ -87,25 +96,26 @@ public struct RootSplitOrTabView: View {
                 VStack(spacing: 0) {
                     globalContextStrip
                     HairlineDivider()
+                    resetAlertBanner
                     QuotasAndModelsView(store: store)
                 }
                 .background(SemanticColors.surfacePrimary)
-                .navigationTitle("订阅与模型")
+                .navigationTitle(MainTab.quotas.navTitle)
                 .navigationBarTitleDisplayMode(.inline)
             }
             .tabItem {
-                Label("订阅", systemImage: MainTab.quotas.systemImage)
+                Label(MainTab.quotas.title, systemImage: MainTab.quotas.systemImage)
             }
             .tag(MainTab.quotas)
 
             NavigationStack {
                 SettingsView(store: store)
                     .background(SemanticColors.surfacePrimary)
-                    .navigationTitle("同步与设置")
+                    .navigationTitle(MainTab.settings.navTitle)
                     .navigationBarTitleDisplayMode(.inline)
             }
             .tabItem {
-                Label("设置", systemImage: MainTab.settings.systemImage)
+                Label(MainTab.settings.title, systemImage: MainTab.settings.systemImage)
             }
             .tag(MainTab.settings)
         }
@@ -117,15 +127,16 @@ public struct RootSplitOrTabView: View {
                 get: { store.selectedTab },
                 set: { if let v = $0 { store.selectedTab = v } }
             )) { tab in
-                Label(tab.title, systemImage: tab.systemImage)
+                Label(tab.navTitle, systemImage: tab.systemImage)
                     .tag(tab)
             }
-            .navigationTitle("TokenVane")
+            .navigationTitle(L10n.tr("app.name", default: "TokenVane"))
         } detail: {
             VStack(spacing: 0) {
                 if store.selectedTab != .settings {
                     globalContextStrip
                     HairlineDivider()
+                    resetAlertBanner
                 }
                 Group {
                     switch store.selectedTab {
@@ -141,79 +152,111 @@ public struct RootSplitOrTabView: View {
                 }
             }
             .background(SemanticColors.surfacePrimary)
-            .navigationTitle(store.selectedTab.title)
+            .navigationTitle(store.selectedTab.navTitle)
             .navigationBarTitleDisplayMode(.inline)
         }
     }
 
+    @ViewBuilder
+    private var resetAlertBanner: some View {
+        if let banner = store.latestResetBanner {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(SemanticColors.statusLive)
+                    .frame(width: 6, height: 6)
+                Text(banner)
+                    .font(.caption)
+                    .lineLimit(2)
+                Spacer()
+                Button {
+                    store.dismissResetBanner()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(SemanticColors.surfaceSubtle)
+            HairlineDivider()
+        }
+    }
+
     private var globalContextStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                // Device filter menu
-                Menu {
-                    Button {
-                        Task { await store.selectDevice(nil) }
-                    } label: {
-                        if store.selectedDeviceId == nil {
-                            Label("全部设备", systemImage: "checkmark")
-                        } else {
-                            Text("全部设备")
+        HStack(spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    // Device filter menu
+                    Menu {
+                        Button {
+                            Task { await store.selectDevice(nil) }
+                        } label: {
+                            if store.selectedDeviceId == nil {
+                                Label(L10n.tr("filter.all_devices", default: "全部设备"), systemImage: "checkmark")
+                            } else {
+                                Text(L10n.tr("filter.all_devices", default: "全部设备"))
+                            }
                         }
-                    }
-                    if let devices = store.bootstrap?.syncedDevices {
-                        ForEach(devices) { dev in
-                            Button {
-                                Task { await store.selectDevice(dev.deviceId) }
-                            } label: {
-                                if store.selectedDeviceId == dev.deviceId {
-                                    Label(dev.deviceName, systemImage: "checkmark")
-                                } else {
-                                    Text(dev.deviceName)
+                        if let devices = store.bootstrap?.syncedDevices {
+                            ForEach(devices) { dev in
+                                Button {
+                                    Task { await store.selectDevice(dev.deviceId) }
+                                } label: {
+                                    if store.selectedDeviceId == dev.deviceId {
+                                        Label(dev.deviceName, systemImage: "checkmark")
+                                    } else {
+                                        Text(dev.deviceName)
+                                    }
                                 }
                             }
                         }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "desktopcomputer")
-                            .font(.caption2)
-                        Text(selectedDeviceLabel)
-                            .font(.caption.weight(.medium))
-                            .lineLimit(1)
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 9, weight: .semibold))
-                    }
-                    .foregroundStyle(.primary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                }
-                .accessibilityIdentifier("global.devicePicker")
-
-                // Time range strip
-                HStack(spacing: 2) {
-                    ForEach(TimeRangePreset.allCases) { preset in
-                        Button {
-                            Task { await store.selectTimeRange(preset) }
-                        } label: {
-                            Text(preset.title)
-                                .font(.caption2.weight(store.timeRange == preset ? .semibold : .regular))
-                                .foregroundStyle(store.timeRange == preset ? Color.primary : Color.secondary)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 4)
-                                .background(
-                                    store.timeRange == preset
-                                        ? SemanticColors.surfaceSubtle
-                                        : Color.clear,
-                                    in: RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                )
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "desktopcomputer")
+                                .font(.caption2)
+                            Text(selectedDeviceLabel)
+                                .font(.caption.weight(.medium))
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.caption2.weight(.semibold))
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("range.\(preset.rawValue)")
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    }
+                    .accessibilityIdentifier("global.devicePicker")
+
+                    // Time range strip
+                    HStack(spacing: 2) {
+                        ForEach(TimeRangePreset.allCases) { preset in
+                            Button {
+                                Task { await store.selectTimeRange(preset) }
+                            } label: {
+                                Text(preset.title)
+                                    .font(.caption2.weight(store.timeRange == preset ? .semibold : .regular))
+                                    .foregroundStyle(store.timeRange == preset ? Color.primary : Color.secondary)
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 5)
+                                    .background(
+                                        store.timeRange == preset
+                                            ? SemanticColors.surfaceSubtle
+                                            : Color.clear,
+                                        in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("range.\(preset.rawValue)")
+                        }
                     }
                 }
+            }
 
-                // USD / CNY capsule toggle
+            // Pinned right-side currency toggle & sync pulse (always visible on small iPhones)
+            HStack(spacing: 6) {
                 Button {
                     Task { await store.toggleCurrency() }
                 } label: {
@@ -231,11 +274,10 @@ public struct RootSplitOrTabView: View {
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("global.currencyToggle")
 
-                // Sync pulse indicator
                 Button {
                     Task { await store.triggerManualSync() }
                 } label: {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4) {
                         Circle()
                             .fill(syncIndicatorColor)
                             .frame(width: 7, height: 7)
@@ -243,21 +285,25 @@ public struct RootSplitOrTabView: View {
                             .font(.caption2)
                             .tabularMetrics()
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
-                    .padding(.horizontal, 6)
+                    .padding(.horizontal, 4)
                     .padding(.vertical, 4)
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("global.syncPulse")
             }
-            .padding(.horizontal, 16)
+            .fixedSize(horizontal: true, vertical: false)
         }
-        .frame(height: 38)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
         .background(SemanticColors.surfacePrimary)
     }
 
     private var selectedDeviceLabel: String {
-        guard let selected = store.selectedDeviceId else { return "全部设备" }
+        guard let selected = store.selectedDeviceId else {
+            return L10n.tr("filter.all_devices", default: "全部设备")
+        }
         return store.bootstrap?.syncedDevices.first(where: { $0.deviceId == selected })?.deviceName ?? selected
     }
 
@@ -272,9 +318,9 @@ public struct RootSplitOrTabView: View {
 
     private var syncIndicatorText: String {
         switch store.connectionState {
-        case .live: return "实时"
-        case .syncing: return "同步中"
-        case .error: return "异常"
+        case .live: return L10n.tr("sync.status.live", default: "在线")
+        case .syncing: return L10n.tr("sync.status.syncing", default: "同步中")
+        case .error: return L10n.tr("sync.status.error", default: "异常")
         case .offline:
             return TokenVaneFormatters.formatRelativeSync(atMs: store.bootstrap?.syncConfig.lastSyncAtMs)
         }

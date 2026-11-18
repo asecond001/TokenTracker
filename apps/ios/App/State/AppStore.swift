@@ -13,11 +13,11 @@ public enum TimeRangePreset: String, CaseIterable, Identifiable, Sendable {
 
     public var title: String {
         switch self {
-        case .today: return "今日"
-        case .sevenDays: return "7D"
-        case .thirtyDays: return "30D"
-        case .month: return "本月"
-        case .all: return "全部"
+        case .today: return L10n.tr("range.today", default: "今日")
+        case .sevenDays: return L10n.tr("range.7d", default: "7日")
+        case .thirtyDays: return L10n.tr("range.30d", default: "30日")
+        case .month: return L10n.tr("range.month", default: "本月")
+        case .all: return L10n.tr("range.all", default: "全部")
         }
     }
 
@@ -60,10 +60,19 @@ public enum MainTab: String, CaseIterable, Identifiable, Hashable, Sendable {
 
     public var title: String {
         switch self {
-        case .overview: return "概览"
-        case .analytics: return "趋势与月报"
-        case .quotas: return "订阅与模型"
-        case .settings: return "同步与设置"
+        case .overview: return L10n.tr("tab.overview", default: "概览")
+        case .analytics: return L10n.tr("tab.analytics", default: "趋势")
+        case .quotas: return L10n.tr("tab.quotas", default: "订阅")
+        case .settings: return L10n.tr("tab.settings", default: "设置")
+        }
+    }
+
+    public var navTitle: String {
+        switch self {
+        case .overview: return L10n.tr("nav.overview", default: "概览")
+        case .analytics: return L10n.tr("nav.analytics", default: "趋势与月报")
+        case .quotas: return L10n.tr("nav.quotas", default: "订阅与模型")
+        case .settings: return L10n.tr("nav.settings", default: "同步与设置")
         }
     }
 
@@ -77,9 +86,21 @@ public enum MainTab: String, CaseIterable, Identifiable, Hashable, Sendable {
     }
 }
 
+public struct LiveActivityFeedback: Equatable, Sendable {
+    public let message: String
+    public let canOpenSettings: Bool
+
+    public init(message: String, canOpenSettings: Bool) {
+        self.message = message
+        self.canOpenSettings = canOpenSettings
+    }
+}
+
 @Observable
 @MainActor
 public final class AppStore {
+    private static let manualRateDraftKey = "tokenvane.manual_usd_to_cny_rate_draft"
+
     public var selectedTab: MainTab = .overview
     public var selectedDeviceId: String? = nil
     public var selectedProviderId: String? = nil
@@ -106,26 +127,57 @@ public final class AppStore {
     public var pairingStatusMessage: String?
     /// Bumped after every successful sync-config save so editors can re-hydrate their fields.
     public private(set) var syncConfigRevision = 0
+    /// Feedback surfaced when Live Activities cannot be started (e.g., disabled in Settings).
+    public var liveActivityFeedback: LiveActivityFeedback?
+    /// In-app banner shown when a subscription window resets or receives bonus quota.
+    public var latestResetBanner: String?
+    /// Preserved manual USD -> CNY rate so enabling auto FX does not erase user input.
+    public var manualRateDraft: String
 
-    /// Monotonic token: only the most recent `reloadAllData` call may publish its results.
+    public var resetNotificationsEnabled: Bool {
+        get { resetNotifier.notificationsEnabled }
+        set { resetNotifier.notificationsEnabled = newValue }
+    }
+
+    /// Monotonic tokens: newer loads drop stale results; targeted reloads avoid full 5-query sweeps.
     private var reloadGeneration = 0
+    private var trendsGeneration = 0
+    private var monthlyGeneration = 0
 
     private let core: CoreClientActor?
     private let secrets: SecretStoring
     private var syncCoordinator: SyncCoordinator?
+    private let resetNotifier: QuotaResetNotifier
+    private let userDefaults: UserDefaults
     private let isDemoMode: Bool
+    private let stageDemoPairing: Bool
 
     public init(
         core: CoreClientActor? = nil,
-        secrets: SecretStoring = KeychainStore.shared,
-        demoMode: Bool = ProcessInfo.processInfo.arguments.contains("--uitest-seed-demo")
+        secrets: SecretStoring? = nil,
+        syncCoordinator: SyncCoordinator? = nil,
+        resetNotifier: QuotaResetNotifier? = nil,
+        userDefaults: UserDefaults = .standard,
+        demoMode: Bool = ProcessInfo.processInfo.arguments.contains("--uitest-seed-demo"),
+        stageDemoPairing: Bool = ProcessInfo.processInfo.arguments.contains("--uitest-stage-pairing")
     ) {
         let now = Date()
         let comps = Calendar.current.dateComponents([.year, .month], from: now)
         self.selectedYear = Int32(comps.year ?? 2026)
         self.selectedMonth = UInt32(comps.month ?? 1)
-        self.secrets = secrets
+        self.userDefaults = userDefaults
         self.isDemoMode = demoMode
+        self.stageDemoPairing = stageDemoPairing
+        self.manualRateDraft = userDefaults.string(forKey: Self.manualRateDraftKey) ?? "7.25"
+        self.resetNotifier = resetNotifier ?? QuotaResetNotifier.shared
+
+        if let secrets {
+            self.secrets = secrets
+        } else if demoMode || stageDemoPairing {
+            self.secrets = InMemorySecretStore()
+        } else {
+            self.secrets = KeychainStore.shared
+        }
 
         var resolvedCore: CoreClientActor?
         var initError: String?
@@ -133,7 +185,7 @@ public final class AppStore {
             resolvedCore = provided
         } else {
             do {
-                if demoMode {
+                if demoMode || stageDemoPairing {
                     let demoURL = FileManager.default.temporaryDirectory
                         .appendingPathComponent("tokenvane-uitest-\(UUID().uuidString).sqlite")
                     resolvedCore = try CoreClientActor(dbPath: demoURL.path, localDeviceName: "iPhone-UITest")
@@ -147,14 +199,21 @@ public final class AppStore {
         self.core = resolvedCore
         self.coreInitError = initError
 
-        if let core = self.core {
-            let coordinator = SyncCoordinator(core: core, secrets: secrets)
-            self.syncCoordinator = coordinator
+        if let providedSync = syncCoordinator {
+            self.syncCoordinator = providedSync
+        } else if let core = self.core {
+            self.syncCoordinator = SyncCoordinator(core: core, secrets: self.secrets)
+        }
+
+        if let coordinator = self.syncCoordinator {
             coordinator.onStateChanged = { [weak self] state in
                 self?.connectionState = state
             }
             coordinator.onDataUpdated = { [weak self] in
                 await self?.reloadAllData()
+            }
+            coordinator.onBackgroundSyncCompleted = { [weak self] in
+                await self?.refreshWidgetsAndActivitiesFromLocal()
             }
         }
     }
@@ -194,20 +253,26 @@ public final class AppStore {
         }
         await reloadAllData()
         pinnedWatchKeys = LiveActivityManager.shared.activeWatchKeys()
+        if stageDemoPairing && pendingPairing == nil {
+            _ = stagePairing(
+                raw: "tokenvane://pair?v=1&url=https%3A%2F%2Fuitest-sync.tokenvane.local&token=uitest-pairing-token&e2ee=0"
+            )
+        }
     }
 
     public func handleScenePhase(_ phase: ScenePhase) {
         switch phase {
         case .active:
-            if !isDemoMode {
+            if !isDemoMode && !stageDemoPairing {
                 syncCoordinator?.handleScenePhaseChanged(toForeground: true)
             }
             Task { await reloadAllData() }
         case .background:
-            if !isDemoMode {
+            if !isDemoMode && !stageDemoPairing {
                 syncCoordinator?.handleScenePhaseChanged(toForeground: false)
             } else {
-                Task { await core?.checkpointForSuspend() }
+                let coreRef = core
+                Task { await coreRef?.checkpointForSuspend() }
             }
         case .inactive:
             break
@@ -219,7 +284,11 @@ public final class AppStore {
     public func reloadAllData() async {
         guard let core else { return }
         reloadGeneration &+= 1
+        trendsGeneration &+= 1
+        monthlyGeneration &+= 1
         let generation = reloadGeneration
+        let tGen = trendsGeneration
+        let mGen = monthlyGeneration
         isLoading = true
         defer {
             if generation == reloadGeneration {
@@ -228,6 +297,11 @@ public final class AppStore {
         }
         do {
             let boot = try await core.getBootstrap()
+
+            if userDefaults.string(forKey: Self.manualRateDraftKey) == nil && !boot.preferences.exchangeRateAuto {
+                manualRateDraft = boot.preferences.usdToCnyRate
+                userDefaults.set(manualRateDraft, forKey: Self.manualRateDraftKey)
+            }
 
             let filter = currentFilter
             let trendsQuery = TrendsQueryDTO(
@@ -255,25 +329,118 @@ public final class AppStore {
 
             self.bootstrap = boot
             self.overview = results.0
-            self.trends = results.1
-            self.monthly = results.2
+            if tGen == trendsGeneration {
+                self.trends = results.1
+            }
+            if mGen == monthlyGeneration {
+                self.monthly = results.2
+            }
             self.modelsReport = results.3
             self.speedReport = results.4
             self.lastErrorMessage = nil
 
-            if !isDemoMode {
+            if !isDemoMode && !stageDemoPairing {
                 let snapshot = try? await core.refreshWidgetSnapshot()
                 await LiveActivityManager.shared.refreshActiveActivities(
                     subscriptions: boot.remoteSubscriptions,
                     snapshot: snapshot
                 )
                 pinnedWatchKeys = LiveActivityManager.shared.activeWatchKeys()
+                await processResetNotifications(for: boot.remoteSubscriptions)
             }
         } catch {
             if generation == reloadGeneration {
                 self.lastErrorMessage = error.localizedDescription
             }
         }
+    }
+
+    public func reloadTrendsOnly() async {
+        guard let core else { return }
+        trendsGeneration &+= 1
+        let gen = trendsGeneration
+        let query = TrendsQueryDTO(
+            filter: currentFilter,
+            granularity: trendGranularity,
+            dimension: trendDimension
+        )
+        do {
+            let report = try await core.queryTrends(query: query)
+            guard gen == trendsGeneration else { return }
+            self.trends = report
+            self.lastErrorMessage = nil
+        } catch {
+            if gen == trendsGeneration {
+                self.lastErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    public func reloadMonthlyOnly() async {
+        guard let core else { return }
+        monthlyGeneration &+= 1
+        let gen = monthlyGeneration
+        let query = MonthlyQueryDTO(
+            year: selectedYear,
+            month: selectedMonth,
+            providerId: selectedProviderId,
+            deviceId: selectedDeviceId
+        )
+        do {
+            let report = try await core.queryMonthly(query: query)
+            guard gen == monthlyGeneration else { return }
+            self.monthly = report
+            self.lastErrorMessage = nil
+        } catch {
+            if gen == monthlyGeneration {
+                self.lastErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    @discardableResult
+    public func performBackgroundSyncRefresh() async -> Bool {
+        guard !isDemoMode, let core else { return false }
+        let ok = await syncCoordinator?.pullIncremental() ?? false
+        if !ok {
+            await refreshWidgetsAndActivitiesFromLocal()
+        }
+        await core.checkpointForSuspend()
+        return ok
+    }
+
+    private func refreshWidgetsAndActivitiesFromLocal() async {
+        guard let core, !isDemoMode else { return }
+        if let boot = try? await core.getBootstrap() {
+            let snapshot = try? await core.refreshWidgetSnapshot(reloadTimelines: true)
+            await LiveActivityManager.shared.refreshActiveActivities(
+                subscriptions: boot.remoteSubscriptions,
+                snapshot: snapshot
+            )
+            await processResetNotifications(for: boot.remoteSubscriptions)
+        }
+    }
+
+    private func processResetNotifications(for subscriptions: [RemoteSubscriptionSnapshotDTO]) async {
+        let events = await resetNotifier.processSubscriptions(subscriptions)
+        if let first = events.first {
+            latestResetBanner = L10n.trFormat(
+                "notification.quota_reset.banner",
+                default: "%@ · %@ 已重置 (%lld%% → %lld%%)",
+                first.planName,
+                first.windowLabel,
+                Int64(first.previousPercent.rounded()),
+                Int64(first.currentPercent.rounded())
+            )
+        }
+    }
+
+    public func dismissResetBanner() {
+        latestResetBanner = nil
+    }
+
+    public func dismissLiveActivityFeedback() {
+        liveActivityFeedback = nil
     }
 
     public func toggleCurrency() async {
@@ -291,6 +458,35 @@ public final class AppStore {
         }
     }
 
+    @discardableResult
+    public func applyManualExchangeRate(_ rawRate: String) async -> Bool {
+        let trimmed = rawRate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard TokenVaneFormatters.validateExchangeRate(trimmed) != nil else {
+            return false
+        }
+        manualRateDraft = trimmed
+        userDefaults.set(trimmed, forKey: Self.manualRateDraftKey)
+        await applyPreferencesPatch(MobilePreferencesPatchDTO(usdToCnyRate: trimmed))
+        return true
+    }
+
+    public func setAutoExchangeRate(_ enabled: Bool) async {
+        if enabled {
+            await applyPreferencesPatch(MobilePreferencesPatchDTO(exchangeRateAuto: true))
+            _ = await syncCoordinator?.syncExchangeRateIfAuto()
+        } else {
+            let validDraft = TokenVaneFormatters.validateExchangeRate(manualRateDraft) != nil
+                ? manualRateDraft
+                : nil
+            await applyPreferencesPatch(
+                MobilePreferencesPatchDTO(
+                    usdToCnyRate: validDraft,
+                    exchangeRateAuto: false
+                )
+            )
+        }
+    }
+
     public func selectDevice(_ deviceId: String?) async {
         selectedDeviceId = deviceId
         await reloadAllData()
@@ -299,6 +495,16 @@ public final class AppStore {
     public func selectTimeRange(_ range: TimeRangePreset) async {
         timeRange = range
         await reloadAllData()
+    }
+
+    public func selectTrendDimension(_ dimension: StackDimensionDTO) async {
+        trendDimension = dimension
+        await reloadTrendsOnly()
+    }
+
+    public func selectTrendGranularity(_ granularity: TrendGranularityDTO) async {
+        trendGranularity = granularity
+        await reloadTrendsOnly()
     }
 
     public func shiftMonth(by delta: Int) async {
@@ -314,11 +520,11 @@ public final class AppStore {
         }
         selectedYear = Int32(year)
         selectedMonth = UInt32(month)
-        await reloadAllData()
+        await reloadMonthlyOnly()
     }
 
     public func triggerManualSync() async {
-        if isDemoMode {
+        if isDemoMode || stageDemoPairing {
             await reloadAllData()
             return
         }
@@ -354,9 +560,11 @@ public final class AppStore {
             reloadGeneration &+= 1
             syncConfigRevision &+= 1
             await reloadAllData()
-            if enabled && !isDemoMode {
+            if enabled && !isDemoMode && !stageDemoPairing {
                 await triggerManualSync()
-                syncCoordinator?.startSSEStream()
+                syncCoordinator?.startForegroundPolling()
+            } else if !enabled {
+                syncCoordinator?.stopForegroundPolling()
             }
             return true
         } catch {
@@ -394,11 +602,13 @@ public final class AppStore {
             e2eePassphrase: payload.key ?? ""
         )
         guard ok else {
-            pairingStatusMessage = lastErrorMessage ?? "保存配置失败"
+            pairingStatusMessage = lastErrorMessage ?? L10n.tr("pairing.status.save_failed", default: "保存失败")
             return
         }
         let needsPassphrase = payload.e2ee && loadSecretMasked(account: .e2eePassphrase).isEmpty
-        pairingStatusMessage = needsPassphrase ? "配对已导入，填写 E2EE 口令后保存" : "配对已完成"
+        pairingStatusMessage = needsPassphrase
+            ? L10n.tr("pairing.status.needs_passphrase", default: "已导入，请填写 E2EE 口令并保存")
+            : L10n.tr("pairing.status.completed", default: "配对已完成")
     }
 
     public func loadSecretMasked(account: KeychainSecretAccount) -> String {
@@ -419,6 +629,7 @@ public final class AppStore {
     public func resetSyncCache() async {
         guard let core else { return }
         do {
+            resetNotifier.clearBaselines()
             _ = try await core.resetSyncWatermark()
             await reloadAllData()
         } catch {
@@ -427,6 +638,7 @@ public final class AppStore {
     }
 
     public func toggleLiveActivityWatch(for sub: RemoteSubscriptionSnapshotDTO) async {
+        liveActivityFeedback = nil
         let todayCost = TokenVaneFormatters.formatCurrency(
             overview?.todayCostMicroUsd ?? 0,
             currency: currency,
@@ -439,7 +651,16 @@ public final class AppStore {
                 latestTps: overview?.latestOutputTps
             )
             pinnedWatchKeys = LiveActivityManager.shared.activeWatchKeys()
+        } catch let err as LiveActivityError {
+            liveActivityFeedback = LiveActivityFeedback(
+                message: err.localizedDescription,
+                canOpenSettings: err == .activitiesDisabled
+            )
         } catch {
+            liveActivityFeedback = LiveActivityFeedback(
+                message: error.localizedDescription,
+                canOpenSettings: false
+            )
             lastErrorMessage = error.localizedDescription
         }
     }
@@ -535,7 +756,7 @@ public final class AppStore {
                                 "provider_id": "claude_code",
                                 "plan_name": "Claude Max 5x",
                                 "window_id": "5h",
-                                "window_label": "5h 滚动窗口",
+                                "window_label": "5h",
                                 "used_percent": 78.4,
                                 "resets_at_ms": resetsFiveHours,
                                 "source": "local_estimation"
@@ -545,7 +766,7 @@ public final class AppStore {
                                 "provider_id": "codex",
                                 "plan_name": "ChatGPT Pro",
                                 "window_id": "7d",
-                                "window_label": "7d 周限额",
+                                "window_label": "7d",
                                 "used_percent": 34.2,
                                 "resets_at_ms": resetsSevenDays,
                                 "source": "official_header"

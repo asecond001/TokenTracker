@@ -11,8 +11,8 @@ public struct QuotaLockScreenWidget: Widget {
             QuotaLockScreenEntryView(entry: entry)
                 .containerBackground(.clear, for: .widget)
         }
-        .configurationDisplayName("TokenVane 锁屏配额")
-        .description("在锁屏一眼掌握今日花销、核心订阅窗口已用占比与重置倒计时。")
+        .configurationDisplayName(LocalizedStringKey("widget.lockscreen.title"))
+        .description(LocalizedStringKey("widget.lockscreen.desc"))
         .supportedFamilies([.accessoryCircular, .accessoryRectangular, .accessoryInline])
     }
 }
@@ -41,19 +41,22 @@ private struct QuotaLockScreenEntryView: View {
 
         case .accessoryRectangular:
             VStack(alignment: .leading, spacing: 3) {
-                Text("今日 \(cost) · \(tokens)")
+                Text(L10n.trFormat("widget.lock.today_prefix", default: "今日 %@ · %@", cost, tokens))
                     .font(.caption.weight(.semibold))
                     .monospacedDigit()
                     .lineLimit(1)
                 if let primary {
                     ProgressView(value: min(1.0, max(0.0, primary.usedPercent / 100.0)))
                         .progressViewStyle(.linear)
-                    Text("\(TokenVaneFormatters.providerShortCode(primary.providerId)) \(primary.windowLabel) \(TokenVaneFormatters.formatPercent(primary.usedPercent, decimals: 0)) · \(TokenVaneFormatters.formatCountdown(untilMs: primary.resetsAtMs, now: entry.date))")
-                        .font(.caption2)
-                        .monospacedDigit()
-                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Text("\(TokenVaneFormatters.providerShortCode(primary.providerId)) \(primary.windowLabel) \(TokenVaneFormatters.formatPercent(primary.usedPercent, decimals: 0)) ·")
+                        QuotaCountdownText(resetsAtMs: primary.resetsAtMs, referenceDate: entry.date)
+                    }
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .lineLimit(1)
                 } else {
-                    Text("设备: \(snap.activeDeviceCount) · 等待配额")
+                    Text(L10n.trFormat("widget.lock.devices", default: "%lld 台设备 · 待同步", snap.activeDeviceCount))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }

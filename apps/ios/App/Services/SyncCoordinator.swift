@@ -1,6 +1,6 @@
-import BackgroundTasks
+@preconcurrency import BackgroundTasks
 import Foundation
-import Network
+@preconcurrency import Network
 
 public enum SyncConnectionState: Equatable, Sendable {
     case offline
@@ -9,43 +9,83 @@ public enum SyncConnectionState: Equatable, Sendable {
     case error(String)
 }
 
+private struct UncheckedSendableBox<T>: @unchecked Sendable {
+    let value: T
+}
+
+private final class LockedTaskBag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pollTask: Task<Void, Never>?
+    private var pullTask: Task<Bool, Never>?
+
+    func setPollTask(_ task: Task<Void, Never>?) {
+        lock.lock()
+        let prev = pollTask
+        pollTask = task
+        lock.unlock()
+        prev?.cancel()
+    }
+
+    func getPullTask() -> Task<Bool, Never>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pullTask
+    }
+
+    func setPullTask(_ task: Task<Bool, Never>?) {
+        lock.lock()
+        pullTask = task
+        lock.unlock()
+    }
+
+    func cancelAll() {
+        lock.lock()
+        let poll = pollTask
+        let pull = pullTask
+        pollTask = nil
+        pullTask = nil
+        lock.unlock()
+        poll?.cancel()
+        pull?.cancel()
+    }
+}
+
 @MainActor
 public final class SyncCoordinator {
+    public static let exchangeRateThrottleMs: Int64 = 12 * 3_600_000
+
     private let core: CoreClientActor
     private let secrets: SecretStoring
     private let session: URLSession
+    private let pollInterval: Duration
     private let pathMonitor = NWPathMonitor()
     private let monitorQueue = DispatchQueue(label: "com.asecond.tokenvane.network")
+    private let taskBag = LockedTaskBag()
 
-    private var sseTask: Task<Void, Never>?
-    private var pullTask: Task<Bool, Never>?
     private var pullRequestedWhileRunning = false
-    private var ssePullDebounceTask: Task<Void, Never>?
-    private let ssePullDebounce: Duration = .milliseconds(800)
     private static var didRegisterBackgroundTasks = false
     private var isForeground = false
-    private var reconnectDelayIndex = 0
-    private let backoffSeconds: [TimeInterval] = [2, 5, 15, 60]
 
     public var onStateChanged: ((SyncConnectionState) -> Void)?
     public var onDataUpdated: (() async -> Void)?
+    public var onBackgroundSyncCompleted: (() async -> Void)?
 
     public init(
         core: CoreClientActor,
         secrets: SecretStoring = KeychainStore.shared,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        pollInterval: Duration = .seconds(30)
     ) {
         self.core = core
         self.secrets = secrets
         self.session = session
+        self.pollInterval = pollInterval
         startNetworkMonitor()
     }
 
     deinit {
         pathMonitor.cancel()
-        sseTask?.cancel()
-        pullTask?.cancel()
-        ssePullDebounceTask?.cancel()
+        taskBag.cancelAll()
     }
 
     /// Must be called before the application finishes launching (see `TokenVaneApp.init`).
@@ -61,13 +101,13 @@ public final class SyncCoordinator {
                 task.setTaskCompleted(success: false)
                 return
             }
-            // Launch handlers run on a background queue; hop to the main actor explicitly.
+            let box = UncheckedSendableBox(value: refreshTask)
             Task { @MainActor [weak self] in
                 guard let self else {
-                    refreshTask.setTaskCompleted(success: false)
+                    box.value.setTaskCompleted(success: false)
                     return
                 }
-                self.handleBackgroundRefresh(refreshTask)
+                self.handleBackgroundRefresh(box.value)
             }
         }
     }
@@ -75,55 +115,47 @@ public final class SyncCoordinator {
     public func handleScenePhaseChanged(toForeground: Bool) {
         isForeground = toForeground
         if toForeground {
-            Task {
-                await pullIncremental()
-                startSSEStream()
-                await syncExchangeRateIfAuto()
+            Task { [weak self] in
+                guard let self else { return }
+                await self.pullIncremental()
+                self.startForegroundPolling()
+                await self.syncExchangeRateIfAuto()
             }
         } else {
-            stopSSEStream()
+            stopForegroundPolling()
             scheduleBackgroundRefresh()
+            let coreRef = core
             Task {
-                await core.checkpointForSuspend()
+                await coreRef.checkpointForSuspend()
             }
         }
     }
 
-    public func startSSEStream() {
-        stopSSEStream()
+    public func startForegroundPolling() {
+        stopForegroundPolling()
         guard isForeground else { return }
 
-        sseTask = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled && self.isForeground {
-                do {
-                    try await self.runOneSSEConnection()
-                } catch is CancellationError {
-                    break
-                } catch {
-                    if !self.isForeground { break }
-                    self.onStateChanged?(.error(error.localizedDescription))
-                    let delay = self.backoffSeconds[min(self.reconnectDelayIndex, self.backoffSeconds.count - 1)]
-                    self.reconnectDelayIndex = min(self.reconnectDelayIndex + 1, self.backoffSeconds.count - 1)
-                    try? await Task.sleep(for: .seconds(delay))
-                }
+        let interval = pollInterval
+        let task = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                guard !Task.isCancelled, let self, self.isForeground else { break }
+                _ = await self.pullIncremental()
             }
         }
+        taskBag.setPollTask(task)
     }
 
-    public func stopSSEStream() {
-        sseTask?.cancel()
-        sseTask = nil
-        ssePullDebounceTask?.cancel()
-        ssePullDebounceTask = nil
+    public func stopForegroundPolling() {
+        taskBag.setPollTask(nil)
     }
 
-    /// Single-flight incremental pull. Concurrent callers (foreground, network recovery,
-    /// SSE, pull-to-refresh) share the running pull; a request that arrives mid-flight
-    /// schedules exactly one follow-up pass so the newest server state is never missed.
+    /// Single-flight incremental pull. Concurrent callers (foreground, polling, network recovery,
+    /// pull-to-refresh) share the running pull; a request that arrives mid-flight schedules exactly
+    /// one follow-up pass so the newest server state is never missed.
     @discardableResult
     public func pullIncremental() async -> Bool {
-        if let running = pullTask {
+        if let running = taskBag.getPullTask() {
             pullRequestedWhileRunning = true
             return await running.value
         }
@@ -134,22 +166,11 @@ public final class SyncCoordinator {
                 self.pullRequestedWhileRunning = false
                 ok = await self.performPull()
             } while self.pullRequestedWhileRunning && !Task.isCancelled
-            self.pullTask = nil
+            self.taskBag.setPullTask(nil)
             return ok
         }
-        pullTask = task
+        taskBag.setPullTask(task)
         return await task.value
-    }
-
-    /// Coalesces bursts of SSE `sync_update` frames into one pull without blocking the stream reader.
-    private func scheduleDebouncedPull() {
-        ssePullDebounceTask?.cancel()
-        ssePullDebounceTask = Task { [weak self] in
-            guard let self else { return }
-            try? await Task.sleep(for: self.ssePullDebounce)
-            guard !Task.isCancelled else { return }
-            await self.pullIncremental()
-        }
     }
 
     private func performPull() async -> Bool {
@@ -201,8 +222,7 @@ public final class SyncCoordinator {
                 sinceMs = outcome.nextSinceMs
             }
 
-            reconnectDelayIndex = 0
-            onStateChanged?(sseTask != nil ? .live : .offline)
+            onStateChanged?(isForeground ? .live : .offline)
             await onDataUpdated?()
             return true
         } catch {
@@ -256,50 +276,19 @@ public final class SyncCoordinator {
         return nil
     }
 
-    private func syncExchangeRateIfAuto() async {
-        guard let bootstrap = try? await core.getBootstrap(), bootstrap.preferences.exchangeRateAuto else {
-            return
+    @discardableResult
+    public func syncExchangeRateIfAuto(nowMs: Int64? = nil) async -> Bool {
+        guard let bootstrap = try? await core.getBootstrap(),
+              bootstrap.preferences.exchangeRateAuto else {
+            return false
         }
-        _ = await syncExchangeRateNow()
-    }
-
-    private func runOneSSEConnection() async throws {
-        let bootstrap = try await core.getBootstrap()
-        guard bootstrap.syncConfig.enabled,
-              let rawURL = bootstrap.syncConfig.workerUrl,
-              let baseURL = URL(string: rawURL),
-              let token = try secrets.loadSecret(account: .syncBearerToken),
-              !token.isEmpty else {
-            onStateChanged?(.offline)
-            try? await Task.sleep(for: .seconds(15))
-            return
+        let now = nowMs ?? Int64(Date().timeIntervalSince1970 * 1000)
+        if let lastSync = bootstrap.preferences.lastRateSyncAtMs,
+           lastSync > 0,
+           (now - lastSync) < Self.exchangeRateThrottleMs {
+            return false
         }
-
-        let sseURL = baseURL.appendingPathComponent("v1/sync/events")
-        var req = URLRequest(url: sseURL)
-        req.timeoutInterval = 300
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-
-        let (bytes, response) = try await session.bytes(for: req)
-        guard let httpResp = response as? HTTPURLResponse, (200..<300).contains(httpResp.statusCode) else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw NSError(domain: "SSE", code: code, userInfo: [NSLocalizedDescriptionKey: "SSE HTTP \(code)"])
-        }
-
-        reconnectDelayIndex = 0
-        onStateChanged?(.live)
-
-        var parser = SSEFrameParser()
-        for try await byte in bytes {
-            if Task.isCancelled || !isForeground { break }
-            if let frame = parser.feedByte(byte), frame.event == "sync_update" {
-                scheduleDebouncedPull()
-            }
-        }
-        if let trailing = parser.finish(), trailing.event == "sync_update" {
-            scheduleDebouncedPull()
-        }
+        return await syncExchangeRateNow() != nil
     }
 
     private func startNetworkMonitor() {
@@ -307,11 +296,7 @@ public final class SyncCoordinator {
             guard path.status == .satisfied else { return }
             Task { @MainActor [weak self] in
                 guard let self, self.isForeground else { return }
-                self.reconnectDelayIndex = 0
                 await self.pullIncremental()
-                if self.sseTask == nil {
-                    self.startSSEStream()
-                }
             }
         }
         pathMonitor.start(queue: monitorQueue)
@@ -325,14 +310,18 @@ public final class SyncCoordinator {
 
     private func handleBackgroundRefresh(_ task: BGAppRefreshTask) {
         scheduleBackgroundRefresh()
-        let workTask = Task { [weak self] in
+        let box = UncheckedSendableBox(value: task)
+        let workTask = Task { @MainActor [weak self] in
             guard let self else {
-                task.setTaskCompleted(success: false)
+                box.value.setTaskCompleted(success: false)
                 return
             }
             let ok = await self.pullIncremental()
+            if !ok {
+                await self.onBackgroundSyncCompleted?()
+            }
             await self.core.checkpointForSuspend()
-            task.setTaskCompleted(success: ok)
+            box.value.setTaskCompleted(success: ok)
         }
         task.expirationHandler = {
             workTask.cancel()

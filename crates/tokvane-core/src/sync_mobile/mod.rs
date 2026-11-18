@@ -4,7 +4,9 @@ use std::path::Path;
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
-use crate::analytics::{local_day_bounds_ms, query_latest_tps, query_provider_shares};
+use crate::analytics::{
+    date_key_from_ms, local_day_bounds_ms, local_offset, query_latest_tps, query_provider_shares,
+};
 use crate::domain::{
     provider_ids, AppPreferences, CurrencyCode, EncryptedSyncEnvelopeV1,
     RemoteSubscriptionSnapshot, SyncConfigState, SyncEnvelopeV1,
@@ -123,6 +125,7 @@ pub struct WidgetQuotaWindowItem {
 pub struct MobileWidgetSnapshot {
     pub schema_version: u32,
     pub generated_at_ms: i64,
+    pub day_key: String,
     pub currency: CurrencyCode,
     pub usd_to_cny_rate: String,
     pub today_tokens: i64,
@@ -432,6 +435,7 @@ impl Storage {
         let prefs = self.get_preferences()?;
         let sync_cfg = self.get_sync_config_state()?;
         let (today_start_ms, month_start_ms) = local_day_bounds_ms(now_ms, tz_offset_minutes);
+        let day_key = date_key_from_ms(now_ms, local_offset(tz_offset_minutes));
 
         self.with_conn(|conn| {
             let local_dev = query_local_device(conn)?;
@@ -489,6 +493,7 @@ impl Storage {
             Ok(MobileWidgetSnapshot {
                 schema_version: 1,
                 generated_at_ms: now_ms,
+                day_key,
                 currency: prefs.currency,
                 usd_to_cny_rate: prefs.usd_to_cny_rate,
                 today_tokens: today_totals.tokens,
@@ -766,6 +771,7 @@ mod tests {
         let snapshot = storage
             .build_mobile_widget_snapshot(base_ms + HOUR_MS + 20_000, 480)
             .expect("snapshot");
+        assert_eq!(snapshot.day_key, "2026-11-16");
         assert_eq!(snapshot.today_tokens, 210_000);
         assert_eq!(snapshot.today_cost_micro_usd, 1_050_000);
         assert_eq!(snapshot.active_device_count, 2);

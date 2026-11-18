@@ -48,7 +48,7 @@ public extension View {
     }
 }
 
-public struct ShareBarSegment: Identifiable, Equatable {
+public struct ShareBarSegment: Identifiable, Equatable, Sendable {
     public let id: String
     public let label: String
     public let sharePercent: Double

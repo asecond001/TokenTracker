@@ -1,11 +1,30 @@
-import ActivityKit
+@preconcurrency import ActivityKit
 import Foundation
+
+public enum LiveActivityError: LocalizedError, Equatable, Sendable {
+    case activitiesDisabled
+
+    public var errorDescription: String? {
+        switch self {
+        case .activitiesDisabled:
+            return L10n.tr("live_activity.disabled", default: "请在系统设置开启实时活动权限")
+        }
+    }
+}
 
 @MainActor
 public final class LiveActivityManager {
     public static let shared = LiveActivityManager()
 
     private init() {}
+
+    public static func computeStaleDate(resetsAtMs: Int64?, now: Date = Date()) -> Date {
+        guard let resetsAtMs else {
+            return now.addingTimeInterval(1800)
+        }
+        let resetDate = Date(timeIntervalSince1970: Double(resetsAtMs) / 1000.0)
+        return resetDate > now ? resetDate : now.addingTimeInterval(60)
+    }
 
     public func isPinned(deviceId: String, planId: String, windowId: String) -> Bool {
         activeActivity(deviceId: deviceId, planId: planId, windowId: windowId) != nil
@@ -26,7 +45,7 @@ public final class LiveActivityManager {
         }
 
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
-            return false
+            throw LiveActivityError.activitiesDisabled
         }
 
         let attributes = CodingSessionAttributes(
@@ -39,14 +58,16 @@ public final class LiveActivityManager {
             windowId: subscription.windowId,
             windowLabel: subscription.windowLabel
         )
+        let now = Date()
         let state = CodingSessionAttributes.ContentState(
             usedPercent: subscription.usedPercent,
             resetsAtEpochSeconds: subscription.resetsAtMs.map { TimeInterval($0) / 1000.0 },
             todayCostFormatted: todayCostFormatted,
             latestTps: latestTps,
-            updatedAtEpochSeconds: Date().timeIntervalSince1970
+            updatedAtEpochSeconds: now.timeIntervalSince1970
         )
-        let content = ActivityContent(state: state, staleDate: Date().addingTimeInterval(3600))
+        let staleDate = Self.computeStaleDate(resetsAtMs: subscription.resetsAtMs, now: now)
+        let content = ActivityContent(state: state, staleDate: staleDate)
         _ = try Activity.request(attributes: attributes, content: content, pushType: nil)
         return true
     }
@@ -66,6 +87,7 @@ public final class LiveActivityManager {
             costFormatted = "$0.00"
         }
 
+        let now = Date()
         for activity in Activity<CodingSessionAttributes>.activities {
             let match = subscriptions.first {
                 $0.deviceId == activity.attributes.deviceId &&
@@ -78,9 +100,10 @@ public final class LiveActivityManager {
                 resetsAtEpochSeconds: match.resetsAtMs.map { TimeInterval($0) / 1000.0 },
                 todayCostFormatted: costFormatted,
                 latestTps: snapshot?.latestOutputTps,
-                updatedAtEpochSeconds: Date().timeIntervalSince1970
+                updatedAtEpochSeconds: now.timeIntervalSince1970
             )
-            let content = ActivityContent(state: updatedState, staleDate: Date().addingTimeInterval(3600))
+            let staleDate = Self.computeStaleDate(resetsAtMs: match.resetsAtMs, now: now)
+            let content = ActivityContent(state: updatedState, staleDate: staleDate)
             await activity.update(content)
         }
     }

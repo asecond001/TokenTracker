@@ -1,6 +1,8 @@
 import SwiftUI
+import UIKit
 
 public struct QuotasAndModelsView: View {
+    @Environment(\.openURL) private var openURL
     @Bindable var store: AppStore
 
     public init(store: AppStore) {
@@ -41,28 +43,53 @@ public struct QuotasAndModelsView: View {
     private var subscriptionsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("跨电脑订阅滚动窗口")
+                Text(L10n.tr("quotas.section.title", default: "订阅窗口"))
                     .font(.subheadline.weight(.semibold))
                 Spacer()
             }
 
+            if let feedback = store.liveActivityFeedback {
+                HStack(spacing: 8) {
+                    Text(feedback.message)
+                        .font(.caption)
+                        .foregroundStyle(SemanticColors.statusWarning)
+                    Spacer()
+                    if feedback.canOpenSettings,
+                       let settingsURL = URL(string: UIApplication.openSettingsURLString) {
+                        Button(L10n.tr("live_activity.open_settings", default: "系统设置")) {
+                            openURL(settingsURL)
+                        }
+                        .font(.caption.weight(.semibold))
+                    }
+                    Button {
+                        store.dismissLiveActivityFeedback()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+
             if groupedSubscriptions.isEmpty {
-                Text("订阅窗口待同步")
+                Text(L10n.tr("quotas.waiting", default: "订阅窗口待同步"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 6)
             } else {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    VStack(alignment: .leading, spacing: 14) {
-                        ForEach(groupedSubscriptions, id: \.deviceName) { group in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(group.deviceName)
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                                ForEach(group.items) { sub in
-                                    subscriptionRow(sub, now: context.date)
-                                    HairlineDivider()
-                                }
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(groupedSubscriptions, id: \.deviceName) { group in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(group.deviceName)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            ForEach(group.items) { sub in
+                                subscriptionRow(sub)
+                                HairlineDivider()
                             }
                         }
                     }
@@ -73,7 +100,7 @@ public struct QuotasAndModelsView: View {
         .padding(.vertical, 16)
     }
 
-    private func subscriptionRow(_ sub: RemoteSubscriptionSnapshotDTO, now: Date) -> some View {
+    private func subscriptionRow(_ sub: RemoteSubscriptionSnapshotDTO) -> some View {
         let isPinned = store.pinnedWatchKeys.contains(sub.id)
         let severityColor = TokenVaneFormatters.quotaSeverityColor(usedPercent: sub.usedPercent)
 
@@ -91,8 +118,12 @@ public struct QuotasAndModelsView: View {
                     HStack(spacing: 4) {
                         Image(systemName: isPinned ? "stop.circle.fill" : "dot.radiowaves.left.and.right")
                             .font(.caption2)
-                        Text(isPinned ? "结束盯盘" : "灵动岛盯盘")
-                            .font(.caption2.weight(.medium))
+                        Text(
+                            isPinned
+                                ? L10n.tr("quota.unpin_live_activity", default: "停止")
+                                : L10n.tr("quota.pin_live_activity", default: "盯盘")
+                        )
+                        .font(.caption2.weight(.medium))
                     }
                     .foregroundStyle(isPinned ? SemanticColors.statusDanger : SemanticColors.accentIndigo)
                     .padding(.horizontal, 8)
@@ -118,14 +149,21 @@ public struct QuotasAndModelsView: View {
             }
 
             HStack {
-                Text(sub.source == "official_header" ? "来源: 官方限额" : "来源: 本地窗口推算")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                Text(
+                    sub.source == "official_header"
+                        ? L10n.tr("overview.quotas.source.official", default: "官方")
+                        : L10n.tr("overview.quotas.source.estimated", default: "推算")
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
                 Spacer()
-                Text("重置倒计时 \(TokenVaneFormatters.formatCountdown(untilMs: sub.resetsAtMs, now: now))")
-                    .font(.caption2)
-                    .tabularMetrics()
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 0) {
+                    Text(L10n.tr("quota.reset_countdown_prefix", default: "重置 "))
+                    QuotaCountdownText(resetsAtMs: sub.resetsAtMs)
+                }
+                .font(.caption2)
+                .tabularMetrics()
+                .foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 4)
@@ -141,11 +179,11 @@ public struct QuotasAndModelsView: View {
 
         return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
-                Text("模型成本与生成效率")
+                Text(L10n.tr("models.section.title", default: "模型效率"))
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 if fromRollups {
-                    Text("同步聚合均值/峰值")
+                    Text(L10n.tr("models.rollups_badge", default: "小时聚合"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
@@ -158,7 +196,7 @@ public struct QuotasAndModelsView: View {
             }
 
             if rows.isEmpty {
-                Text("等待模型用量数据")
+                Text(L10n.tr("models.waiting", default: "等待模型数据"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 8)
@@ -184,14 +222,25 @@ public struct QuotasAndModelsView: View {
                                 .font(.caption2)
                                 .tabularMetrics()
                                 .foregroundStyle(.secondary)
-                            Text("缓存 \(TokenVaneFormatters.formatPercent(row.cacheHitPercent, decimals: 0))")
-                                .font(.caption2)
-                                .tabularMetrics()
-                                .foregroundStyle(.secondary)
+                            Text(
+                                L10n.trFormat(
+                                    "models.cache_prefix",
+                                    default: "缓存 %@",
+                                    TokenVaneFormatters.formatPercent(row.cacheHitPercent, decimals: 0)
+                                )
+                            )
+                            .font(.caption2)
+                            .tabularMetrics()
+                            .foregroundStyle(.secondary)
                             Spacer()
                             if let speed {
                                 let label = fromRollups
-                                    ? "均 \(TokenVaneFormatters.formatTps(speed.meanTps)) · 峰 \(String(format: "%.1f", speed.maxTps))"
+                                    ? L10n.trFormat(
+                                        "models.tps_rollup",
+                                        default: "均 %@ · 峰 %@",
+                                        TokenVaneFormatters.formatTps(speed.meanTps),
+                                        String(format: "%.1f", speed.maxTps)
+                                    )
                                     : "\(TokenVaneFormatters.formatTps(speed.meanTps)) · \(TokenVaneFormatters.formatDurationMs(speed.avgDurationMs))"
                                 Text(label)
                                     .font(.caption2)

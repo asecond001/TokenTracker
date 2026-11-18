@@ -43,11 +43,11 @@ public enum TrendGranularityDTO: String, Codable, CaseIterable, Sendable {
 
     public var label: String {
         switch self {
-        case .auto: return "Auto"
-        case .fifteenMinutes: return "15m"
-        case .hourly: return "小时"
-        case .daily: return "天"
-        case .weekly: return "周"
+        case .auto: return L10n.tr("gran.auto", default: "自动")
+        case .fifteenMinutes: return L10n.tr("gran.15m", default: "15分")
+        case .hourly: return L10n.tr("gran.hourly", default: "小时")
+        case .daily: return L10n.tr("gran.daily", default: "日")
+        case .weekly: return L10n.tr("gran.weekly", default: "周")
         }
     }
 }
@@ -59,9 +59,9 @@ public enum StackDimensionDTO: String, Codable, CaseIterable, Sendable {
 
     public var label: String {
         switch self {
-        case .provider: return "Provider"
-        case .model: return "Model"
-        case .tokenType: return "TokenType"
+        case .provider: return L10n.tr("dim.provider", default: "服务商")
+        case .model: return L10n.tr("dim.model", default: "模型")
+        case .tokenType: return L10n.tr("dim.token_type", default: "类型")
         }
     }
 }
@@ -152,6 +152,7 @@ public struct AppPreferencesDTO: Codable, Equatable, Sendable {
     public var bgBlurPx: Int32
     public var autoSyncPricing: Bool
     public var exchangeRateAuto: Bool
+    public var lastRateSyncAtMs: Int64?
     public var autoCheckUpdates: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -170,7 +171,29 @@ public struct AppPreferencesDTO: Codable, Equatable, Sendable {
         case bgBlurPx = "bg_blur_px"
         case autoSyncPricing = "auto_sync_pricing"
         case exchangeRateAuto = "exchange_rate_auto"
+        case lastRateSyncAtMs = "last_rate_sync_at_ms"
         case autoCheckUpdates = "auto_check_updates"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.currency = try container.decode(String.self, forKey: .currency)
+        self.usdToCnyRate = try container.decode(String.self, forKey: .usdToCnyRate)
+        self.theme = try container.decode(String.self, forKey: .theme)
+        self.minimizeToTray = try container.decode(Bool.self, forKey: .minimizeToTray)
+        self.launchAtStartup = try container.decode(Bool.self, forKey: .launchAtStartup)
+        self.otlpEnabled = try container.decode(Bool.self, forKey: .otlpEnabled)
+        self.otlpPort = try container.decode(UInt16.self, forKey: .otlpPort)
+        self.deviceDisplayName = try container.decode(String.self, forKey: .deviceDisplayName)
+        self.bgMode = try container.decode(String.self, forKey: .bgMode)
+        self.bgImagePath = try container.decodeIfPresent(String.self, forKey: .bgImagePath)
+        self.bgPresetId = try container.decode(String.self, forKey: .bgPresetId)
+        self.bgOpacity = try container.decode(Double.self, forKey: .bgOpacity)
+        self.bgBlurPx = try container.decode(Int32.self, forKey: .bgBlurPx)
+        self.autoSyncPricing = try container.decode(Bool.self, forKey: .autoSyncPricing)
+        self.exchangeRateAuto = try container.decode(Bool.self, forKey: .exchangeRateAuto)
+        self.lastRateSyncAtMs = try container.decodeIfPresent(Int64.self, forKey: .lastRateSyncAtMs)
+        self.autoCheckUpdates = try container.decode(Bool.self, forKey: .autoCheckUpdates)
     }
 }
 
@@ -708,10 +731,10 @@ public struct DesktopPairingPayload: Codable, Equatable, Sendable {
 
         public var errorDescription: String? {
             switch self {
-            case .invalidJSON: return "配对二维码或链接格式无效"
-            case .unsupportedVersion(let v): return "配对协议 v\(v) 需更新 App 后导入"
-            case .invalidURL: return "Worker 地址必须为有效的 https:// 或本地 http:// URL"
-            case .emptyToken: return "Sync Token 为必填项"
+            case .invalidJSON: return L10n.tr("pairing.error.invalid", default: "配对格式无效")
+            case .unsupportedVersion(let v): return L10n.trFormat("pairing.error.version", default: "需更新 App 以支持 v%lld", Int64(v))
+            case .invalidURL: return L10n.tr("pairing.error.url", default: "Worker 地址需为 https:// 或本地 http://")
+            case .emptyToken: return L10n.tr("pairing.error.token", default: "Sync Token 为必填项")
             }
         }
     }
