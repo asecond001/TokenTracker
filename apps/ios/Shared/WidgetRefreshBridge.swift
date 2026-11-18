@@ -11,16 +11,20 @@ public final class WidgetRefreshBridge: @unchecked Sendable {
     private init() {}
 
     public func register(_ handler: @escaping @Sendable () async -> Bool) {
-        lock.lock()
-        refreshHandler = handler
-        lock.unlock()
+        lock.withLock {
+            refreshHandler = handler
+        }
     }
 
     public func triggerIfRegistered() async -> Bool {
-        lock.lock()
-        let handler = refreshHandler
-        lock.unlock()
+        let handler = currentHandler()
         guard let handler else { return false }
         return await handler()
+    }
+
+    private func currentHandler() -> (@Sendable () async -> Bool)? {
+        lock.withLock {
+            refreshHandler
+        }
     }
 }
