@@ -267,7 +267,11 @@ impl Storage {
 pub(super) fn resolve_trend_granularity(requested: TrendGranularity, span_ms: i64) -> TrendGranularity {
     match requested {
         TrendGranularity::Auto => {
-            if span_ms <= 2 * DAY_MS {
+            // Short drag-selected windows (e.g. the last 1h30m) need sub-hour buckets
+            // to show any shape at all; 15-minute buckets come from raw events.
+            if span_ms <= 6 * HOUR_MS {
+                TrendGranularity::FifteenMinutes
+            } else if span_ms <= 2 * DAY_MS {
                 TrendGranularity::Hourly
             } else if span_ms <= 90 * DAY_MS {
                 TrendGranularity::Daily

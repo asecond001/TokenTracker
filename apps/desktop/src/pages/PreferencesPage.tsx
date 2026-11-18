@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { ActionNotice } from '../components/ActionNotice';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { disable as disableAutostart, enable as enableAutostart } from '@tauri-apps/plugin-autostart';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -18,6 +19,7 @@ import {
   Wand2,
 } from 'lucide-react';
 import { InlineProgressBar } from '../components/InlineProgressBar';
+import { ProvisionProgress } from '../components/ProvisionProgress';
 import {
   BACKGROUND_GRADIENT_PRESETS,
   type BackgroundPresetId,
@@ -28,7 +30,7 @@ import {
   type FloatingWindowConfig,
 } from '../lib/floatingConfig';
 import { formatRelativeTime } from '../lib/format';
-import { ipc, isTauriRuntime } from '../lib/ipc';
+import { ipc, isTauriRuntime, onCloudSyncProvisionProgress } from '../lib/ipc';
 import { QrCodeSvg } from '../lib/qrcode';
 import {
   checkForUpdates,
@@ -41,6 +43,7 @@ import type {
   BootstrapState,
   CloudSyncDeployMode,
   CloudSyncProvisionResult,
+  CloudSyncProvisionStep,
   CurrencyCode,
   SyncEnvelopeV1,
   SyncPairingBundle,
@@ -52,6 +55,19 @@ export interface PreferencesPageProps {
   onApplyTheme?: (nextTheme: ThemeMode) => void;
   onPreviewPreferences?: (patch: Partial<AppPreferences>) => AppPreferences | null;
   onPersistPreferences?: (patch: Partial<AppPreferences>) => Promise<AppPreferences>;
+}
+
+const SYNC_FIELD_STYLE = {
+  backgroundColor: 'var(--bg-input)',
+  border: '1px solid var(--border-subtle)',
+  color: 'var(--text-primary)',
+} as const;
+
+interface ProvisionRunState {
+  mode: CloudSyncDeployMode;
+  steps: CloudSyncProvisionStep[];
+  status: 'running' | 'failed';
+  startedAtMs: number;
 }
 
 interface NoticeState {
@@ -175,6 +191,8 @@ export function PreferencesPage({
   const [syncBearerTokenInput, setSyncBearerTokenInput] = useState('');
   const [syncPassphraseInput, setSyncPassphraseInput] = useState('');
   const [deployMode, setDeployMode] = useState<CloudSyncDeployMode>('wrangler_cli');
+  const [connectMode, setConnectMode] = useState<'oneclick' | 'manual'>('oneclick');
+  const [provisionRun, setProvisionRun] = useState<ProvisionRunState | null>(null);
   const [workerNameDraft, setWorkerNameDraft] = useState('tokenvane-sync-worker');
   const [cfApiTokenInput, setCfApiTokenInput] = useState('');
   const [cfAccountIdInput, setCfAccountIdInput] = useState('');
@@ -183,6 +201,7 @@ export function PreferencesPage({
   const [includePassphraseInPairing, setIncludePassphraseInPairing] = useState(false);
   const [pairingCopied, setPairingCopied] = useState(false);
   const [notice, setNotice] = useState<NoticeState | null>(null);
+  const clearNotice = useCallback(() => setNotice(null), []);
   const [syncEnvelope, setSyncEnvelope] = useState<SyncEnvelopeV1 | null>(null);
   const updater = useUpdaterStore();
 
@@ -765,17 +784,32 @@ export function PreferencesPage({
   });
 
   const provisionWorkerMutation = useMutation({
-    mutationFn: () =>
-      ipc.provisionCloudSyncWorker({
-        mode: deployMode,
-        worker_name: workerNameDraft.trim() || null,
-        bearer_token: syncBearerTokenInput.trim() || null,
-        e2ee_enabled: syncE2eeDraft,
-        e2ee_passphrase: syncE2eeDraft ? syncPassphraseInput.trim() || null : null,
-        cf_api_token: deployMode === 'cloudflare_api' ? cfApiTokenInput.trim() || null : null,
-        cf_account_id: deployMode === 'cloudflare_api' ? cfAccountIdInput.trim() || null : null,
-      }),
+    mutationFn: async () => {
+      const mode = deployMode;
+      setProvisionRun({ mode, steps: [], status: 'running', startedAtMs: Date.now() });
+      const unlisten = await onCloudSyncProvisionProgress((step) => {
+        setProvisionRun((prev) =>
+          prev && !prev.steps.includes(step) ? { ...prev, steps: [...prev.steps, step] } : prev
+        );
+      });
+      try {
+        // One-click setup reuses the token / passphrase stored in the system
+        // credential vault (or generates fresh ones); manual drafts are ignored.
+        return await ipc.provisionCloudSyncWorker({
+          mode,
+          worker_name: workerNameDraft.trim() || null,
+          bearer_token: null,
+          e2ee_enabled: syncE2eeDraft,
+          e2ee_passphrase: null,
+          cf_api_token: mode === 'cloudflare_api' ? cfApiTokenInput.trim() || null : null,
+          cf_account_id: mode === 'cloudflare_api' ? cfAccountIdInput.trim() || null : null,
+        });
+      } finally {
+        unlisten();
+      }
+    },
     onSuccess: async (res: CloudSyncProvisionResult) => {
+      setProvisionRun(null);
       lastSyncCfgSnapshotRef.current = {
         enabled: res.status.enabled,
         worker_url: res.worker_url,
@@ -795,13 +829,16 @@ export function PreferencesPage({
       setPairingBundle(res.pairing);
       setPairingExpanded(true);
       setNotice({
-        text: '已完成 Cloudflare Worker 部署并自动填入连接信息，请使用移动端扫码配对',
+        text: res.initial_sync_ok
+          ? 'Worker 已部署并完成首次同步，可用移动端扫码配对'
+          : 'Worker 已部署，首次同步将在边缘路由生效后自动重试',
         kind: 'success',
       });
     },
     onError: (err: unknown) => {
+      setProvisionRun((prev) => (prev ? { ...prev, status: 'failed' } : prev));
       setNotice({
-        text: err instanceof Error ? err.message : '一键配置 Cloudflare Worker 失败',
+        text: err instanceof Error ? `一键配置失败：${err.message}` : '一键配置失败',
         kind: 'error',
       });
     },
@@ -872,7 +909,7 @@ export function PreferencesPage({
               color: 'var(--accent-tonal-text)',
             }}
           >
-            v0.4.4
+            v0.4.5
           </span>
         </div>
 
@@ -891,18 +928,7 @@ export function PreferencesPage({
         </button>
       </section>
 
-      {notice && (
-        <div
-          className="px-3 py-2 text-[12px]"
-          style={{
-            backgroundColor: 'var(--bg-elevated)',
-            borderBottom: '1px solid var(--border-subtle)',
-            color: notice.kind === 'error' ? 'var(--accent-rose)' : 'var(--accent-emerald)',
-          }}
-        >
-          {notice.text}
-        </div>
-      )}
+      <ActionNotice text={notice?.text ?? null} kind={notice?.kind} onClose={clearNotice} />
 
       {/* 1. 外观 */}
       <section className="space-y-1">
@@ -1646,259 +1672,315 @@ export function PreferencesPage({
               </label>
             </div>
 
-            <div
-              className="py-2.5 space-y-2.5"
-              style={{
-                borderTop: '1px solid var(--border-hairline)',
-                borderBottom: '1px solid var(--border-hairline)',
-              }}
-            >
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="seg-group" role="group" aria-label="Worker 部署方式">
-                  <button
-                    type="button"
-                    data-active={deployMode === 'wrangler_cli' ? 'true' : undefined}
-                    onClick={() => setDeployMode('wrangler_cli')}
-                    className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer whitespace-nowrap"
-                    style={{
-                      color:
-                        deployMode === 'wrangler_cli'
-                          ? 'var(--text-primary)'
-                          : 'var(--text-secondary)',
-                      fontWeight: deployMode === 'wrangler_cli' ? 500 : 400,
-                    }}
-                  >
-                    Wrangler 浏览器授权
-                  </button>
-                  <button
-                    type="button"
-                    data-active={deployMode === 'cloudflare_api' ? 'true' : undefined}
-                    onClick={() => setDeployMode('cloudflare_api')}
-                    className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer whitespace-nowrap"
-                    style={{
-                      color:
-                        deployMode === 'cloudflare_api'
-                          ? 'var(--text-primary)'
-                          : 'var(--text-secondary)',
-                      fontWeight: deployMode === 'cloudflare_api' ? 500 : 400,
-                    }}
-                  >
-                    Cloudflare API 令牌
-                  </button>
+            <div className="seg-group" role="group" aria-label="连接方式">
+              {(
+                [
+                  { id: 'oneclick', label: '一键部署' },
+                  { id: 'manual', label: '连接已有 Worker' },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  data-active={connectMode === opt.id ? 'true' : undefined}
+                  onClick={() => setConnectMode(opt.id)}
+                  className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer whitespace-nowrap"
+                  style={{
+                    color: connectMode === opt.id ? 'var(--text-primary)' : 'var(--text-secondary)',
+                    fontWeight: connectMode === opt.id ? 500 : 400,
+                  }}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            {connectMode === 'oneclick' ? (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="seg-group" role="group" aria-label="Worker 部署方式">
+                    {(
+                      [
+                        { id: 'wrangler_cli', label: 'Wrangler 浏览器授权' },
+                        { id: 'cloudflare_api', label: 'Cloudflare API 令牌' },
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        data-active={deployMode === opt.id ? 'true' : undefined}
+                        onClick={() => setDeployMode(opt.id)}
+                        className="seg-pill px-2.5 py-0.5 text-[11.5px] cursor-pointer whitespace-nowrap"
+                        style={{
+                          color: deployMode === opt.id ? 'var(--text-primary)' : 'var(--text-secondary)',
+                          fontWeight: deployMode === opt.id ? 500 : 400,
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <label className="flex items-center gap-2 text-[11.5px]">
+                    <span style={{ color: 'var(--text-secondary)' }}>Worker 名称</span>
+                    <input
+                      type="text"
+                      aria-label="Worker 名称"
+                      placeholder="tokenvane-sync-worker"
+                      value={workerNameDraft}
+                      onChange={(e) => setWorkerNameDraft(e.target.value)}
+                      className="w-48 px-2.5 py-1 text-[11.5px] font-mono rounded-lg outline-none"
+                      style={SYNC_FIELD_STYLE}
+                    />
+                  </label>
                 </div>
 
-                <label className="flex items-center gap-2 text-[11.5px]">
-                  <span style={{ color: 'var(--text-secondary)' }}>Worker 名称</span>
-                  <input
-                    type="text"
-                    aria-label="Worker 名称"
-                    placeholder="tokenvane-sync-worker"
-                    value={workerNameDraft}
-                    onChange={(e) => setWorkerNameDraft(e.target.value)}
-                    className="w-48 px-2.5 py-1 text-[11.5px] font-mono rounded-lg outline-none"
-                    style={{
-                      backgroundColor: 'var(--bg-input)',
-                      border: '1px solid var(--border-subtle)',
-                      color: 'var(--text-primary)',
-                    }}
-                  />
-                </label>
-              </div>
+                {deployMode === 'cloudflare_api' && (
+                  <div className="grid grid-cols-12 gap-2.5 items-end">
+                    <div className="col-span-8 space-y-1">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span style={{ color: 'var(--text-secondary)' }}>Cloudflare API 令牌</span>
+                        <span
+                          style={{
+                            color: syncStatus?.has_cf_api_token
+                              ? 'var(--accent-emerald)'
+                              : 'var(--text-muted)',
+                          }}
+                        >
+                          {syncStatus?.has_cf_api_token ? '已存入凭据库' : '待录入'}
+                        </span>
+                      </div>
+                      <input
+                        type="password"
+                        aria-label="Cloudflare API 令牌"
+                        placeholder={
+                          syncStatus?.has_cf_api_token ? '输入新值可更新' : 'Workers 编辑权限 Token'
+                        }
+                        value={cfApiTokenInput}
+                        onChange={(e) => setCfApiTokenInput(e.target.value)}
+                        className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
+                        style={SYNC_FIELD_STYLE}
+                      />
+                    </div>
+                    <div className="col-span-4 space-y-1">
+                      <span className="block text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                        Account ID
+                      </span>
+                      <input
+                        type="text"
+                        aria-label="Cloudflare Account ID"
+                        placeholder="自动识别"
+                        value={cfAccountIdInput}
+                        onChange={(e) => setCfAccountIdInput(e.target.value)}
+                        className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
+                        style={SYNC_FIELD_STYLE}
+                      />
+                    </div>
+                  </div>
+                )}
 
-              {deployMode === 'cloudflare_api' && (
-                <div className="grid grid-cols-12 gap-2.5 items-end">
-                  <div className="col-span-8 space-y-1">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                  <button
+                    type="button"
+                    onClick={() => provisionWorkerMutation.mutate()}
+                    disabled={provisionWorkerMutation.isPending}
+                    className="btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                    style={{
+                      backgroundColor: 'var(--accent-primary)',
+                      color: '#ffffff',
+                    }}
+                  >
+                    <Wand2 className="w-3.5 h-3.5" />
+                    <span>{provisionWorkerMutation.isPending ? '一键配置中…' : '一键配置'}</span>
+                  </button>
+                  {provisionRun && (
+                    <ProvisionProgress
+                      mode={provisionRun.mode}
+                      seen={provisionRun.steps}
+                      status={provisionRun.status}
+                      startedAtMs={provisionRun.startedAtMs}
+                    />
+                  )}
+                </div>
+
+                {(syncWorkerUrlDraft || syncStatus?.worker_url) && (
+                  <div
+                    data-testid="sync-connection-summary"
+                    className="grid grid-cols-12 gap-2.5 pt-2.5"
+                    style={{ borderTop: '1px solid var(--border-hairline)' }}
+                  >
+                    <label className="col-span-12 space-y-1">
+                      <span className="block text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                        Worker 服务地址
+                      </span>
+                      <input
+                        type="url"
+                        readOnly
+                        aria-label="Worker 服务地址"
+                        value={syncWorkerUrlDraft || syncStatus?.worker_url || ''}
+                        onFocus={(e) => e.currentTarget.select()}
+                        className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
+                        style={SYNC_FIELD_STYLE}
+                      />
+                    </label>
+                    <label className={`${syncE2eeDraft ? 'col-span-6' : 'col-span-12'} space-y-1`}>
+                      <span className="flex items-center justify-between text-[11px]">
+                        <span style={{ color: 'var(--text-secondary)' }}>访问令牌</span>
+                        {syncStatus?.has_bearer_token && (
+                          <span style={{ color: 'var(--accent-emerald)' }}>已存入凭据库</span>
+                        )}
+                      </span>
+                      <input
+                        type="password"
+                        readOnly
+                        aria-label="Sync Bearer Token"
+                        value={syncBearerTokenInput}
+                        placeholder={syncStatus?.has_bearer_token ? '••••••••' : ''}
+                        className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
+                        style={SYNC_FIELD_STYLE}
+                      />
+                    </label>
+                    {syncE2eeDraft && (
+                      <label className="col-span-6 space-y-1">
+                        <span className="flex items-center justify-between text-[11px]">
+                          <span style={{ color: 'var(--text-secondary)' }}>E2EE 口令</span>
+                          {syncStatus?.has_e2ee_passphrase && (
+                            <span style={{ color: 'var(--accent-emerald)' }}>已存入凭据库</span>
+                          )}
+                        </span>
+                        <input
+                          type="password"
+                          readOnly
+                          aria-label="E2EE 同步口令"
+                          value={syncPassphraseInput}
+                          placeholder={syncStatus?.has_e2ee_passphrase ? '••••••••' : '部署时自动生成'}
+                          className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
+                          style={SYNC_FIELD_STYLE}
+                        />
+                      </label>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <span className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                    Worker 服务地址
+                  </span>
+                  <input
+                    type="url"
+                    aria-label="Worker 服务地址"
+                    placeholder="https://tokenvane-sync.your-subdomain.workers.dev"
+                    value={syncWorkerUrlDraft}
+                    onChange={(e) => setSyncWorkerUrlDraft(e.target.value)}
+                    className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
+                    style={SYNC_FIELD_STYLE}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span style={{ color: 'var(--text-secondary)' }}>访问令牌</span>
+                    <span
+                      style={{
+                        color: syncStatus?.has_bearer_token
+                          ? 'var(--accent-emerald)'
+                          : 'var(--text-muted)',
+                      }}
+                    >
+                      {syncStatus?.has_bearer_token ? '已存入凭据库' : '待录入'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="password"
+                      aria-label="Sync Bearer Token"
+                      placeholder={syncStatus?.has_bearer_token ? '输入新值可更新' : 'Worker SYNC_TOKEN'}
+                      value={syncBearerTokenInput}
+                      onChange={(e) => setSyncBearerTokenInput(e.target.value)}
+                      className="flex-1 px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
+                      style={SYNC_FIELD_STYLE}
+                    />
+                    <button
+                      type="button"
+                      aria-label="随机生成访问令牌"
+                      onClick={() => setSyncBearerTokenInput(generateSecretToken(24))}
+                      className="btn-interactive inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] cursor-pointer whitespace-nowrap shrink-0"
+                      style={{
+                        backgroundColor: 'var(--bg-elevated)',
+                        border: '1px solid var(--border-subtle)',
+                        color: 'var(--text-secondary)',
+                      }}
+                    >
+                      <Wand2 className="w-3 h-3" />
+                      <span>随机生成</span>
+                    </button>
+                  </div>
+                </div>
+
+                {syncE2eeDraft && (
+                  <div className="space-y-1">
                     <div className="flex items-center justify-between text-[11px]">
-                      <span style={{ color: 'var(--text-secondary)' }}>Cloudflare API 令牌</span>
+                      <span style={{ color: 'var(--text-secondary)' }}>E2EE 同步口令</span>
                       <span
                         style={{
-                          color: syncStatus?.has_cf_api_token
+                          color: syncStatus?.has_e2ee_passphrase
                             ? 'var(--accent-emerald)'
                             : 'var(--text-muted)',
                         }}
                       >
-                        {syncStatus?.has_cf_api_token ? '已保存在系统凭据库' : '待录入'}
+                        {syncStatus?.has_e2ee_passphrase ? '已存入凭据库' : '待录入'}
                       </span>
                     </div>
-                    <input
-                      type="password"
-                      aria-label="Cloudflare API 令牌"
-                      placeholder={
-                        syncStatus?.has_cf_api_token
-                          ? '已保存，输入新值可更新'
-                          : '输入具备 Workers 编辑权限的 API Token'
-                      }
-                      value={cfApiTokenInput}
-                      onChange={(e) => setCfApiTokenInput(e.target.value)}
-                      className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
-                      style={{
-                        backgroundColor: 'var(--bg-input)',
-                        border: '1px solid var(--border-subtle)',
-                        color: 'var(--text-primary)',
-                      }}
-                    />
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="password"
+                        aria-label="E2EE 同步口令"
+                        placeholder={syncStatus?.has_e2ee_passphrase ? '输入新值可更新' : '多端共享加密口令'}
+                        value={syncPassphraseInput}
+                        onChange={(e) => setSyncPassphraseInput(e.target.value)}
+                        className="flex-1 px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
+                        style={SYNC_FIELD_STYLE}
+                      />
+                      <button
+                        type="button"
+                        aria-label="随机生成 E2EE 口令"
+                        onClick={() => setSyncPassphraseInput(generateSecretToken(16))}
+                        className="btn-interactive inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] cursor-pointer whitespace-nowrap shrink-0"
+                        style={{
+                          backgroundColor: 'var(--bg-elevated)',
+                          border: '1px solid var(--border-subtle)',
+                          color: 'var(--text-secondary)',
+                        }}
+                      >
+                        <Wand2 className="w-3 h-3" />
+                        <span>随机生成</span>
+                      </button>
+                    </div>
                   </div>
-                  <div className="col-span-4 space-y-1">
-                    <span className="block text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                      Account ID
-                    </span>
-                    <input
-                      type="text"
-                      aria-label="Cloudflare Account ID"
-                      placeholder="自动识别默认账户"
-                      value={cfAccountIdInput}
-                      onChange={(e) => setCfAccountIdInput(e.target.value)}
-                      className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
-                      style={{
-                        backgroundColor: 'var(--bg-input)',
-                        border: '1px solid var(--border-subtle)',
-                        color: 'var(--text-primary)',
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
+                )}
 
-            <div className="space-y-1">
-              <span className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                Worker 服务地址
-              </span>
-              <input
-                type="url"
-                aria-label="Worker 服务地址"
-                placeholder="https://tokenvane-sync.your-subdomain.workers.dev"
-                value={syncWorkerUrlDraft}
-                onChange={(e) => setSyncWorkerUrlDraft(e.target.value)}
-                className="w-full px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
-                style={{
-                  backgroundColor: 'var(--bg-input)',
-                  border: '1px solid var(--border-subtle)',
-                  color: 'var(--text-primary)',
-                }}
-              />
-            </div>
-
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-[11px]">
-                <span style={{ color: 'var(--text-secondary)' }}>访问令牌</span>
-                <span
-                  style={{
-                    color: syncStatus?.has_bearer_token
-                      ? 'var(--accent-emerald)'
-                      : 'var(--text-muted)',
-                  }}
-                >
-                  {syncStatus?.has_bearer_token ? '已保存在系统凭据库' : '待录入'}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <input
-                  type="password"
-                  aria-label="Sync Bearer Token"
-                  placeholder={syncStatus?.has_bearer_token ? '已保存，输入新值可更新' : '输入 Worker SYNC_TOKEN'}
-                  value={syncBearerTokenInput}
-                  onChange={(e) => setSyncBearerTokenInput(e.target.value)}
-                  className="flex-1 px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
-                  style={{
-                    backgroundColor: 'var(--bg-input)',
-                    border: '1px solid var(--border-subtle)',
-                    color: 'var(--text-primary)',
-                  }}
-                />
                 <button
                   type="button"
-                  aria-label="随机生成访问令牌"
-                  onClick={() => setSyncBearerTokenInput(generateSecretToken(24))}
-                  className="btn-interactive inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] cursor-pointer whitespace-nowrap shrink-0"
+                  onClick={() => saveCloudSyncSetupMutation.mutate()}
+                  disabled={saveCloudSyncSetupMutation.isPending || provisionWorkerMutation.isPending}
+                  className="btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium cursor-pointer disabled:opacity-50 whitespace-nowrap"
                   style={{
-                    backgroundColor: 'var(--bg-elevated)',
-                    border: '1px solid var(--border-subtle)',
-                    color: 'var(--text-secondary)',
+                    backgroundColor: 'var(--accent-primary)',
+                    color: '#ffffff',
                   }}
                 >
-                  <Wand2 className="w-3 h-3" />
-                  <span>随机生成</span>
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{saveCloudSyncSetupMutation.isPending ? '保存中…' : '保存并连接'}</span>
                 </button>
-              </div>
-            </div>
-
-            {syncE2eeDraft && (
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span style={{ color: 'var(--text-secondary)' }}>E2EE 同步口令</span>
-                  <span
-                    style={{
-                      color: syncStatus?.has_e2ee_passphrase
-                        ? 'var(--accent-emerald)'
-                        : 'var(--text-muted)',
-                    }}
-                  >
-                    {syncStatus?.has_e2ee_passphrase ? '已保存在系统凭据库' : '待录入'}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="password"
-                    aria-label="E2EE 同步口令"
-                    placeholder={syncStatus?.has_e2ee_passphrase ? '已保存，输入新值可更新' : '输入多端共享加密口令'}
-                    value={syncPassphraseInput}
-                    onChange={(e) => setSyncPassphraseInput(e.target.value)}
-                    className="flex-1 px-2.5 py-1.5 text-[12px] font-mono rounded-lg outline-none"
-                    style={{
-                      backgroundColor: 'var(--bg-input)',
-                      border: '1px solid var(--border-subtle)',
-                      color: 'var(--text-primary)',
-                    }}
-                  />
-                  <button
-                    type="button"
-                    aria-label="随机生成 E2EE 口令"
-                    onClick={() => setSyncPassphraseInput(generateSecretToken(16))}
-                    className="btn-interactive inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] cursor-pointer whitespace-nowrap shrink-0"
-                    style={{
-                      backgroundColor: 'var(--bg-elevated)',
-                      border: '1px solid var(--border-subtle)',
-                      color: 'var(--text-secondary)',
-                    }}
-                  >
-                    <Wand2 className="w-3 h-3" />
-                    <span>随机生成</span>
-                  </button>
-                </div>
               </div>
             )}
 
-            <div className="flex flex-wrap items-center gap-2 pt-0.5">
-              <button
-                type="button"
-                onClick={() => provisionWorkerMutation.mutate()}
-                disabled={provisionWorkerMutation.isPending || saveCloudSyncSetupMutation.isPending}
-                className="btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium cursor-pointer disabled:opacity-50 whitespace-nowrap"
-                style={{
-                  backgroundColor: 'var(--accent-primary)',
-                  color: '#ffffff',
-                }}
-              >
-                <Wand2 className="w-3.5 h-3.5" />
-                <span>{provisionWorkerMutation.isPending ? '一键配置中…' : '一键配置'}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => saveCloudSyncSetupMutation.mutate()}
-                disabled={saveCloudSyncSetupMutation.isPending || provisionWorkerMutation.isPending}
-                className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11.5px] font-medium cursor-pointer disabled:opacity-50 whitespace-nowrap"
-                style={{
-                  backgroundColor: 'var(--bg-elevated)',
-                  border: '1px solid var(--border-strong)',
-                  color: 'var(--text-primary)',
-                }}
-              >
-                <Save className="w-3.5 h-3.5" />
-                <span>{saveCloudSyncSetupMutation.isPending ? '保存中…' : '保存并连接'}</span>
-              </button>
-
+            <div
+              className="flex flex-wrap items-center gap-2 pt-2.5"
+              style={{ borderTop: '1px solid var(--border-hairline)' }}
+            >
               {syncStatus?.has_bearer_token && syncStatus?.worker_url && (
                 <button
                   type="button"

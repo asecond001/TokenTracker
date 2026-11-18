@@ -614,6 +614,17 @@ export interface SyncStatusView {
 
 export type CloudSyncDeployMode = 'wrangler_cli' | 'cloudflare_api';
 
+/** Mirrors Rust `ProvisionStep` emitted on `cloud-sync-provision-progress`. */
+export type CloudSyncProvisionStep =
+  | 'preparing'
+  | 'checking_auth'
+  | 'browser_login'
+  | 'resolving_account'
+  | 'deploying'
+  | 'writing_secret'
+  | 'saving'
+  | 'initial_sync';
+
 export interface CloudSyncProvisionInput {
   mode: CloudSyncDeployMode;
   worker_name: string | null;

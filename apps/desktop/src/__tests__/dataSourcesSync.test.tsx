@@ -369,6 +369,7 @@ describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sy
 
     fireEvent.click(screen.getByLabelText('启用云端同步'));
     fireEvent.click(screen.getByLabelText(/端到端加密/));
+    fireEvent.click(screen.getByRole('button', { name: '连接已有 Worker' }));
     fireEvent.change(screen.getByLabelText('Worker 服务地址'), {
       target: { value: 'https://sync.example.workers.dev' },
     });
@@ -426,7 +427,7 @@ describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sy
     vi.spyOn(ipc, 'getRemoteSubscriptionSnapshots').mockResolvedValue(remoteSnaps);
 
     renderWithQuery(<SubscriptionsPage />);
-    expect(await screen.findByText('跨设备同步配额快照（只读）')).toBeInTheDocument();
+    expect(await screen.findByText('其他设备配额')).toBeInTheDocument();
     expect(screen.getByText('MacBookPro')).toBeInTheDocument();
     expect(screen.getByText('只读远端快照')).toBeInTheDocument();
     expect(screen.getByText('已用 42.5%')).toBeInTheDocument();
@@ -515,6 +516,9 @@ describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sy
       'data-active',
       'true'
     );
+    // One-click view keeps the first screen clean: no empty address / token inputs.
+    expect(screen.queryByLabelText('Worker 服务地址')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Sync Bearer Token')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '一键配置' }));
 
     await waitFor(() => {
@@ -547,7 +551,6 @@ describe('v0.2.0 Phase 2 Live Summary, Phase 2 Providers/Custom Rules & Cloud Sy
     fireEvent.change(screen.getByLabelText('Worker 名称'), {
       target: { value: 'custom-sync-hub' },
     });
-    fireEvent.change(screen.getByLabelText('Sync Bearer Token'), { target: { value: '' } });
     fireEvent.click(screen.getByLabelText(/端到端加密/));
     fireEvent.click(screen.getByRole('button', { name: '一键配置' }));
 

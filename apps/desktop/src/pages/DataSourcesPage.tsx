@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { ActionNotice } from '../components/ActionNotice';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
@@ -66,9 +67,9 @@ const BALANCE_API_LABELS: Record<string, { label: string; placeholder: string }>
 };
 
 const PROTOCOL_KINDS: Array<{ id: CustomProtocolKind; label: string }> = [
-  { id: 'openai_jsonl', label: 'OpenAI 兼容 JSONL (usage.prompt_tokens / completion_tokens)' },
-  { id: 'anthropic_jsonl', label: 'Anthropic 兼容 JSONL (usage.input_tokens / output_tokens)' },
-  { id: 'declarative_jsonl', label: '声明式 JSON Pointer 映射 (自定义字段路径)' },
+  { id: 'openai_jsonl', label: 'OpenAI JSONL' },
+  { id: 'anthropic_jsonl', label: 'Anthropic JSONL' },
+  { id: 'declarative_jsonl', label: 'JSON Pointer 映射' },
 ];
 
 function createEmptyCustomRule(): CustomProviderRule {
@@ -106,9 +107,9 @@ function formatNativeBalance(micro: number | null | undefined, currency: string)
 }
 
 const COLLECTION_MODES: Array<{ id: CollectionMode; label: string }> = [
-  { id: 'local_log', label: '本地只读日志 (Local Log)' },
-  { id: 'otlp', label: '本地 OTLP 遥测 (Loopback)' },
-  { id: 'official_api', label: '官方公开 Usage API' },
+  { id: 'local_log', label: '本地日志' },
+  { id: 'otlp', label: '本地 OTLP' },
+  { id: 'official_api', label: '官方 Usage API' },
 ];
 
 export function DataSourcesPage() {
@@ -153,6 +154,8 @@ export function DataSourcesPage() {
   const [otlpPortDraft, setOtlpPortDraft] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const clearNotice = useCallback(() => setNotice(null), []);
+  const clearErrorMsg = useCallback(() => setErrorMsg(null), []);
   const [copiedSnippet, setCopiedSnippet] = useState(false);
 
   const [ruleDraft, setRuleDraft] = useState<CustomProviderRule>(() => createEmptyCustomRule());
@@ -214,7 +217,7 @@ export function DataSourcesPage() {
     onSuccess: async (report) => {
       setErrorMsg(null);
       setNotice(
-        `增量扫描完成：检查 ${report.files_scanned} 个文件，新增 ${report.events_inserted} 条事件，幂等跳过 ${report.events_deduplicated} 条`
+        `扫描完成：${report.files_scanned} 个文件，新增 ${report.events_inserted} 条，跳过 ${report.events_deduplicated} 条`
       );
       await invalidateAllSources();
     },
@@ -233,7 +236,7 @@ export function DataSourcesPage() {
     onSuccess: async (_, vars) => {
       setApiKeyDrafts((prev) => ({ ...prev, [vars.providerId]: '' }));
       setErrorMsg(null);
-      setNotice(`${providerDisplayName(vars.providerId)} 官方密钥已加密存入系统凭据管理器`);
+      setNotice(`${providerDisplayName(vars.providerId)} 密钥已存入凭据库`);
       await invalidateAllSources();
     },
     onError: (err: unknown) => {
@@ -245,7 +248,7 @@ export function DataSourcesPage() {
     mutationFn: (providerId: string) => ipc.deleteProviderApiKey(providerId),
     onSuccess: async (_, providerId) => {
       setErrorMsg(null);
-      setNotice(`已从系统凭据管理器移除 ${providerDisplayName(providerId)} 密钥`);
+      setNotice(`已移除 ${providerDisplayName(providerId)} 密钥`);
       await invalidateAllSources();
     },
     onError: (err: unknown) => {
@@ -259,7 +262,7 @@ export function DataSourcesPage() {
       setErrorMsg(null);
       setReconcileResults((prev) => ({ ...prev, [res.provider_id]: res }));
       setNotice(
-        `${providerDisplayName(res.provider_id)} 官方账单对账成功（HTTP ${res.status_code}）`
+        `${providerDisplayName(res.provider_id)} 对账成功`
       );
     },
     onError: (err: unknown) => {
@@ -277,8 +280,8 @@ export function DataSourcesPage() {
       }));
       setNotice(
         outcome.from_cache
-          ? `${providerDisplayName(outcome.snapshot.provider_id)} 命中 60s 缓存（冷却剩余 ${outcome.cooldown_remaining_secs}s）`
-          : `${providerDisplayName(outcome.snapshot.provider_id)} 官方余额已刷新（更新 ${outcome.rate_limits_updated} 条限额快照）`
+          ? `${providerDisplayName(outcome.snapshot.provider_id)} 冷却中 ${outcome.cooldown_remaining_secs}s`
+          : `${providerDisplayName(outcome.snapshot.provider_id)} 余额已刷新`
       );
       await invalidateAllSources();
     },
@@ -380,7 +383,7 @@ export function DataSourcesPage() {
 
   const handleBrowseFolder = async (cfg: ProviderConfig) => {
     if (!isTauriRuntime()) {
-      setNotice('目录选择器仅在桌面端原生运行时可用，可在下方输入框手动填写路径');
+      setNotice('可在输入框手动填写路径');
       return;
     }
     const selected = await open({
@@ -456,47 +459,8 @@ export function DataSourcesPage() {
         </button>
       </section>
 
-      {notice && (
-        <div
-          className="px-3 py-2 text-[12px] rounded-lg flex items-center justify-between"
-          style={{
-            border: '1px solid var(--border-subtle)',
-            backgroundColor: 'var(--bg-elevated)',
-            color: 'var(--accent-emerald)',
-          }}
-        >
-          <span>{notice}</span>
-          <button
-            type="button"
-            onClick={() => setNotice(null)}
-            className="btn-interactive px-1.5 py-0.5 rounded-lg text-[11px] cursor-pointer"
-            style={{ color: 'var(--text-muted)' }}
-          >
-            关闭
-          </button>
-        </div>
-      )}
-
-      {errorMsg && (
-        <div
-          className="px-3 py-2 text-[12px] rounded-lg flex items-center justify-between"
-          style={{
-            border: '1px solid var(--accent-rose)',
-            backgroundColor: 'var(--bg-elevated)',
-            color: 'var(--accent-rose)',
-          }}
-        >
-          <span>{errorMsg}</span>
-          <button
-            type="button"
-            onClick={() => setErrorMsg(null)}
-            className="btn-interactive px-1.5 py-0.5 rounded-lg text-[11px] cursor-pointer"
-            style={{ color: 'var(--text-muted)' }}
-          >
-            关闭
-          </button>
-        </div>
-      )}
+      <ActionNotice text={notice} kind="success" onClose={clearNotice} />
+      <ActionNotice text={errorMsg} kind="error" onClose={clearErrorMsg} />
 
       {/* Section 1: Provider Data Sources */}
       <section className="space-y-2">
@@ -504,7 +468,7 @@ export function DataSourcesPage() {
           className="text-[11px] font-semibold uppercase tracking-wider"
           style={{ color: 'var(--text-muted)' }}
         >
-          模型提供商采集适配器
+          采集适配器
         </h2>
 
         <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
@@ -593,7 +557,7 @@ export function DataSourcesPage() {
                 {/* Default Path & Custom Log Directories */}
                 <div className="pl-4.5 space-y-2">
                   <div className="text-[11.5px]" style={{ color: 'var(--text-secondary)' }}>
-                    默认只读路径：
+                    默认路径
                     <code className="ml-1 text-[11px] select-text">
                       {DEFAULT_PATH_HINTS[cfg.provider_id] ?? '标准用户数据目录'}
                     </code>
@@ -628,7 +592,7 @@ export function DataSourcesPage() {
                   <div className="flex flex-wrap items-center gap-2">
                     <input
                       type="text"
-                      placeholder="添加自定义日志目录或文件路径（如 C:\Users\...\logs）"
+                      placeholder="添加日志目录或文件"
                       value={pathDrafts[cfg.provider_id] ?? ''}
                       onChange={(e) =>
                         setPathDrafts((prev) => ({
@@ -703,7 +667,7 @@ export function DataSourcesPage() {
                         }}
                       >
                         {cfg.has_credential
-                          ? '已托管于 Windows 凭据管理器'
+                          ? '已存入凭据库'
                           : '可录入密钥'}
                       </span>
                     </div>
@@ -713,9 +677,9 @@ export function DataSourcesPage() {
                         type="password"
                         placeholder={
                           cfg.has_credential
-                            ? '输入新密钥以覆盖'
+                            ? '输入新值可替换'
                             : supportsOrgUsageApi
-                              ? '粘贴官方 Admin API Key'
+                              ? 'Admin API Key'
                               : balanceApiMeta?.placeholder
                         }
                         value={apiKeyDrafts[cfg.provider_id] ?? ''}
@@ -762,7 +726,7 @@ export function DataSourcesPage() {
                                 color: '#ffffff',
                               }}
                             >
-                              官方账单对账 (7d)
+                              对账 7d
                             </button>
                           ) : (
                             <button
@@ -884,7 +848,7 @@ export function DataSourcesPage() {
                         </span>
                         {balanceOutcome?.from_cache && (
                           <span style={{ color: 'var(--accent-amber)' }}>
-                            60s 冷却缓存 · 剩余 {balanceOutcome.cooldown_remaining_secs}s
+                            冷却 {balanceOutcome.cooldown_remaining_secs}s
                           </span>
                         )}
                       </div>
@@ -947,7 +911,7 @@ export function DataSourcesPage() {
                         </span>
                         {balanceOutcome?.from_cache && (
                           <span style={{ color: 'var(--accent-amber)' }}>
-                            60s 冷却缓存 · 剩余 {balanceOutcome.cooldown_remaining_secs}s
+                            冷却 {balanceOutcome.cooldown_remaining_secs}s
                           </span>
                         )}
                       </div>
@@ -975,7 +939,7 @@ export function DataSourcesPage() {
           <div className="space-y-0.5">
             <div className="flex items-center gap-2">
               <h2 className="text-[14px] font-semibold">
-                本地回环 OTLP 遥测接收器（127.0.0.1）
+                本地 OTLP 接收器
               </h2>
               <span
                 className="text-[11px] px-1.5 py-0.5 rounded-md tabular-nums"
@@ -1022,7 +986,7 @@ export function DataSourcesPage() {
                   border: '1px solid var(--border-subtle)',
                 }}
               >
-                停止 OTLP 接收
+                停止接收
               </button>
             ) : (
               <button
@@ -1035,7 +999,7 @@ export function DataSourcesPage() {
                   color: '#ffffff',
                 }}
               >
-                开启本地 OTLP
+                开启接收
               </button>
             )}
           </div>
@@ -1080,7 +1044,7 @@ export function DataSourcesPage() {
               className="text-[12px] font-semibold uppercase tracking-wider"
               style={{ color: 'var(--text-muted)' }}
             >
-              自定义兼容网关与声明式接入规则（custom_compatible）
+              自定义接入规则
             </h2>
           </div>
           <button
@@ -1111,7 +1075,7 @@ export function DataSourcesPage() {
                 color: 'var(--text-muted)',
               }}
             >
-              支持添加自定义声明式日志规则
+              可添加规则
             </div>
           ) : (
             customRules.map((rule) => {
@@ -1213,7 +1177,7 @@ export function DataSourcesPage() {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
             <label className="space-y-1">
               <span className="block text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                规则 ID (字母数字下划线)
+                规则 ID
               </span>
               <input
                 type="text"
@@ -1283,7 +1247,7 @@ export function DataSourcesPage() {
 
             <label className="space-y-1">
               <span className="block text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                文件扩展名 (逗号分隔)
+                文件扩展名
               </span>
               <input
                 type="text"
@@ -1303,7 +1267,7 @@ export function DataSourcesPage() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <label className="md:col-span-2 space-y-1">
               <span className="block text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                监控日志根目录 (每行或逗号分隔一个目录)
+                日志目录
               </span>
               <textarea
                 rows={2}
@@ -1321,7 +1285,7 @@ export function DataSourcesPage() {
 
             <label className="space-y-1">
               <span className="block text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                自定义归属模型提供商 ID (可选)
+                归属提供商 ID
               </span>
               <input
                 type="text"
@@ -1350,14 +1314,14 @@ export function DataSourcesPage() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 pt-1">
               {(
                 [
-                  ['timestamp_path', '时间戳 JSON 指针 (/timestamp)'],
-                  ['model_path', '模型 JSON 指针 (/model)'],
-                  ['input_tokens_path', '输入 Token 指针 (/usage/input)'],
-                  ['output_tokens_path', '输出 Token 指针 (/usage/output)'],
-                  ['cache_read_tokens_path', '缓存读指针 (可选)'],
-                  ['cache_write_tokens_path', '缓存写指针 (可选)'],
-                  ['reasoning_tokens_path', '推理 Token 指针 (可选)'],
-                  ['duration_ms_path', '耗时 ms 指针 (可选)'],
+                  ['timestamp_path', '时间戳'],
+                  ['model_path', '模型'],
+                  ['input_tokens_path', '输入 Token'],
+                  ['output_tokens_path', '输出 Token'],
+                  ['cache_read_tokens_path', '缓存读'],
+                  ['cache_write_tokens_path', '缓存写'],
+                  ['reasoning_tokens_path', '推理 Token'],
+                  ['duration_ms_path', '耗时 ms'],
                 ] as const
               ).map(([fieldKey, label]) => (
                 <label key={fieldKey} className="space-y-1">
@@ -1391,7 +1355,7 @@ export function DataSourcesPage() {
           <div className="space-y-2 pt-1">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                单行 JSONL 样本校验
+                样本校验
               </span>
               <div className="flex items-center gap-2">
                 <button
@@ -1482,7 +1446,7 @@ export function DataSourcesPage() {
       <section className="space-y-3 pb-4">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-[13px] font-semibold">断点续读游标明细（ingestion_cursors）</h2>
+            <h2 className="text-[13px] font-semibold">读取游标</h2>
           </div>
           <span className="text-[11.5px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
             共 {cursors.length} 个已跟踪文件

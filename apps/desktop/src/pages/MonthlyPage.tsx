@@ -1,4 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
+import { ShareReceiptDialog } from '../components/ShareReceiptDialog';
+import { ActionNotice } from '../components/ActionNotice';
 import { useQuery } from '@tanstack/react-query';
 import {
   createColumnHelper,
@@ -10,7 +12,13 @@ import {
 } from '@tanstack/react-table';
 import { save } from '@tauri-apps/plugin-dialog';
 import type { EChartsOption } from 'echarts';
-import { ChevronDown, ChevronLeft, ChevronRight, Download } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  ReceiptText,
+} from 'lucide-react';
 import { AnimatedNumber } from '../components/AnimatedNumber';
 import { EChartBox } from '../components/EChartBox';
 import { InlineProgressBar } from '../components/InlineProgressBar';
@@ -87,7 +95,10 @@ export function MonthlyPage() {
   const [month, setMonth] = useState(now.getMonth() + 1);
   const [sorting, setSorting] = useState<SortingState>([{ id: 'date', desc: true }]);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const clearExportNotice = useCallback(() => setExportNotice(null), []);
   const [roiExpanded, setRoiExpanded] = useState(true);
+  const [shareOpen, setShareOpen] = useState(false);
+  const closeShare = useCallback(() => setShareOpen(false), []);
 
   const { providerFilter, deviceFilter, currency, usdToCnyRate, tzOffsetMinutes } =
     useWorkspaceStore();
@@ -384,6 +395,20 @@ export function MonthlyPage() {
 
           <button
             type="button"
+            onClick={() => setShareOpen(true)}
+            disabled={!data}
+            className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] rounded-lg cursor-pointer disabled:opacity-50"
+            style={{
+              border: '1px solid var(--border-hairline)',
+              color: 'var(--text-primary)',
+            }}
+          >
+            <ReceiptText className="w-3.5 h-3.5" />
+            分享账单
+          </button>
+
+          <button
+            type="button"
             onClick={() => void handleExport('csv')}
             className="btn-interactive inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] rounded-lg cursor-pointer"
             style={{
@@ -409,17 +434,14 @@ export function MonthlyPage() {
         </div>
       </section>
 
-      {exportNotice && (
-        <div
-          className="px-3 py-2 text-[12px] rounded-lg"
-          style={{
-            backgroundColor: 'var(--bg-elevated)',
-            border: '1px solid var(--accent-emerald)',
-            color: 'var(--accent-emerald)',
-          }}
-        >
-          {exportNotice}
-        </div>
+      <ActionNotice text={exportNotice} kind="success" onClose={clearExportNotice} />
+      {shareOpen && data && (
+        <ShareReceiptDialog
+          report={data}
+          currency={currency}
+          usdToCnyRate={usdToCnyRate}
+          onClose={closeShare}
+        />
       )}
 
       {/* Objective Top 4-Metric Strip (Zero-Assumption: No Subscription Fee / ROI Prominence Here) */}

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActionNotice } from '../components/ActionNotice';
 import { createPortal } from 'react-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, ExternalLink, Info, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
@@ -260,6 +261,7 @@ export function SubscriptionsPage() {
   const [accountFormError, setAccountFormError] = useState<string | null>(null);
   const [confirmDeletePaygId, setConfirmDeletePaygId] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  const clearNotice = useCallback(() => setNotice(null), []);
 
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const prevCurrencyRef = useRef<{ currency: CurrencyCode; usdToCnyRate: string }>({
@@ -432,11 +434,11 @@ export function SubscriptionsPage() {
       if (QUOTA_BALANCE_API_PROVIDERS.has(providerId) || CLI_QUOTA_LOGIN_PROVIDERS.has(providerId)) {
         const outcome = await ipc.refreshProviderBalance(providerId);
         return outcome.from_cache
-          ? `${providerDisplayName(providerId)} 使用近期缓存（冷却剩余 ${outcome.cooldown_remaining_secs}s）`
+          ? `${providerDisplayName(providerId)} 冷却中 ${outcome.cooldown_remaining_secs}s`
           : `${providerDisplayName(providerId)} 实时配额已刷新`;
       }
       await ipc.triggerScanNow();
-      return `${providerDisplayName(providerId)} 本地日志配额已刷新`;
+      return `${providerDisplayName(providerId)} 配额已刷新`;
     },
     onSuccess: async (text) => {
       setNotice({ kind: 'success', text });
@@ -469,11 +471,11 @@ export function SubscriptionsPage() {
           await ipc.triggerScanNow();
         }
         return outcome.from_cache
-          ? `${providerDisplayName(providerId)} 命中 60s 缓存（冷却剩余 ${outcome.cooldown_remaining_secs}s）`
-          : `${providerDisplayName(providerId)} 配额已同步（更新 ${outcome.rate_limits_updated} 个窗口）`;
+          ? `${providerDisplayName(providerId)} 冷却中 ${outcome.cooldown_remaining_secs}s`
+          : `${providerDisplayName(providerId)} 配额已同步`;
       }
       const report = await ipc.triggerScanNow();
-      return `${providerDisplayName(providerId)} 本地日志已同步（扫描 ${report.files_scanned} 个文件）`;
+      return `${providerDisplayName(providerId)} 已同步 ${report.files_scanned} 个文件`;
     },
     onSuccess: async (text) => {
       setAccountDraft(null);
@@ -507,7 +509,7 @@ export function SubscriptionsPage() {
       setNotice({
         kind: 'success',
         text: payload.apiKey?.trim()
-          ? `已接入「${payload.account.account_name}」并安全写入系统凭据库`
+          ? `已接入「${payload.account.account_name}」`
           : `已保存账户「${payload.account.account_name}」`,
       });
       await invalidateUsageQueries();
@@ -532,8 +534,8 @@ export function SubscriptionsPage() {
       setNotice({
         kind: 'success',
         text: outcome.from_cache
-          ? `${providerDisplayName(outcome.snapshot.provider_id)} 使用近期缓存（冷却剩余 ${outcome.cooldown_remaining_secs}s）`
-          : `${providerDisplayName(outcome.snapshot.provider_id)} 官方余额已刷新`,
+          ? `${providerDisplayName(outcome.snapshot.provider_id)} 冷却中 ${outcome.cooldown_remaining_secs}s`
+          : `${providerDisplayName(outcome.snapshot.provider_id)} 余额已刷新`,
       });
     },
     onError: (err: unknown) => {
@@ -603,7 +605,7 @@ export function SubscriptionsPage() {
     if (!accountDraft) return;
     const trimmedName = accountDraft.account_name.trim();
     if (!trimmedName) {
-      setAccountFormError('请输入账户名称（例如 DeepSeek 官方账户）');
+      setAccountFormError('请输入账户名称');
       return;
     }
 
@@ -612,7 +614,7 @@ export function SubscriptionsPage() {
     const hasBudgetInput = Boolean(accountDraft.monthly_budget_input.trim());
 
     if (accountDraft.mode === 'create' && !trimmedKey && !hasManualInput && !hasBudgetInput) {
-      setAccountFormError('请填写官方 API Key、预充起始余额或月度支出上限');
+      setAccountFormError('请填写 API Key、起始余额或月度上限');
       return;
     }
 
@@ -624,7 +626,7 @@ export function SubscriptionsPage() {
         usdToCnyRate
       );
       if (parsed === null || parsed < 0) {
-        setAccountFormError('预充起始余额请输入大于或等于 0 的数字');
+        setAccountFormError('起始余额需 ≥ 0');
         return;
       }
       manualBalanceMicro = parsed;
@@ -708,33 +710,16 @@ export function SubscriptionsPage() {
         </button>
       </section>
 
-      {notice && (
-        <div
-          className="surface-tonal-band px-3.5 py-2 text-[12px] flex items-center justify-between"
-          style={{
-            color: notice.kind === 'error' ? 'var(--accent-rose)' : 'var(--accent-emerald)',
-          }}
-        >
-          <span>{notice.text}</span>
-          <button
-            type="button"
-            onClick={() => setNotice(null)}
-            className="btn-interactive px-2 py-0.5 rounded-lg text-[11px] cursor-pointer"
-            style={{ color: 'var(--text-muted)' }}
-          >
-            关闭
-          </button>
-        </div>
-      )}
+      <ActionNotice text={notice?.text ?? null} kind={notice?.kind} onClose={clearNotice} />
 
       {isLoading ? (
         <div className="py-12 text-center" style={{ color: 'var(--text-muted)' }}>
-          加载用量数据与账户状态…
+          加载中…
         </div>
       ) : !hasAnyContent ? (
         <div className="surface-tonal-band py-6 px-5 flex items-center gap-2.5 text-[13px]">
           <Info className="w-4 h-4 shrink-0" style={{ color: 'var(--accent-primary)' }} />
-          <span>接入提供商账号或官方 API 密钥以同步实时配额与余额</span>
+          <span>添加账户以同步配额与余额</span>
         </div>
       ) : (
         <>
@@ -757,13 +742,13 @@ export function SubscriptionsPage() {
             </div>
             <div style={{ borderLeft: '1px solid var(--border-hairline)', paddingLeft: '1rem' }}>
               <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                跨端云同步设备
+                同步设备
               </div>
               <div className="mt-0.5 text-[16px] font-semibold">{remoteDeviceGroups.length}</div>
             </div>
             <div style={{ borderLeft: '1px solid var(--border-hairline)', paddingLeft: '1rem' }}>
               <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                最高窗口已用占比
+                最高占用
               </div>
               <div
                 className="mt-0.5 text-[16px] font-semibold"
@@ -1122,7 +1107,7 @@ export function SubscriptionsPage() {
                   className="text-[11px] font-semibold uppercase tracking-wider"
                   style={{ color: 'var(--text-muted)' }}
                 >
-                  账户余额与按量计费
+                  按量账户
                 </h2>
                 <span className="text-[11.5px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
                   {paygAccounts.length} 项账户
@@ -1406,7 +1391,7 @@ export function SubscriptionsPage() {
                 className="text-[11px] font-semibold uppercase tracking-wider"
                 style={{ color: 'var(--text-muted)' }}
               >
-                跨设备同步配额快照（只读）
+                其他设备配额
               </h2>
 
               <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
@@ -1730,7 +1715,7 @@ export function SubscriptionsPage() {
                     <input
                       id="account-name"
                       type="text"
-                      placeholder="例如 DeepSeek 官方账户 或 OpenRouter 余额"
+                      placeholder="如 DeepSeek 官方"
                       value={accountDraft.account_name}
                       onChange={(e) =>
                         setAccountDraft({ ...accountDraft, account_name: e.target.value })
@@ -1759,7 +1744,7 @@ export function SubscriptionsPage() {
                         autoComplete="off"
                         placeholder={
                           hasCredentialForProvider(accountDraft.provider_id)
-                            ? '已保存密钥，输入新值可替换'
+                            ? '输入新值可替换'
                             : 'sk-...'
                         }
                         value={accountDraft.api_key_input}
@@ -1783,7 +1768,7 @@ export function SubscriptionsPage() {
                         className="block text-[11.5px] mb-1"
                         style={{ color: 'var(--text-secondary)' }}
                       >
-                        预充起始余额 ({currency}，可选)
+                        起始余额 ({currency})
                       </label>
                       <input
                         id="account-manual-balance"
@@ -1812,7 +1797,7 @@ export function SubscriptionsPage() {
                         className="block text-[11.5px] mb-1"
                         style={{ color: 'var(--text-secondary)' }}
                       >
-                        月度支出上限 ({currency}，可选)
+                        月度上限 ({currency})
                       </label>
                       <input
                         id="account-monthly-budget"

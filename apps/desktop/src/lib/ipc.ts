@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   AnalyticsFilter,
   AppPreferences,
@@ -7,6 +8,7 @@ import type {
   CatalogSyncResult,
   CloudSyncProvisionInput,
   CloudSyncProvisionResult,
+  CloudSyncProvisionStep,
   CustomProviderRule,
   CustomRuleTestResult,
   DeviceRecord,
@@ -758,11 +760,59 @@ function buildPreviewFallback<T>(command: string, args?: Record<string, unknown>
   }
 }
 
+/** Rust `IpcError { code, message }` surfaced as a real `Error` so UI handlers can read `.message`. */
+export class IpcCallError extends Error {
+  readonly code: string;
+  readonly command: string;
+
+  constructor(command: string, code: string, message: string) {
+    super(message);
+    this.name = 'IpcCallError';
+    this.code = code;
+    this.command = command;
+  }
+}
+
+export function toIpcCallError(command: string, raw: unknown): Error {
+  if (raw instanceof Error) {
+    return raw;
+  }
+  if (typeof raw === 'string' && raw.trim()) {
+    return new IpcCallError(command, 'IPC_ERROR', raw.trim());
+  }
+  if (raw !== null && typeof raw === 'object') {
+    const record = raw as Record<string, unknown>;
+    const message = typeof record.message === 'string' ? record.message.trim() : '';
+    const code = typeof record.code === 'string' ? record.code : 'IPC_ERROR';
+    if (message) {
+      return new IpcCallError(command, code, message);
+    }
+    return new IpcCallError(command, code, `${command} 调用异常（${code}）`);
+  }
+  return new IpcCallError(command, 'IPC_ERROR', `${command} 调用异常`);
+}
+
 async function callIpc<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauriRuntime()) {
     return buildPreviewFallback<T>(command, args);
   }
-  return invoke<T>(command, args);
+  try {
+    return await invoke<T>(command, args);
+  } catch (raw: unknown) {
+    throw toIpcCallError(command, raw);
+  }
+}
+
+/** Subscribe to one-click Worker provisioning progress (no-op outside Tauri). */
+export async function onCloudSyncProvisionProgress(
+  handler: (step: CloudSyncProvisionStep) => void
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => {};
+  }
+  return listen<CloudSyncProvisionStep>('cloud-sync-provision-progress', (event) => {
+    handler(event.payload);
+  });
 }
 
 export const ipc = {
@@ -867,6 +917,10 @@ export const ipc = {
       format,
       savePath: savePath ?? null,
     }),
+
+  /** Writes a user-chosen PNG (share receipt) to `savePath`; returns bytes written. */
+  saveShareImage: (savePath: string, bytes: number[]): Promise<number> =>
+    callIpc('save_share_image', { savePath, bytes }),
 
   previewSyncEnvelopeV1: (sinceWatermarkMs: number): Promise<SyncEnvelopeV1> =>
     callIpc('preview_sync_envelope_v1', { sinceWatermarkMs }),

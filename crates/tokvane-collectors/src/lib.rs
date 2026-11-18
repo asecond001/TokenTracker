@@ -30,7 +30,8 @@ pub use sync_client::{
     SYNC_CF_API_TOKEN_KEY, SYNC_E2EE_PASSPHRASE_KEY,
 };
 pub use sync_provision::{
-    provision_worker, provision_worker_with, CloudSyncProvisionRequest, CloudflareApiTransport,
-    ProvisionMode, ProvisionedWorkerArtifacts, WranglerCliRunner, WranglerCmdOutput,
+    provision_worker, provision_worker_with, provision_worker_with_progress,
+    CloudSyncProvisionRequest, CloudflareApiTransport, ProvisionMode, ProvisionProgress,
+    ProvisionStep, ProvisionedWorkerArtifacts, WranglerCliRunner, WranglerCmdOutput,
 };
 pub use watcher::{CollectorCoordinator, ScanReport};

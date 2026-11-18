@@ -45,3 +45,20 @@ if (typeof window !== 'undefined' && typeof window.matchMedia !== 'undefined') {
     }),
   });
 }
+
+// jsdom lacks PointerEvent; without it fireEvent.pointer* drops clientX / button / pointerId.
+if (typeof globalThis.PointerEvent === 'undefined') {
+  class PointerEventStub extends MouseEvent {
+    readonly pointerId: number;
+    readonly pointerType: string;
+    readonly isPrimary: boolean;
+
+    constructor(type: string, init: PointerEventInit = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId ?? 1;
+      this.pointerType = init.pointerType ?? 'mouse';
+      this.isPrimary = init.isPrimary ?? true;
+    }
+  }
+  globalThis.PointerEvent = PointerEventStub as unknown as typeof PointerEvent;
+}

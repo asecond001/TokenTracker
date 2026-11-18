@@ -1188,3 +1188,27 @@ fn trends_daily_buckets_and_comparisons_align_to_local_timezone() {
     assert_eq!(monthly.model_shares.len(), 1);
     assert_eq!(monthly.model_shares[0].key, "claude-sonnet-4-5");
 }
+
+#[test]
+fn auto_granularity_uses_fifteen_minute_buckets_for_short_drag_ranges() {
+    assert_eq!(
+        resolve_trend_granularity(TrendGranularity::Auto, 90 * 60_000),
+        TrendGranularity::FifteenMinutes
+    );
+    assert_eq!(
+        resolve_trend_granularity(TrendGranularity::Auto, 6 * HOUR_MS),
+        TrendGranularity::FifteenMinutes
+    );
+    assert_eq!(
+        resolve_trend_granularity(TrendGranularity::Auto, 6 * HOUR_MS + 1),
+        TrendGranularity::Hourly
+    );
+    assert_eq!(
+        resolve_trend_granularity(TrendGranularity::Auto, 30 * DAY_MS),
+        TrendGranularity::Daily
+    );
+    assert_eq!(
+        resolve_trend_granularity(TrendGranularity::Hourly, 60_000),
+        TrendGranularity::Hourly
+    );
+}

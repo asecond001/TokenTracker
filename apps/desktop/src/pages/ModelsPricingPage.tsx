@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { ActionNotice } from '../components/ActionNotice';
 import { createPortal } from 'react-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   createColumnHelper,
   flexRender,
@@ -26,7 +27,10 @@ import {
   providerDisplayName,
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
-import { useWorkspaceStore } from '../stores/workspaceStore';
+import {
+  buildCustomRangeKey,
+  useWorkspaceStore,
+} from '../stores/workspaceStore';
 import type { ModelPricingEntry, ModelStatRow } from '../types/ipc';
 
 const colHelper = createColumnHelper<ModelStatRow>();
@@ -67,6 +71,9 @@ export function ModelsPricingPage() {
     timePreset,
     customStartDate,
     customEndDate,
+    customPrecise,
+    customStartMs,
+    customEndMs,
     providerFilter,
     deviceFilter,
     currency,
@@ -74,6 +81,8 @@ export function ModelsPricingPage() {
     setUsdToCnyRate,
     getFilter,
   } = useWorkspaceStore();
+  const rangeFields = { customStartDate, customEndDate, customPrecise, customStartMs, customEndMs };
+  const customRangeKey = buildCustomRangeKey(rangeFields);
 
   const [sorting, setSorting] = useState<SortingState>([
     { id: 'estimated_cost_micro_usd', desc: true },
@@ -89,17 +98,19 @@ export function ModelsPricingPage() {
   const [feedback, setFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(
     null
   );
+  const clearFeedback = useCallback(() => setFeedback(null), []);
   const chartTheme = useChartTheme();
 
   const filter = useMemo(
     () => getFilter(),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [timePreset, customStartDate, customEndDate, providerFilter, deviceFilter]
+    [timePreset, customRangeKey, providerFilter, deviceFilter]
   );
 
   const { data, isLoading } = useQuery({
     queryKey: ['models_pricing', filter],
     queryFn: () => ipc.getModelsPricing(filter),
+    placeholderData: keepPreviousData,
   });
 
   const { data: prefs } = useQuery({
@@ -764,29 +775,7 @@ export function ModelsPricingPage() {
         </div>
       </section>
 
-      {feedback && (
-        <div
-          className="px-3 py-2 text-[12px] rounded-lg flex items-center justify-between gap-3"
-          style={{
-            backgroundColor: 'var(--bg-elevated)',
-            border: `1px solid ${
-              feedback.kind === 'error' ? 'var(--accent-rose)' : 'var(--border-strong)'
-            }`,
-            color: feedback.kind === 'error' ? 'var(--accent-rose)' : 'var(--accent-emerald)',
-          }}
-        >
-          <span>{feedback.text}</span>
-          <button
-            type="button"
-            onClick={() => setFeedback(null)}
-            className="btn-interactive p-1 rounded-lg cursor-pointer"
-            style={{ color: 'var(--text-muted)' }}
-            aria-label="关闭提示"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      )}
+      <ActionNotice text={feedback?.text ?? null} kind={feedback?.kind} onClose={clearFeedback} />
 
       {subView === 'efficiency' ? (
         <>

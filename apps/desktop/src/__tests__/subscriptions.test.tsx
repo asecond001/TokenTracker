@@ -88,7 +88,7 @@ describe('Usage page unified account connection, observed rate limits & quota de
     renderWithQuery(<SubscriptionsPage />);
 
     expect(
-      await screen.findByText('接入提供商账号或官方 API 密钥以同步实时配额与余额')
+      await screen.findByText('添加账户以同步配额与余额')
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '添加账户' }));
@@ -280,7 +280,7 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
     fireEvent.click(screen.getByRole('button', { name: '添加账户' }));
     fireEvent.click(await screen.findByRole('button', { name: 'API 密钥接入' }));
 
-    const prepaidInput = screen.getByLabelText(/预充起始余额/) as HTMLInputElement;
+    const prepaidInput = screen.getByLabelText(/起始余额/) as HTMLInputElement;
     fireEvent.change(prepaidInput, { target: { value: '100' } });
 
     act(() => {
@@ -288,7 +288,7 @@ describe('Bug fixes verification: Overview today shares, Kimi QUOTA display & Li
     });
 
     await waitFor(() => {
-      expect((screen.getByLabelText(/预充起始余额/) as HTMLInputElement).value).toBe('725');
+      expect((screen.getByLabelText(/起始余额/) as HTMLInputElement).value).toBe('725');
     });
   });
 
@@ -441,7 +441,7 @@ describe('v0.2.5 Pay-As-You-Go, Credits & Floating Toggle', () => {
 
     const keyInput = screen.getByLabelText(/官方 API Key/) as HTMLInputElement;
     fireEvent.change(keyInput, { target: { value: 'sk-deepseek-test-123' } });
-    const budgetInput = screen.getByLabelText(/月度支出上限/) as HTMLInputElement;
+    const budgetInput = screen.getByLabelText(/月度上限/) as HTMLInputElement;
     fireEvent.change(budgetInput, { target: { value: '80' } });
 
     fireEvent.click(screen.getByRole('button', { name: '保存账户' }));
@@ -521,7 +521,7 @@ describe('v0.2.7 Unified 用量 Account Hub & Positive UI Copy', () => {
     renderWithQuery(<SubscriptionsPage />);
 
     expect(
-      await screen.findByText('接入提供商账号或官方 API 密钥以同步实时配额与余额')
+      await screen.findByText('添加账户以同步配额与余额')
     ).toBeInTheDocument();
     // Windowless manual plan must not be displayed
     expect(screen.queryByText('Cursor Pro (Manual)')).not.toBeInTheDocument();

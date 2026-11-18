@@ -381,7 +381,7 @@ describe('v0.1.2 Interaction consolidation, chart fixes & catalog auto sync', ()
 
     fireEvent.click(screen.getByRole('button', { name: '用量' }));
     expect(
-      await screen.findByText('接入提供商账号或官方 API 密钥以同步实时配额与余额')
+      await screen.findByText('添加账户以同步配额与余额')
     ).toBeInTheDocument();
     expect(screen.queryByTestId('time-range-control')).not.toBeInTheDocument();
 

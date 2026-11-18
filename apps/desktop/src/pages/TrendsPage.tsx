@@ -15,8 +15,10 @@ import {
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
 import {
+  buildCustomRangeKey,
   computeTimeRange,
   formatResolvedDateSpan,
+  selectCustomRange,
   useWorkspaceStore,
 } from '../stores/workspaceStore';
 import type { AnalyticsFilter, StackDimension, TrendGranularity } from '../types/ipc';
@@ -87,12 +89,18 @@ export function TrendsPage() {
     timePreset,
     customStartDate,
     customEndDate,
+    customPrecise,
+    customStartMs,
+    customEndMs,
     providerFilter,
     deviceFilter,
     currency,
     usdToCnyRate,
     tzOffsetMinutes,
   } = useWorkspaceStore();
+  const rangeFields = { customStartDate, customEndDate, customPrecise, customStartMs, customEndMs };
+  const customRange = selectCustomRange(rangeFields);
+  const customRangeKey = buildCustomRangeKey(rangeFields);
   const chartTheme = useChartTheme();
   const [granularity, setGranularity] = useState<TrendGranularity>('auto');
   const [dimension, setDimension] = useState<StackDimension>('provider');
@@ -100,17 +108,13 @@ export function TrendsPage() {
   const [chartStyle, setChartStyle] = useState<TrendChartStyle>('bar');
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
 
-  const resolvedSpanLabel = formatResolvedDateSpan(timePreset, {
-    start: customStartDate,
-    end: customEndDate,
-  });
+  const resolvedSpanLabel = formatResolvedDateSpan(timePreset, customRange);
 
   const { data, isLoading } = useQuery({
     queryKey: [
       'trends',
       timePreset,
-      customStartDate,
-      customEndDate,
+      customRangeKey,
       providerFilter,
       deviceFilter,
       tzOffsetMinutes,
@@ -118,10 +122,7 @@ export function TrendsPage() {
       dimension,
     ],
     queryFn: () => {
-      const range = computeTimeRange(timePreset, {
-        start: customStartDate,
-        end: customEndDate,
-      });
+      const range = computeTimeRange(timePreset, customRange);
       const filter: AnalyticsFilter = {
         start_ms: range.start_ms,
         end_ms: range.end_ms,
@@ -178,10 +179,7 @@ export function TrendsPage() {
       );
       dayCount = Math.max(1, dayKeys.size);
     } else {
-      const range = computeTimeRange(timePreset, {
-        start: customStartDate,
-        end: customEndDate,
-      });
+      const range = computeTimeRange(timePreset, customRange);
       dayCount = Math.max(1, Math.round((range.end_ms - range.start_ms + 1) / 86_400_000));
     }
 
@@ -210,8 +208,7 @@ export function TrendsPage() {
     data,
     isAllTime,
     timePreset,
-    customStartDate,
-    customEndDate,
+    customRangeKey,
     effectiveGranularity,
     tzOffsetMinutes,
   ]);

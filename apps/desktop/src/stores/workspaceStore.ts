@@ -19,6 +19,11 @@ export type ResolvedTheme = 'dark' | 'light';
 export interface CustomTimeRange {
   start?: string;
   end?: string;
+  /** Minute-precision override set by the drag scrubber. */
+  precise?: boolean;
+  startMs?: number;
+  /** `null` means the range is anchored to "now" and keeps following the clock. */
+  endMs?: number | null;
 }
 
 export interface ComputedTimeRange {
@@ -141,6 +146,31 @@ export function getPresetDateInputs(
   }
 }
 
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+/** `MM-DD HH:mm` (prefixed with the year when it differs from `now`). */
+export function formatRangeInstant(ms: number, now: Date = new Date()): string {
+  const d = new Date(ms);
+  const base = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return d.getFullYear() === now.getFullYear() ? base : `${d.getFullYear()}-${base}`;
+}
+
+function preciseBounds(
+  customRange: CustomTimeRange | undefined,
+  now: Date
+): { start: number; end: number; live: boolean } | null {
+  if (!customRange?.precise || typeof customRange.startMs !== 'number') {
+    return null;
+  }
+  const live = customRange.endMs === null || customRange.endMs === undefined;
+  const rawEnd = live ? now.getTime() : (customRange.endMs as number);
+  const start = Math.min(customRange.startMs, rawEnd);
+  const end = Math.max(customRange.startMs, rawEnd);
+  return { start, end, live };
+}
+
 export function formatResolvedDateSpan(
   preset: TimePreset,
   customRange?: CustomTimeRange,
@@ -148,6 +178,14 @@ export function formatResolvedDateSpan(
 ): string {
   if (preset === 'all') {
     return '全量历史';
+  }
+  if (preset === 'custom') {
+    const precise = preciseBounds(customRange, now);
+    if (precise) {
+      return `${formatRangeInstant(precise.start, now)} ~ ${
+        precise.live ? '现在' : formatRangeInstant(precise.end, now)
+      }`;
+    }
   }
   const { start, end } = getPresetDateInputs(preset, customRange, now);
   return start === end ? start : `${start} ~ ${end}`;
@@ -181,6 +219,10 @@ export function computeTimeRange(
     case 'all':
       return { start_ms: 0, end_ms: endMs, all_time: true };
     case 'custom': {
+      const precise = preciseBounds(customRange, now);
+      if (precise) {
+        return { start_ms: precise.start, end_ms: precise.end, all_time: false };
+      }
       const parsedStart = customRange?.start ? parseLocalYmd(customRange.start) : null;
       const parsedEnd = customRange?.end ? parseLocalYmd(customRange.end) : null;
       if (parsedStart && parsedEnd) {
@@ -221,11 +263,39 @@ export function computeTimeRange(
   }
 }
 
+type CustomRangeFields = Pick<
+  WorkspaceState,
+  'customStartDate' | 'customEndDate' | 'customPrecise' | 'customStartMs' | 'customEndMs'
+>;
+
+/** Builds the `CustomTimeRange` consumed by `computeTimeRange` from store state. */
+export function selectCustomRange(state: CustomRangeFields): CustomTimeRange {
+  return {
+    start: state.customStartDate,
+    end: state.customEndDate,
+    precise: state.customPrecise,
+    startMs: state.customStartMs,
+    endMs: state.customEndMs,
+  };
+}
+
+/** Stable query-key fragment for the active custom range. */
+export function buildCustomRangeKey(state: CustomRangeFields): string {
+  return state.customPrecise
+    ? `p:${state.customStartMs}:${state.customEndMs ?? 'now'}`
+    : `d:${state.customStartDate}:${state.customEndDate}`;
+}
+
 interface WorkspaceState {
   activePage: NavPage;
   timePreset: TimePreset;
   customStartDate: string; // YYYY-MM-DD
   customEndDate: string; // YYYY-MM-DD
+  /** True when the custom range comes from the minute-precision drag scrubber. */
+  customPrecise: boolean;
+  customStartMs: number;
+  /** `null` = anchored to now (live). */
+  customEndMs: number | null;
   providerFilter: string; // 'all' | 'claude_code' | 'codex' | 'antigravity' | ...
   deviceFilter: string; // 'all' | device_id
   currency: CurrencyCode;
@@ -237,6 +307,7 @@ interface WorkspaceState {
   setActivePage: (page: NavPage) => void;
   setTimePreset: (preset: TimePreset) => void;
   setCustomDateRange: (start: string, end: string) => void;
+  setCustomPreciseRange: (startMs: number, endMs: number | null) => void;
   setProviderFilter: (provider: string) => void;
   setDeviceFilter: (deviceId: string) => void;
   setCurrency: (currency: CurrencyCode) => void;
@@ -260,6 +331,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   timePreset: '7d',
   customStartDate: toDateInputString(weekAgo),
   customEndDate: toDateInputString(nowDate),
+  customPrecise: false,
+  customStartMs: weekAgo.getTime(),
+  customEndMs: null,
   providerFilter: 'all',
   deviceFilter: 'all',
   currency: 'USD',
@@ -271,7 +345,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   setActivePage: (activePage) => set({ activePage }),
   setTimePreset: (timePreset) => set({ timePreset }),
   setCustomDateRange: (customStartDate, customEndDate) =>
-    set({ customStartDate, customEndDate, timePreset: 'custom' }),
+    set({ customStartDate, customEndDate, customPrecise: false, timePreset: 'custom' }),
+  setCustomPreciseRange: (startMs, endMs) => {
+    const endForDate = endMs ?? Date.now();
+    set({
+      timePreset: 'custom',
+      customPrecise: true,
+      customStartMs: Math.min(startMs, endForDate),
+      customEndMs: endMs === null ? null : Math.max(startMs, endMs),
+      customStartDate: toDateInputString(new Date(Math.min(startMs, endForDate))),
+      customEndDate: toDateInputString(new Date(Math.max(startMs, endForDate))),
+    });
+  },
   setProviderFilter: (providerFilter) => set({ providerFilter }),
   setDeviceFilter: (deviceFilter) => set({ deviceFilter }),
   setCurrency: (currency) => set({ currency }),
@@ -284,10 +369,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   getFilter: () => {
     const state = get();
-    const range = computeTimeRange(state.timePreset, {
-      start: state.customStartDate,
-      end: state.customEndDate,
-    });
+    const range = computeTimeRange(state.timePreset, selectCustomRange(state));
 
     return {
       start_ms: range.start_ms,

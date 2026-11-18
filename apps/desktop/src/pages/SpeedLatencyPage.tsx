@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import {
   createColumnHelper,
   flexRender,
@@ -21,7 +21,12 @@ import {
   providerDisplayName,
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
-import { computeTimeRange, useWorkspaceStore } from '../stores/workspaceStore';
+import {
+  buildCustomRangeKey,
+  computeTimeRange,
+  selectCustomRange,
+  useWorkspaceStore,
+} from '../stores/workspaceStore';
 import type { AnalyticsFilter, ModelSpeedStats } from '../types/ipc';
 import { CLOCK_REFRESH_MS } from '../lib/liveRefresh';
 
@@ -69,10 +74,16 @@ export function SpeedLatencyPage() {
     timePreset,
     customStartDate,
     customEndDate,
+    customPrecise,
+    customStartMs,
+    customEndMs,
     providerFilter,
     deviceFilter,
     tzOffsetMinutes,
   } = useWorkspaceStore();
+  const rangeFields = { customStartDate, customEndDate, customPrecise, customStartMs, customEndMs };
+  const customRange = selectCustomRange(rangeFields);
+  const customRangeKey = buildCustomRangeKey(rangeFields);
   const chartTheme = useChartTheme();
   const [groupMode, setGroupMode] = useState<SpeedGroupMode>('model');
   const [chartMetric, setChartMetric] = useState<SpeedChartMetric>('tps');
@@ -82,17 +93,13 @@ export function SpeedLatencyPage() {
     queryKey: [
       'speed_latency',
       timePreset,
-      customStartDate,
-      customEndDate,
+      customRangeKey,
       providerFilter,
       deviceFilter,
       tzOffsetMinutes,
     ],
     queryFn: () => {
-      const range = computeTimeRange(timePreset, {
-        start: customStartDate,
-        end: customEndDate,
-      });
+      const range = computeTimeRange(timePreset, customRange);
       const filter: AnalyticsFilter = {
         start_ms: range.start_ms,
         end_ms: range.end_ms,
@@ -103,6 +110,7 @@ export function SpeedLatencyPage() {
       };
       return ipc.getSpeedLatency(filter);
     },
+    placeholderData: keepPreviousData,
     refetchInterval: CLOCK_REFRESH_MS,
   });
 

@@ -543,6 +543,8 @@ export function resetWorkspaceState() {
   useWorkspaceStore.setState({
     activePage: 'overview',
     timePreset: '7d',
+    customPrecise: false,
+    customEndMs: null,
     providerFilter: 'all',
     deviceFilter: 'all',
     currency: 'USD',

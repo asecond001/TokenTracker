@@ -14,7 +14,7 @@ use tokvane_collectors::{
     normalize_worker_url, provision_worker, refresh_provider_balance as collect_provider_balance,
     refresh_provider_balance_force as collect_provider_balance_force,
     set_sync_credentials as set_sync_creds, BalanceRefreshOutcome, CloudSyncProvisionRequest,
-    CredentialManager, ScanReport, SyncRunReport, SyncStatusView, SYNC_BEARER_TOKEN_KEY,
+    CredentialManager, ProvisionStep, ScanReport, SyncRunReport, SyncStatusView, SYNC_BEARER_TOKEN_KEY,
     SYNC_E2EE_PASSPHRASE_KEY,
 };
 use tokvane_core::analytics::{
@@ -749,6 +749,31 @@ fn export_monthly_report_blocking(
     })
 }
 
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+const MAX_SHARE_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Writes the share-receipt PNG rendered by the frontend to a user-chosen path.
+#[tauri::command]
+pub async fn save_share_image(save_path: String, bytes: Vec<u8>) -> Result<u64, IpcError> {
+    run_blocking(move || save_share_image_blocking(Path::new(&save_path), &bytes)).await
+}
+
+fn save_share_image_blocking(target: &Path, bytes: &[u8]) -> Result<u64, IpcError> {
+    let is_png = target
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
+    if !is_png {
+        return Err(IpcError::new("VALIDATION_ERROR", "请保存为 .png 文件"));
+    }
+    if bytes.len() > MAX_SHARE_IMAGE_BYTES || !bytes.starts_with(&PNG_SIGNATURE) {
+        return Err(IpcError::new("VALIDATION_ERROR", "图片数据无效"));
+    }
+    std::fs::write(target, bytes)
+        .map_err(|e| IpcError::new("EXPORT_IO_ERROR", format!("保存图片失败: {e}")))?;
+    Ok(bytes.len() as u64)
+}
+
 #[tauri::command]
 pub async fn preview_sync_envelope_v1(
     state: State<'_, AppState>,
@@ -1221,7 +1246,11 @@ pub async fn provision_cloud_sync_worker(
         cf_api_token: input.cf_api_token,
         cf_account_id: input.cf_account_id,
     };
-    let artifacts = provision_worker(state.credentials.as_ref(), &req)
+    let progress_app = app.clone();
+    let report_progress = move |step: ProvisionStep| {
+        let _ = progress_app.emit("cloud-sync-provision-progress", step);
+    };
+    let artifacts = provision_worker(state.credentials.as_ref(), &req, &report_progress)
         .await
         .map_err(IpcError::from)?;
 
@@ -1245,6 +1274,7 @@ pub async fn provision_cloud_sync_worker(
     state.sync_client.reconfigure();
 
     // New workers.dev subdomains can take a moment for global edge routing propagation.
+    report_progress(ProvisionStep::InitialSync);
     let mut initial_sync_ok = false;
     for backoff_ms in [0u64, 700, 1400] {
         if backoff_ms > 0 {
@@ -1409,6 +1439,23 @@ pub fn set_floating_window_compact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn share_image_save_requires_png_extension_and_signature() {
+        let dir = std::env::temp_dir().join(format!("tokenvane-share-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let mut png = PNG_SIGNATURE.to_vec();
+        png.extend_from_slice(b"IHDR-demo");
+
+        let ok_path = dir.join("receipt.PNG");
+        let written = save_share_image_blocking(&ok_path, &png).expect("valid png saves");
+        assert_eq!(written, png.len() as u64);
+        assert_eq!(std::fs::read(&ok_path).expect("read back"), png);
+
+        assert!(save_share_image_blocking(&dir.join("receipt.txt"), &png).is_err());
+        assert!(save_share_image_blocking(&dir.join("bad.png"), b"not a png").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn theme_parsing_handles_dark_light_and_system() {

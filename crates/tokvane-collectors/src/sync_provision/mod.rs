@@ -69,6 +69,33 @@ pub struct ProvisionedWorkerArtifacts {
     pub e2ee_passphrase: Option<String>,
 }
 
+/// Coarse-grained provisioning stage, reported to the UI while one-click setup runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvisionStep {
+    /// Preparing the temporary Worker bundle / resolving secrets.
+    Preparing,
+    /// `wrangler whoami` (first run may download Wrangler via npx).
+    CheckingAuth,
+    /// Waiting for the browser OAuth flow of `wrangler login`.
+    BrowserLogin,
+    /// Resolving the Cloudflare account and workers.dev subdomain via REST API.
+    ResolvingAccount,
+    /// Uploading the Worker script (Wrangler deploy or REST upload).
+    Deploying,
+    /// Writing the SYNC_TOKEN secret / enabling the workers.dev route.
+    WritingSecret,
+    /// Persisting credentials and sync config locally.
+    Saving,
+    /// Running the first push/pull against the new Worker.
+    InitialSync,
+}
+
+/// Progress sink for [`provision_worker_with_progress`].
+pub type ProvisionProgress<'a> = &'a (dyn Fn(ProvisionStep) + Send + Sync);
+
+fn no_progress(_: ProvisionStep) {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WranglerCmdOutput {
     pub success: bool,
@@ -642,7 +669,9 @@ async fn provision_via_cloudflare_api(
     req: &CloudSyncProvisionRequest,
     worker_name: &str,
     bearer_token: &str,
+    progress: ProvisionProgress<'_>,
 ) -> CollectorResult<String> {
+    progress(ProvisionStep::ResolvingAccount);
     let cf_token = if let Some(input) = req
         .cf_api_token
         .as_deref()
@@ -788,6 +817,7 @@ async fn provision_via_cloudflare_api(
     };
 
     // A4: Upload ES Module Worker + SyncHubDO + SYNC_TOKEN binding
+    progress(ProvisionStep::Deploying);
     let script_url = format!("{CF_API_BASE}/accounts/{account_id}/workers/scripts/{worker_name}");
     let boundary = format!("----TokenVaneWorkerBoundary{}", generate_sync_secret_hex(8)?);
     let content_type = format!("multipart/form-data; boundary={boundary}");
@@ -833,6 +863,7 @@ async fn provision_via_cloudflare_api(
     parse_cf_success_json(upload_status, &upload_body)?;
 
     // A5: Enable script-level workers.dev route
+    progress(ProvisionStep::WritingSecret);
     let script_subdomain_url =
         format!("{CF_API_BASE}/accounts/{account_id}/workers/scripts/{worker_name}/subdomain");
     let enable_body = serde_json::to_vec(&json!({ "enabled": true }))?;
@@ -914,6 +945,7 @@ async fn provision_via_wrangler_cli(
     runner: &dyn WranglerCliRunner,
     worker_name: &str,
     bearer_token: &str,
+    progress: ProvisionProgress<'_>,
 ) -> CollectorResult<String> {
     let temp_dir = TempProvisionDir::create()?;
     std::fs::write(
@@ -923,17 +955,22 @@ async fn provision_via_wrangler_cli(
     std::fs::write(temp_dir.path().join("index.js"), EMBEDDED_WORKER_INDEX_JS)?;
     std::fs::write(temp_dir.path().join("hub.js"), EMBEDDED_WORKER_HUB_JS)?;
 
+    // The first `npx wrangler@latest` run downloads Wrangler (tens of MB) before it
+    // can answer, which easily exceeds 30s behind a proxy; allow a generous window.
+    progress(ProvisionStep::CheckingAuth);
     let whoami = runner
         .run_wrangler(
             temp_dir.path(),
             &["whoami"],
             None,
             false,
-            Duration::from_secs(30),
+            Duration::from_secs(240),
         )
-        .await?;
+        .await
+        .map_err(|e| CollectorError::Compliance(format!("检查 Wrangler 登录状态失败：{e}")))?;
 
     if !is_wrangler_authenticated(&whoami) {
+        progress(ProvisionStep::BrowserLogin);
         let login = runner
             .run_wrangler(
                 temp_dir.path(),
@@ -951,13 +988,14 @@ async fn provision_via_wrangler_cli(
         }
     }
 
+    progress(ProvisionStep::Deploying);
     let deploy = runner
         .run_wrangler(
             temp_dir.path(),
             &["deploy"],
             None,
             false,
-            Duration::from_secs(120),
+            Duration::from_secs(240),
         )
         .await?;
     if !deploy.success {
@@ -970,13 +1008,14 @@ async fn provision_via_wrangler_cli(
     let combined_deploy = format!("{}\n{}", deploy.stdout, deploy.stderr);
     let worker_url = extract_deployed_workers_dev_url(&combined_deploy, worker_name)?;
 
+    progress(ProvisionStep::WritingSecret);
     let secret = runner
         .run_wrangler(
             temp_dir.path(),
             &["secret", "put", "SYNC_TOKEN"],
             Some(bearer_token.as_bytes()),
             false,
-            Duration::from_secs(45),
+            Duration::from_secs(90),
         )
         .await?;
     if !secret.success {
@@ -992,10 +1031,12 @@ async fn provision_via_wrangler_cli(
 pub async fn provision_worker(
     credentials: &dyn CredentialManager,
     req: &CloudSyncProvisionRequest,
+    progress: ProvisionProgress<'_>,
 ) -> CollectorResult<ProvisionedWorkerArtifacts> {
     let cf_transport = ReqwestCfApiTransport::new()?;
     let wrangler_runner = SystemWranglerRunner;
-    provision_worker_with(credentials, &cf_transport, &wrangler_runner, req).await
+    provision_worker_with_progress(credentials, &cf_transport, &wrangler_runner, req, progress)
+        .await
 }
 
 pub async fn provision_worker_with(
@@ -1004,6 +1045,18 @@ pub async fn provision_worker_with(
     wrangler_runner: &dyn WranglerCliRunner,
     req: &CloudSyncProvisionRequest,
 ) -> CollectorResult<ProvisionedWorkerArtifacts> {
+    provision_worker_with_progress(credentials, cf_transport, wrangler_runner, req, &no_progress)
+        .await
+}
+
+pub async fn provision_worker_with_progress(
+    credentials: &dyn CredentialManager,
+    cf_transport: &dyn CloudflareApiTransport,
+    wrangler_runner: &dyn WranglerCliRunner,
+    req: &CloudSyncProvisionRequest,
+    progress: ProvisionProgress<'_>,
+) -> CollectorResult<ProvisionedWorkerArtifacts> {
+    progress(ProvisionStep::Preparing);
     let mode = ProvisionMode::parse(&req.mode)?;
     let worker_name = normalize_worker_script_name(req.worker_name.as_deref())?;
     let (bearer_token, e2ee_passphrase) = resolve_sync_secrets(credentials, req)?;
@@ -1016,13 +1069,16 @@ pub async fn provision_worker_with(
                 req,
                 &worker_name,
                 &bearer_token,
+                progress,
             )
             .await?
         }
         ProvisionMode::WranglerCli => {
-            provision_via_wrangler_cli(wrangler_runner, &worker_name, &bearer_token).await?
+            provision_via_wrangler_cli(wrangler_runner, &worker_name, &bearer_token, progress)
+                .await?
         }
     };
+    progress(ProvisionStep::Saving);
 
     set_sync_credentials(
         credentials,
@@ -1435,12 +1491,26 @@ mod tests {
             cf_api_token: None,
             cf_account_id: None,
         };
-        let res = provision_worker_with(&creds, &cf_transport, &wrangler_runner, &req)
-            .await
-            .expect("already logged in wrangler provision");
+        let steps = Arc::new(Mutex::new(Vec::new()));
+        let steps_sink = Arc::clone(&steps);
+        let record = move |step: ProvisionStep| steps_sink.lock().unwrap().push(step);
+        let res =
+            provision_worker_with_progress(&creds, &cf_transport, &wrangler_runner, &req, &record)
+                .await
+                .expect("already logged in wrangler provision");
         assert_eq!(res.worker_url, "https://tokenvane-sync-worker.ready.workers.dev");
         assert_eq!(res.bearer_token.len(), 48);
         assert_eq!(calls.lock().unwrap().len(), 3);
+        assert_eq!(
+            *steps.lock().unwrap(),
+            vec![
+                ProvisionStep::Preparing,
+                ProvisionStep::CheckingAuth,
+                ProvisionStep::Deploying,
+                ProvisionStep::WritingSecret,
+                ProvisionStep::Saving,
+            ]
+        );
     }
 
     #[tokio::test]
