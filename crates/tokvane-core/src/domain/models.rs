@@ -446,6 +446,34 @@ impl Default for AppPreferences {
     }
 }
 
+/// Measurement caliber behind a provider's per-event `output_tps` samples.
+///
+/// `Decode` divides output tokens by the streaming window that starts at the first generated
+/// token, so queueing / prefill / TTFT are excluded. `EndToEnd` divides by a window anchored at
+/// the request (or prompt) start, so it includes TTFT and is systematically lower.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeedBasis {
+    Decode,
+    #[default]
+    EndToEnd,
+}
+
+/// Caliber used by each built-in collector when it records `output_tps`.
+///
+/// - `claude_code`: first JSONL chunk → last chunk of the same `message.id` (decode window).
+/// - `codex`: first `Reasoning`/`AgentMessage` `item_completed.started_at_ms` → `token_usage_record`.
+/// - `kimi_code`: `step.end.llmStreamDurationMs` (server decode window).
+/// - Everything else (Antigravity, compatible JSONL, OTLP `duration_ms`) measures end-to-end.
+pub fn speed_basis_for_provider(provider_id: &str) -> SpeedBasis {
+    match provider_id {
+        provider_ids::CLAUDE_CODE | provider_ids::CODEX | provider_ids::KIMI_CODE => {
+            SpeedBasis::Decode
+        }
+        _ => SpeedBasis::EndToEnd,
+    }
+}
+
 /// Minimum generated tokens required before physical throughput (Tokens/s) is reliable.
 pub const MIN_VALID_TPS_OUTPUT_TOKENS: i64 = 12;
 /// Minimum active generation duration (ms) required to rule out buffered flush bursts.
@@ -927,8 +955,25 @@ pub fn sanitize_session_title(raw: &str) -> Option<String> {
 mod domain_tps_and_title_tests {
     use super::{
         compute_ewma_tps, compute_iqr_upper_fence, compute_tps, is_valid_tps_sample,
-        sanitize_session_title,
+        sanitize_session_title, speed_basis_for_provider, SpeedBasis,
     };
+
+    #[test]
+    fn speed_basis_marks_decode_collectors_and_serializes_snake_case() {
+        assert_eq!(speed_basis_for_provider("claude_code"), SpeedBasis::Decode);
+        assert_eq!(speed_basis_for_provider("codex"), SpeedBasis::Decode);
+        assert_eq!(speed_basis_for_provider("kimi_code"), SpeedBasis::Decode);
+        assert_eq!(speed_basis_for_provider("antigravity"), SpeedBasis::EndToEnd);
+        assert_eq!(speed_basis_for_provider("custom_vendor"), SpeedBasis::EndToEnd);
+        assert_eq!(
+            serde_json::to_string(&SpeedBasis::EndToEnd).expect("json"),
+            "\"end_to_end\""
+        );
+        assert_eq!(
+            serde_json::from_str::<SpeedBasis>("\"decode\"").expect("parse"),
+            SpeedBasis::Decode
+        );
+    }
 
     #[test]
     fn compute_tps_and_statistical_iqr_ewma_denoise_spikes() {

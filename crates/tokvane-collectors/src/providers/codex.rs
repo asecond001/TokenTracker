@@ -299,6 +299,12 @@ impl ProviderLogParser for CodexParser {
         let payload = val.get("payload")?;
 
         match top_type {
+            "token_usage_record" => {
+                // Written when the Responses API stream completes (before tool execution and the
+                // trailing `token_count`), so it marks the true end of this step's decode window.
+                ctx.codex_response_end_ts_ms = Some(ts_ms);
+                None
+            }
             "session_meta" => {
                 if let Some(id) = payload.get("id").and_then(|v| v.as_str()) {
                     if !id.trim().is_empty() {
@@ -356,7 +362,7 @@ impl ProviderLogParser for CodexParser {
                 }
                 let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
                 if role == "user" {
-                    ctx.last_prompt_ts_ms = Some(ts_ms);
+                    start_codex_step(ctx, ts_ms);
                     if let Some(text) = extract_codex_user_prompt(payload.get("content")) {
                         if text
                             .to_ascii_lowercase()
@@ -372,8 +378,12 @@ impl ProviderLogParser for CodexParser {
             }
             "event_msg" => {
                 let ev_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if ev_type == "item_completed" {
+                    record_codex_first_output(payload, ctx);
+                    return None;
+                }
                 if ev_type == "user_message" {
-                    ctx.last_prompt_ts_ms = Some(ts_ms);
+                    start_codex_step(ctx, ts_ms);
                     if let Some(msg) = extract_text_from_content(
                         payload
                             .get("message")
@@ -488,18 +498,16 @@ impl ProviderLogParser for CodexParser {
                     .or_else(|| payload.get("duration_ms"))
                     .and_then(|v| v.as_i64())
                     .filter(|&d| d > 0);
-                let duration_ms = explicit_dur.or_else(|| {
-                    ctx.last_prompt_ts_ms.take().and_then(|prev| {
-                        let d = ts_ms - prev;
-                        if d > 0 && d <= 600_000 {
-                            Some(d)
-                        } else {
-                            None
-                        }
-                    })
-                });
                 let effective_output = non_reasoning_output + reasoning_tokens;
-                let output_tps = compute_tps(effective_output, duration_ms);
+                let timing = codex_step_timing(ctx, ts_ms);
+                let duration_ms = explicit_dur.or(timing.duration_ms);
+                let ttft_ms = timing.ttft_ms;
+                // Only decode-window samples become `output_tps` so Codex stays comparable with the
+                // other decode-caliber providers; steps without a streamed item keep duration only.
+                let output_tps = compute_tps(effective_output, timing.decode_ms);
+                // The next sampling request is sent once this step's tool outputs are ready, which
+                // is exactly when Codex writes the trailing `token_count`.
+                start_codex_step(ctx, ts_ms);
 
                 let model_id = ctx
                     .current_model
@@ -539,7 +547,7 @@ impl ProviderLogParser for CodexParser {
                         reasoning_tokens,
                         observable_only: false,
                         duration_ms,
-                        ttft_ms: None,
+                        ttft_ms,
                         output_tps,
                         estimated_cost_micro_usd: 0,
                         cache_saved_micro_usd: 0,
@@ -550,6 +558,73 @@ impl ProviderLogParser for CodexParser {
             }
             _ => None,
         }
+    }
+}
+
+const CODEX_MAX_STEP_MS: i64 = 600_000;
+
+/// Model-generated item types whose `started_at_ms` marks the first streamed output token.
+/// Tool items (`CommandExecution`, `FileChange`, `McpToolCall`, ...) start when the tool runs.
+const CODEX_GENERATED_ITEM_TYPES: [&str; 2] = ["Reasoning", "AgentMessage"];
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct CodexStepTiming {
+    /// Request start (prompt or previous `token_count`) -> response end.
+    duration_ms: Option<i64>,
+    /// Request start -> first streamed model item.
+    ttft_ms: Option<i64>,
+    /// First streamed model item -> response end (`token_usage_record`).
+    decode_ms: Option<i64>,
+}
+
+/// Begin a new Codex sampling step anchored at `ts_ms` (user prompt or previous `token_count`).
+fn start_codex_step(ctx: &mut FileParseContext, ts_ms: i64) {
+    ctx.last_prompt_ts_ms = Some(ts_ms);
+    ctx.codex_first_output_ts_ms = None;
+    ctx.codex_response_end_ts_ms = None;
+}
+
+/// Track the earliest `started_at_ms` of a model-generated item inside the current step.
+fn record_codex_first_output(payload: &Value, ctx: &mut FileParseContext) {
+    let Some(item_type) = payload.pointer("/item/type").and_then(|v| v.as_str()) else {
+        return;
+    };
+    if !CODEX_GENERATED_ITEM_TYPES.contains(&item_type) {
+        return;
+    }
+    let Some(started) = parse_timestamp_ms(payload.get("started_at_ms")) else {
+        return;
+    };
+    if ctx.last_prompt_ts_ms.is_some_and(|anchor| started < anchor) {
+        return;
+    }
+    if ctx.codex_first_output_ts_ms.is_none_or(|prev| started < prev) {
+        ctx.codex_first_output_ts_ms = Some(started);
+    }
+}
+
+/// Resolve the current step's end-to-end duration, TTFT and decode window at a `token_count`.
+fn codex_step_timing(ctx: &FileParseContext, token_count_ts_ms: i64) -> CodexStepTiming {
+    let start = ctx.last_prompt_ts_ms;
+    let within = |d: i64| (d > 0 && d <= CODEX_MAX_STEP_MS).then_some(d);
+    // `token_usage_record` is the response-completed marker; older logs only carry `token_count`.
+    let end = ctx
+        .codex_response_end_ts_ms
+        .filter(|&e| e <= token_count_ts_ms && start.is_none_or(|s| e >= s))
+        .unwrap_or(token_count_ts_ms);
+    let first = ctx
+        .codex_first_output_ts_ms
+        .filter(|&f| f < end && start.is_none_or(|s| f >= s));
+    let decode_ms = first.and_then(|f| within(end - f));
+    let duration_ms = start.and_then(|s| within(end - s)).or(decode_ms);
+    let ttft_ms = match (start, first) {
+        (Some(s), Some(f)) => within(f - s),
+        _ => None,
+    };
+    CodexStepTiming {
+        duration_ms,
+        ttft_ms,
+        decode_ms,
     }
 }
 
@@ -824,8 +899,9 @@ mod tests {
 
         // Must measure duration from user prompt (4000ms), NOT from turn_context (200ms -> 1200 tok/s spike)
         assert_eq!(ev.duration_ms, Some(4_000));
-        let tps = ev.output_tps.expect("valid tps");
-        assert!((tps - 60.0).abs() < 1e-6);
+        // Legacy rollouts carry no streamed-item timestamps: end-to-end only, so no decode TPS sample.
+        assert_eq!(ev.output_tps, None);
+        assert_eq!(ev.ttft_ms, None);
         assert_eq!(
             ctx.session_title.as_ref().map(|t| t.0.as_str()),
             Some("Implement floating monitor")
@@ -927,5 +1003,113 @@ mod tests {
             load_codex_session_index_titles_from_roots(std::slice::from_ref(&sessions_dir), false);
         assert_eq!(idx.len(), 1);
         assert_eq!(idx[0].source, "background");
+    }
+
+    fn codex_line(ts: &str, top_type: &str, payload: &str) -> String {
+        format!(r#"{{"timestamp":"{ts}","type":"{top_type}","payload":{payload}}}"#)
+    }
+
+    fn codex_token_count(ts: &str, total_out: i64, last_out: i64, last_reasoning: i64) -> String {
+        codex_line(
+            ts,
+            "event_msg",
+            &format!(
+                r#"{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{tin},"cached_input_tokens":0,"output_tokens":{total_out},"reasoning_output_tokens":0}},"last_token_usage":{{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":{last_out},"reasoning_output_tokens":{last_reasoning}}}}}}}"#,
+                tin = 1000 + total_out
+            ),
+        )
+    }
+
+    fn codex_item(ts: &str, item_type: &str, started_ms: i64, completed_ms: i64) -> String {
+        codex_line(
+            ts,
+            "event_msg",
+            &format!(
+                r#"{{"type":"item_completed","item":{{"type":"{item_type}","id":"it"}},"started_at_ms":{started_ms},"completed_at_ms":{completed_ms}}}"#
+            ),
+        )
+    }
+
+    fn ms(ts: &str) -> i64 {
+        parse_timestamp_ms(Some(&Value::String(ts.to_string()))).expect("ts")
+    }
+
+    #[test]
+    fn codex_measures_decode_window_for_every_agentic_step() {
+        let parser = CodexParser::new();
+        let mut ctx = parser.init_context(Path::new("C:/tmp/nonexistent/rollout-decode.jsonl"), "dev-1");
+        let feed = |ctx: &mut FileParseContext, line: &str| parser.parse_line(line, ctx).and_then(|r| r.event);
+
+        // Step 1: prompt @0s, first streamed AgentMessage @4.5s, response completed @9.5s,
+        // tool runs (CommandExecution started mid-stream must be ignored), token_count @10s.
+        let user = codex_line(
+            "2026-10-28T09:00:00.000Z",
+            "response_item",
+            r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"Ship the decode fix"}]}"#,
+        );
+        assert!(feed(&mut ctx, &user).is_none());
+        let t0 = ms("2026-10-28T09:00:00.000Z");
+        assert!(feed(&mut ctx, &codex_item("2026-10-28T09:00:06.000Z", "AgentMessage", t0 + 4_500, t0 + 6_000)).is_none());
+        assert!(feed(&mut ctx, &codex_item("2026-10-28T09:00:09.200Z", "CommandExecution", t0 + 3_000, t0 + 9_200)).is_none());
+        let record = codex_line("2026-10-28T09:00:09.500Z", "token_usage_record", r#"{"usage":{"output_tokens":250}}"#);
+        assert!(feed(&mut ctx, &record).is_none());
+        let s1 = feed(&mut ctx, &codex_token_count("2026-10-28T09:00:10.000Z", 250, 250, 0)).expect("step 1");
+        assert_eq!(s1.duration_ms, Some(9_500));
+        assert_eq!(s1.ttft_ms, Some(4_500));
+        assert!((s1.output_tps.expect("step 1 tps") - 50.0).abs() < 1e-6);
+
+        // Step 2 (tool-call only, no streamed Reasoning/AgentMessage): anchored at the previous
+        // token_count, keeps an end-to-end duration but contributes no decode TPS sample.
+        let record2 = codex_line("2026-10-28T09:00:16.000Z", "token_usage_record", r#"{"usage":{"output_tokens":150}}"#);
+        assert!(feed(&mut ctx, &record2).is_none());
+        let s2 = feed(&mut ctx, &codex_token_count("2026-10-28T09:00:17.000Z", 400, 150, 0)).expect("step 2");
+        assert_eq!(s2.duration_ms, Some(6_000));
+        assert_eq!(s2.ttft_ms, None);
+        assert_eq!(s2.output_tps, None);
+
+        // Step 3: reasoning starts streaming 2s after the step anchor; reasoning tokens count as output.
+        let t2 = ms("2026-10-28T09:00:17.000Z");
+        assert!(feed(&mut ctx, &codex_item("2026-10-28T09:00:20.000Z", "Reasoning", t2 + 2_000, t2 + 3_000)).is_none());
+        assert!(feed(&mut ctx, &codex_item("2026-10-28T09:00:24.000Z", "AgentMessage", t2 + 5_000, t2 + 7_000)).is_none());
+        let record3 = codex_line("2026-10-28T09:00:27.000Z", "token_usage_record", r#"{"usage":{"output_tokens":800}}"#);
+        assert!(feed(&mut ctx, &record3).is_none());
+        let s3 = feed(&mut ctx, &codex_token_count("2026-10-28T09:00:27.500Z", 1200, 800, 300)).expect("step 3");
+        assert_eq!(s3.duration_ms, Some(10_000));
+        assert_eq!(s3.ttft_ms, Some(2_000));
+        assert_eq!(s3.reasoning_tokens, 300);
+        assert!((s3.output_tps.expect("step 3 tps") - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn codex_step_timing_rejects_stale_items_and_falls_back_to_token_count_end() {
+        let parser = CodexParser::new();
+        let mut ctx = parser.init_context(Path::new("C:/tmp/nonexistent/rollout-stale.jsonl"), "dev-1");
+        let user = codex_line(
+            "2026-10-28T10:00:00.000Z",
+            "event_msg",
+            r#"{"type":"user_message","message":"Next request"}"#,
+        );
+        assert!(parser.parse_line(&user, &mut ctx).is_none());
+        let t0 = ms("2026-10-28T10:00:00.000Z");
+        // An item that started before the step anchor belongs to an earlier request: ignored.
+        assert!(parser
+            .parse_line(&codex_item("2026-10-28T10:00:01.000Z", "AgentMessage", t0 - 5_000, t0 + 1_000), &mut ctx)
+            .is_none());
+        assert_eq!(ctx.codex_first_output_ts_ms, None);
+        // Without `token_usage_record`, the token_count timestamp closes the decode window.
+        assert!(parser
+            .parse_line(&codex_item("2026-10-28T10:00:03.000Z", "Reasoning", t0 + 1_000, t0 + 3_000), &mut ctx)
+            .is_none());
+        let ev = parser
+            .parse_line(&codex_token_count("2026-10-28T10:00:05.000Z", 200, 200, 0), &mut ctx)
+            .and_then(|r| r.event)
+            .expect("event");
+        assert_eq!(ev.duration_ms, Some(5_000));
+        assert_eq!(ev.ttft_ms, Some(1_000));
+        assert!((ev.output_tps.expect("tps") - 50.0).abs() < 1e-6);
+        // Step state resets after each emitted token_count.
+        assert_eq!(ctx.codex_first_output_ts_ms, None);
+        assert_eq!(ctx.codex_response_end_ts_ms, None);
+        assert_eq!(ctx.last_prompt_ts_ms, Some(ms("2026-10-28T10:00:05.000Z")));
     }
 }

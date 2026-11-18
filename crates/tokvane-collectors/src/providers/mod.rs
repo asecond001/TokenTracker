@@ -42,6 +42,13 @@ pub struct FileParseContext {
     pub last_step_ts_ms: Option<i64>,
     /// Tracks Codex cumulative `total_token_usage` to compute deltas and drop duplicate snapshots.
     pub last_codex_totals: Option<CodexRawTotals>,
+    /// Earliest Codex `item_completed.started_at_ms` of a model-generated item (`Reasoning` /
+    /// `AgentMessage`) in the current sampling step: the first streamed output (decode start).
+    pub codex_first_output_ts_ms: Option<i64>,
+    /// Timestamp of the latest Codex `token_usage_record` (response completed) in the current step.
+    pub codex_response_end_ts_ms: Option<i64>,
+    /// Last Kimi `usage.record` event, re-emitted with timing once the matching `step.end` arrives.
+    pub pending_kimi_step_event: Option<NormalizedUsageEvent>,
     /// Bounded LRU-like ring of active streaming `message.id` turns for Claude Code logs.
     pub active_message_turns: Vec<(String, ActiveMessageTurn)>,
     /// Tracks cumulative context token checkpoint (e.g. Kimi CLI `_usage` records) to derive step deltas.

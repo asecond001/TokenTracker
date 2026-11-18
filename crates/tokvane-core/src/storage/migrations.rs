@@ -9,7 +9,7 @@ use crate::error::CoreResult;
 use crate::pricing::default_pricing_catalog;
 use crate::storage::repository::{rebuild_rollup_from_events, DAY_MS, HOUR_MS};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 12;
+pub const CURRENT_SCHEMA_VERSION: i64 = 13;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -232,6 +232,10 @@ pub fn run_migrations(conn: &mut Connection) -> CoreResult<()> {
 
     if current_version < 12 {
         migrate_v11_to_v12(conn, now_ms)?;
+    }
+
+    if current_version < 13 {
+        migrate_v12_to_v13(conn, now_ms)?;
     }
 
     seed_defaults(conn, now_ms)?;
@@ -976,6 +980,36 @@ fn migrate_v11_to_v12(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     tx.execute(
         "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
         params![12i64, now_ms],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v12_to_v13(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+
+    // Codex `output_tps` used to divide by prompt → `token_count` (end-to-end, incl. queueing,
+    // prefill, TTFT and tool execution) and only sampled the first step of each turn. The collector
+    // now measures the decode window (first streamed item → `token_usage_record`) for every step.
+    // Clear the old local timing fields and reset Codex cursors so the rescan re-fills them; Codex
+    // event ids are derived from cumulative token totals, so the rescan updates rows in place.
+    tx.execute_batch(
+        r#"
+        UPDATE usage_events
+        SET duration_ms = NULL, ttft_ms = NULL, output_tps = NULL
+        WHERE provider_id = 'codex'
+          AND device_id = (SELECT device_id FROM devices ORDER BY created_at_ms ASC LIMIT 1);
+
+        DELETE FROM ingestion_cursors
+        WHERE provider_id = 'codex';
+        "#,
+    )?;
+
+    crate::storage::repository::rebuild_local_rollups_conn(&tx, now_ms)?;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![13i64, now_ms],
     )?;
     tx.commit()?;
     Ok(())

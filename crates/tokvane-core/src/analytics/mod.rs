@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::domain::{
-    compute_ewma_tps, compute_iqr_upper_fence, provider_ids, sanitize_session_title, CurrencyCode,
+    compute_ewma_tps, compute_iqr_upper_fence, provider_ids, sanitize_session_title,
+    speed_basis_for_provider, CurrencyCode, SpeedBasis,
     ModelPricingEntry, ObservedRateLimitWindow, SubscriptionPlan, MAX_VALID_OUTPUT_TPS,
     MIN_VALID_TPS_DURATION_MS, MIN_VALID_TPS_OUTPUT_TOKENS,
 };

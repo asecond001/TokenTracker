@@ -1680,3 +1680,65 @@ fn v12_migration_heals_poisoned_antigravity_gemini_3_1_models_and_resets_cursor(
         })
         .expect("verify re-ingest upgrade");
 }
+
+#[test]
+fn v12_to_v13_migration_clears_local_codex_end_to_end_speed_and_resets_cursors() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("v12.db");
+    let ts = 1_793_178_458_000i64;
+    {
+        let storage = Storage::open_file(&db_path).expect("open current");
+        let local = storage.local_device().expect("device").device_id;
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO devices (device_id, device_name, platform, created_at_ms) VALUES ('remote-dev', 'mac', 'macos', ?1)",
+                    params![ts + 10_000_000_000],
+                )?;
+                for (id, dev, pid) in [
+                    ("ev-codex-local", local.as_str(), "codex"),
+                    ("ev-codex-remote", "remote-dev", "codex"),
+                    ("ev-claude-local", local.as_str(), "claude_code"),
+                ] {
+                    conn.execute(
+                        "INSERT INTO usage_events (event_id, device_id, provider_id, session_id, project_label, model_id, timestamp_ms, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, observable_only, duration_ms, ttft_ms, output_tps, estimated_cost_micro_usd, cache_saved_micro_usd) VALUES (?1, ?2, ?3, 's', 'p', 'gpt-6-astra', ?4, 1000, 370, 0, 0, 0, 0, 20000, 3000, 18.5, 0, 0)",
+                        params![id, dev, pid, ts],
+                    )?;
+                }
+                for (path, pid) in [("C:/codex/rollout-1.jsonl", "codex"), ("C:/claude/a.jsonl", "claude_code")] {
+                    conn.execute(
+                        "INSERT INTO ingestion_cursors (source_path, provider_id, file_identity, byte_offset, last_line_hash, updated_at_ms) VALUES (?1, ?2, 'id', 4096, 'h', ?3)",
+                        params![path, pid, ts],
+                    )?;
+                }
+                conn.execute("DELETE FROM schema_migrations WHERE version >= 13", [])?;
+                Ok(())
+            })
+            .expect("seed v12 state");
+    }
+
+    let storage = Storage::open_file(&db_path).expect("migrate v12 -> v13");
+    storage
+        .with_conn(|conn| {
+            let ver: i64 =
+                conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))?;
+            assert_eq!(ver, 13);
+            let timing = |id: &str| -> rusqlite::Result<(Option<i64>, Option<i64>, Option<f64>)> {
+                conn.query_row(
+                    "SELECT duration_ms, ttft_ms, output_tps FROM usage_events WHERE event_id = ?1",
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            };
+            assert_eq!(timing("ev-codex-local")?, (None, None, None));
+            assert_eq!(timing("ev-codex-remote")?, (Some(20_000), Some(3_000), Some(18.5)));
+            assert_eq!(timing("ev-claude-local")?, (Some(20_000), Some(3_000), Some(18.5)));
+            let cursors: Vec<String> = conn
+                .prepare("SELECT provider_id FROM ingestion_cursors ORDER BY provider_id")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            assert_eq!(cursors, vec!["claude_code".to_string()]);
+            Ok(())
+        })
+        .expect("verify v13");
+}

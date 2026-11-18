@@ -318,6 +318,9 @@ pub struct ModelSpeedStats {
     pub latest_tps: f64,
     pub avg_duration_ms: f64,
     pub avg_ttft_ms: Option<f64>,
+    /// Measurement caliber of `*_tps` (decode window vs end-to-end), derived from the provider.
+    #[serde(default)]
+    pub speed_basis: SpeedBasis,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -331,6 +334,9 @@ pub struct ProviderSpeedStats {
     pub min_tps: f64,
     pub avg_duration_ms: f64,
     pub avg_ttft_ms: Option<f64>,
+    /// Measurement caliber of `*_tps` (decode window vs end-to-end), derived from the provider.
+    #[serde(default)]
+    pub speed_basis: SpeedBasis,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

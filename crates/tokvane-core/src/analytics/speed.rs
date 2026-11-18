@@ -170,6 +170,7 @@ impl Storage {
                     avg_duration_ms,
                     avg_ttft_ms,
                 ) = compute_group_metrics(&group);
+                let speed_basis = speed_basis_for_provider(&provider_id);
                 providers.push(ProviderSpeedStats {
                     provider_id,
                     sample_count,
@@ -180,6 +181,7 @@ impl Storage {
                     min_tps,
                     avg_duration_ms,
                     avg_ttft_ms,
+                    speed_basis,
                 });
             }
             providers.sort_by(|a, b| {
@@ -201,6 +203,7 @@ impl Storage {
                     avg_duration_ms,
                     avg_ttft_ms,
                 ) = compute_group_metrics(&group);
+                let speed_basis = speed_basis_for_provider(&provider_id);
                 models.push(ModelSpeedStats {
                     model_id,
                     provider_id,
@@ -213,6 +216,7 @@ impl Storage {
                     latest_tps,
                     avg_duration_ms,
                     avg_ttft_ms,
+                    speed_basis,
                 });
             }
             models.sort_by(|a, b| {
@@ -369,6 +373,7 @@ pub(super) fn query_speed_latency_from_hourly_rollups(
             _latest_tps,
             avg_duration_ms,
         ) = summarize_rollup_speed_group(&group);
+        let speed_basis = speed_basis_for_provider(&provider_id);
         providers.push(ProviderSpeedStats {
             provider_id,
             sample_count,
@@ -379,6 +384,7 @@ pub(super) fn query_speed_latency_from_hourly_rollups(
             min_tps,
             avg_duration_ms,
             avg_ttft_ms: None,
+            speed_basis,
         });
     }
     providers.sort_by(|a, b| {
@@ -399,6 +405,7 @@ pub(super) fn query_speed_latency_from_hourly_rollups(
             latest_tps,
             avg_duration_ms,
         ) = summarize_rollup_speed_group(&group);
+        let speed_basis = speed_basis_for_provider(&provider_id);
         models.push(ModelSpeedStats {
             model_id,
             provider_id,
@@ -411,6 +418,7 @@ pub(super) fn query_speed_latency_from_hourly_rollups(
             latest_tps,
             avg_duration_ms,
             avg_ttft_ms: None,
+            speed_basis,
         });
     }
     models.sort_by(|a, b| {

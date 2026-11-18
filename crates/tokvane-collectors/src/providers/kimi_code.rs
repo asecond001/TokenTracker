@@ -7,11 +7,11 @@ use tokvane_core::domain::{
 };
 
 use crate::providers::compatible_common::{
-    appdata_dir, init_generic_context, local_appdata_dir, parse_compatible_jsonl_line,
-    CompatibleParserProfile,
+    appdata_dir, extract_usage_tokens, init_generic_context, local_appdata_dir,
+    parse_compatible_jsonl_line, CompatibleParserProfile,
 };
 use crate::providers::{
-    collapse_duplicate_events_keep_last, now_ms, parse_timestamp_ms, user_home_dir,
+    collapse_duplicate_events_keep_last, compute_tps, now_ms, parse_timestamp_ms, user_home_dir,
     FileParseContext, ParsedLineResult, ProviderLogParser,
 };
 
@@ -121,6 +121,59 @@ fn read_kimi_sibling_prompt(session_dir: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Kimi Code `wire.jsonl` writes `{"type":"context.append_loop_event","event":{"type":"step.end",
+/// "usage":{..},"llmServerFirstTokenMs":..,"llmServerDecodeMs":..,"llmFirstTokenLatencyMs":..,
+/// "llmStreamDurationMs":..}}` right after each `usage.record`. When the usage matches the pending
+/// `usage.record` event, re-emit that event (same `event_id`, so storage upgrades it in place) with
+/// TTFT, request duration and a decode-window `output_tps`.
+fn apply_kimi_step_end_timing(
+    val: &Value,
+    ctx: &mut FileParseContext,
+) -> Option<NormalizedUsageEvent> {
+    if val.get("type").and_then(|v| v.as_str()) != Some("context.append_loop_event") {
+        return None;
+    }
+    let step = val.get("event")?;
+    if step.get("type").and_then(|v| v.as_str()) != Some("step.end") {
+        return None;
+    }
+    let mut pending = ctx.pending_kimi_step_event.take()?;
+    let usage = step.get("usage")?;
+    let (input, output, cache_read, cache_write, reasoning) = extract_usage_tokens(usage);
+    let matches = pending.input_tokens == input
+        && pending.output_tokens == output
+        && pending.cache_read_tokens == cache_read
+        && pending.cache_write_tokens == cache_write
+        && pending.reasoning_tokens == reasoning;
+    if !matches {
+        return None;
+    }
+
+    let positive_ms = |keys: &[&str]| -> Option<i64> {
+        keys.iter().find_map(|k| {
+            step.get(*k)
+                .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f.round() as i64)))
+                .filter(|&d| d > 0 && d <= 600_000)
+        })
+    };
+    // Prefer server-side measurements; client latency adds local request build / consume time.
+    let ttft_ms = positive_ms(&["llmServerFirstTokenMs", "llmFirstTokenLatencyMs"]);
+    let decode_ms = positive_ms(&["llmServerDecodeMs", "llmStreamDurationMs"]);
+    decode_ms?;
+    let client_ttft = positive_ms(&["llmFirstTokenLatencyMs", "llmServerFirstTokenMs"]);
+    let client_stream = positive_ms(&["llmStreamDurationMs", "llmServerDecodeMs"]);
+    let duration_ms = match (client_ttft, client_stream) {
+        (Some(t), Some(d)) => Some(t + d),
+        (None, Some(d)) => Some(d),
+        _ => decode_ms,
+    };
+
+    pending.duration_ms = duration_ms;
+    pending.ttft_ms = ttft_ms;
+    pending.output_tps = compute_tps(pending.output_tokens + pending.reasoning_tokens, decode_ms);
+    Some(pending)
 }
 
 fn is_named_dir(p: &Path, name: &str) -> bool {
@@ -281,15 +334,26 @@ impl ProviderLogParser for KimiCodeParser {
 
     fn parse_line(&self, line: &str, ctx: &mut FileParseContext) -> Option<ParsedLineResult> {
         if let Some(parsed) = parse_compatible_jsonl_line(line, ctx, KIMI_PROFILE) {
+            // `usage.record` carries tokens but no timing; keep it until the matching `step.end`.
+            ctx.pending_kimi_step_event = parsed.event.clone();
             return Some(parsed);
         }
 
-        // Fallback for legacy Kimi CLI `context.jsonl` entries: `{"role":"_usage","token_count":1500}`
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return None;
         }
         let val: Value = serde_json::from_str(trimmed).ok()?;
+
+        if let Some(timed) = apply_kimi_step_end_timing(&val, ctx) {
+            return Some(ParsedLineResult {
+                event: Some(timed),
+                rate_limits: Vec::new(),
+                balance: None,
+            });
+        }
+
+        // Fallback for legacy Kimi CLI `context.jsonl` entries: `{"role":"_usage","token_count":1500}`
         let is_usage_role = val
             .get("role")
             .and_then(|v| v.as_str())
@@ -363,5 +427,61 @@ impl ProviderLogParser for KimiCodeParser {
 
     fn finalize_batch(&self, events: Vec<NormalizedUsageEvent>) -> Vec<NormalizedUsageEvent> {
         collapse_duplicate_events_keep_last(events)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const USAGE_RECORD: &str = r#"{"type":"usage.record","agentId":"main","model":"kimi-code/k3.1-pro-highspeed","usage":{"inputOther":5689,"output":275,"inputCacheRead":13568,"inputCacheCreation":0},"usageScope":"turn","time":1794489559212}"#;
+    const STEP_END: &str = r#"{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.end","uuid":"u1","turnId":"0","step":1,"finishReason":"tool_use","usage":{"inputOther":5689,"output":275,"inputCacheRead":13568,"inputCacheCreation":0},"llmFirstTokenLatencyMs":1556,"llmStreamDurationMs":2500,"llmRequestBuildMs":0,"llmServerFirstTokenMs":1555,"llmServerDecodeMs":2500,"messageId":"chatcmpl-x"},"time":1794489559216}"#;
+
+    fn kimi_ctx() -> FileParseContext {
+        KimiCodeParser::new().init_context(
+            Path::new("C:/tmp/nonexistent/.kimi-code/sessions/wd_x/session_1/agents/main/wire.jsonl"),
+            "dev-1",
+        )
+    }
+
+    #[test]
+    fn kimi_step_end_reemits_usage_record_with_decode_window_tps() {
+        let parser = KimiCodeParser::new();
+        let mut ctx = kimi_ctx();
+        let first = parser
+            .parse_line(USAGE_RECORD, &mut ctx)
+            .and_then(|r| r.event)
+            .expect("usage.record event");
+        assert_eq!(first.output_tokens, 275);
+        assert_eq!(first.output_tps, None);
+        assert_eq!(first.ttft_ms, None);
+
+        let timed = parser
+            .parse_line(STEP_END, &mut ctx)
+            .and_then(|r| r.event)
+            .expect("step.end timing");
+        assert_eq!(timed.event_id, first.event_id);
+        assert_eq!(timed.ttft_ms, Some(1_555));
+        assert_eq!(timed.duration_ms, Some(1_556 + 2_500));
+        assert!((timed.output_tps.expect("tps") - 110.0).abs() < 1e-6);
+        assert!(ctx.pending_kimi_step_event.is_none());
+
+        let collapsed = parser.finalize_batch(vec![first, timed]);
+        assert_eq!(collapsed.len(), 1);
+        assert!(collapsed[0].output_tps.is_some());
+    }
+
+    #[test]
+    fn kimi_step_end_with_mismatched_usage_or_no_pending_event_is_ignored() {
+        let parser = KimiCodeParser::new();
+        let mut ctx = kimi_ctx();
+        // No pending usage.record yet.
+        assert!(parser.parse_line(STEP_END, &mut ctx).is_none());
+
+        assert!(parser.parse_line(USAGE_RECORD, &mut ctx).and_then(|r| r.event).is_some());
+        let other_step = STEP_END.replace(r#""output":275"#, r#""output":999"#);
+        assert!(parser.parse_line(&other_step, &mut ctx).is_none());
+        // The mismatch consumed the pending event, so a late matching step.end cannot attach.
+        assert!(parser.parse_line(STEP_END, &mut ctx).is_none());
     }
 }

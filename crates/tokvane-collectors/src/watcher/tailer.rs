@@ -178,8 +178,11 @@ pub fn tail_file_incremental(
         ctx.last_step_ts_ms = None;
         ctx.active_message_turns.clear();
         ctx.last_codex_totals = None;
+        ctx.codex_first_output_ts_ms = None;
+        ctx.codex_response_end_ts_ms = None;
         ctx.last_context_tokens = None;
         ctx.pending_antigravity_event = None;
+        ctx.pending_kimi_step_event = None;
         ctx.line_number = 0;
 
         // 2. Trailing warmup slice (up to 64 KB immediately before start_offset) to reconstruct
