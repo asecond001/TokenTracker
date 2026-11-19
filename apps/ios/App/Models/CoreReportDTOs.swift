@@ -990,6 +990,39 @@ public struct ModelPricingEntryDTO: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public enum SpeedBasisDTO: String, Codable, Equatable, Sendable {
+    case decode
+    case endToEnd = "end_to_end"
+}
+
+public struct ProviderSubscriptionAllocationDTO: Codable, Equatable, Identifiable, Sendable {
+    public let providerId: String
+    public let planNames: [String]
+    public let monthlyFeeMicroUsd: Int64
+    public let periodFeeMicroUsd: Int64
+
+    public var id: String { providerId }
+
+    enum CodingKeys: String, CodingKey {
+        case providerId = "provider_id"
+        case planNames = "plan_names"
+        case monthlyFeeMicroUsd = "monthly_fee_micro_usd"
+        case periodFeeMicroUsd = "period_fee_micro_usd"
+    }
+
+    public init(
+        providerId: String,
+        planNames: [String],
+        monthlyFeeMicroUsd: Int64,
+        periodFeeMicroUsd: Int64
+    ) {
+        self.providerId = providerId
+        self.planNames = planNames
+        self.monthlyFeeMicroUsd = monthlyFeeMicroUsd
+        self.periodFeeMicroUsd = periodFeeMicroUsd
+    }
+}
+
 public struct ModelStatRowDTO: Codable, Equatable, Identifiable, Sendable {
     public let modelId: String
     public let providerId: String
@@ -1006,6 +1039,8 @@ public struct ModelStatRowDTO: Codable, Equatable, Identifiable, Sendable {
     public let costShareRatio: Double
     public let avgOutputTps: Double
     public let effectivePricing: ModelPricingEntryDTO?
+    public let listCostMicroUsd: Int64
+    public let subscriptionCostMicroUsd: Int64?
 
     public var id: String { "\(providerId)::\(modelId)" }
 
@@ -1025,6 +1060,8 @@ public struct ModelStatRowDTO: Codable, Equatable, Identifiable, Sendable {
         case costShareRatio = "cost_share_ratio"
         case avgOutputTps = "avg_output_tps"
         case effectivePricing = "effective_pricing"
+        case listCostMicroUsd = "list_cost_micro_usd"
+        case subscriptionCostMicroUsd = "subscription_cost_micro_usd"
     }
 
     public init(
@@ -1042,7 +1079,9 @@ public struct ModelStatRowDTO: Codable, Equatable, Identifiable, Sendable {
         estimatedCostMicroUsd: Int64,
         costShareRatio: Double,
         avgOutputTps: Double,
-        effectivePricing: ModelPricingEntryDTO? = nil
+        effectivePricing: ModelPricingEntryDTO? = nil,
+        listCostMicroUsd: Int64 = 0,
+        subscriptionCostMicroUsd: Int64? = nil
     ) {
         self.modelId = modelId
         self.providerId = providerId
@@ -1059,6 +1098,8 @@ public struct ModelStatRowDTO: Codable, Equatable, Identifiable, Sendable {
         self.costShareRatio = costShareRatio
         self.avgOutputTps = avgOutputTps
         self.effectivePricing = effectivePricing
+        self.listCostMicroUsd = listCostMicroUsd
+        self.subscriptionCostMicroUsd = subscriptionCostMicroUsd
     }
 
     public init(from decoder: Decoder) throws {
@@ -1078,6 +1119,8 @@ public struct ModelStatRowDTO: Codable, Equatable, Identifiable, Sendable {
         self.costShareRatio = try container.decode(Double.self, forKey: .costShareRatio)
         self.avgOutputTps = try container.decode(Double.self, forKey: .avgOutputTps)
         self.effectivePricing = try container.decodeIfPresent(ModelPricingEntryDTO.self, forKey: .effectivePricing)
+        self.listCostMicroUsd = try container.decodeIfPresent(Int64.self, forKey: .listCostMicroUsd) ?? 0
+        self.subscriptionCostMicroUsd = try container.decodeIfPresent(Int64.self, forKey: .subscriptionCostMicroUsd)
     }
 
     public var cacheHitPercent: Double {
@@ -1092,24 +1135,28 @@ public struct ModelStatsReportDTO: Codable, Equatable, Sendable {
     public let totalCostMicroUsd: Int64
     public let totalCacheSavedMicroUsd: Int64
     public let catalog: [ModelPricingEntryDTO]
+    public let subscriptionAllocations: [ProviderSubscriptionAllocationDTO]
 
     enum CodingKeys: String, CodingKey {
         case rows
         case totalCostMicroUsd = "total_cost_micro_usd"
         case totalCacheSavedMicroUsd = "total_cache_saved_micro_usd"
         case catalog
+        case subscriptionAllocations = "subscription_allocations"
     }
 
     public init(
         rows: [ModelStatRowDTO],
         totalCostMicroUsd: Int64,
         totalCacheSavedMicroUsd: Int64,
-        catalog: [ModelPricingEntryDTO] = []
+        catalog: [ModelPricingEntryDTO] = [],
+        subscriptionAllocations: [ProviderSubscriptionAllocationDTO] = []
     ) {
         self.rows = rows
         self.totalCostMicroUsd = totalCostMicroUsd
         self.totalCacheSavedMicroUsd = totalCacheSavedMicroUsd
         self.catalog = catalog
+        self.subscriptionAllocations = subscriptionAllocations
     }
 
     public init(from decoder: Decoder) throws {
@@ -1118,6 +1165,7 @@ public struct ModelStatsReportDTO: Codable, Equatable, Sendable {
         self.totalCostMicroUsd = try container.decode(Int64.self, forKey: .totalCostMicroUsd)
         self.totalCacheSavedMicroUsd = try container.decode(Int64.self, forKey: .totalCacheSavedMicroUsd)
         self.catalog = try container.decodeIfPresent([ModelPricingEntryDTO].self, forKey: .catalog) ?? []
+        self.subscriptionAllocations = try container.decodeIfPresent([ProviderSubscriptionAllocationDTO].self, forKey: .subscriptionAllocations) ?? []
     }
 }
 
@@ -1133,6 +1181,7 @@ public struct ModelSpeedStatsDTO: Codable, Equatable, Identifiable, Sendable {
     public let latestTps: Double
     public let avgDurationMs: Double
     public let avgTtftMs: Double?
+    public let speedBasis: SpeedBasisDTO?
 
     public var id: String { "\(providerId)::\(modelId)" }
 
@@ -1148,6 +1197,51 @@ public struct ModelSpeedStatsDTO: Codable, Equatable, Identifiable, Sendable {
         case latestTps = "latest_tps"
         case avgDurationMs = "avg_duration_ms"
         case avgTtftMs = "avg_ttft_ms"
+        case speedBasis = "speed_basis"
+    }
+
+    public init(
+        modelId: String,
+        providerId: String,
+        sampleCount: Int64,
+        meanTps: Double,
+        p50Tps: Double,
+        p95Tps: Double,
+        maxTps: Double,
+        minTps: Double,
+        latestTps: Double,
+        avgDurationMs: Double,
+        avgTtftMs: Double?,
+        speedBasis: SpeedBasisDTO? = nil
+    ) {
+        self.modelId = modelId
+        self.providerId = providerId
+        self.sampleCount = sampleCount
+        self.meanTps = meanTps
+        self.p50Tps = p50Tps
+        self.p95Tps = p95Tps
+        self.maxTps = maxTps
+        self.minTps = minTps
+        self.latestTps = latestTps
+        self.avgDurationMs = avgDurationMs
+        self.avgTtftMs = avgTtftMs
+        self.speedBasis = speedBasis
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.modelId = try container.decode(String.self, forKey: .modelId)
+        self.providerId = try container.decode(String.self, forKey: .providerId)
+        self.sampleCount = try container.decode(Int64.self, forKey: .sampleCount)
+        self.meanTps = try container.decode(Double.self, forKey: .meanTps)
+        self.p50Tps = try container.decode(Double.self, forKey: .p50Tps)
+        self.p95Tps = try container.decode(Double.self, forKey: .p95Tps)
+        self.maxTps = try container.decode(Double.self, forKey: .maxTps)
+        self.minTps = try container.decode(Double.self, forKey: .minTps)
+        self.latestTps = try container.decode(Double.self, forKey: .latestTps)
+        self.avgDurationMs = try container.decode(Double.self, forKey: .avgDurationMs)
+        self.avgTtftMs = try container.decodeIfPresent(Double.self, forKey: .avgTtftMs)
+        self.speedBasis = try container.decodeIfPresent(String.self, forKey: .speedBasis).flatMap(SpeedBasisDTO.init(rawValue:))
     }
 }
 
@@ -1161,6 +1255,7 @@ public struct ProviderSpeedStatsDTO: Codable, Equatable, Identifiable, Sendable 
     public let minTps: Double
     public let avgDurationMs: Double
     public let avgTtftMs: Double?
+    public let speedBasis: SpeedBasisDTO?
 
     public var id: String { providerId }
 
@@ -1174,6 +1269,45 @@ public struct ProviderSpeedStatsDTO: Codable, Equatable, Identifiable, Sendable 
         case minTps = "min_tps"
         case avgDurationMs = "avg_duration_ms"
         case avgTtftMs = "avg_ttft_ms"
+        case speedBasis = "speed_basis"
+    }
+
+    public init(
+        providerId: String,
+        sampleCount: Int64,
+        meanTps: Double,
+        p50Tps: Double,
+        p95Tps: Double,
+        maxTps: Double,
+        minTps: Double,
+        avgDurationMs: Double,
+        avgTtftMs: Double?,
+        speedBasis: SpeedBasisDTO? = nil
+    ) {
+        self.providerId = providerId
+        self.sampleCount = sampleCount
+        self.meanTps = meanTps
+        self.p50Tps = p50Tps
+        self.p95Tps = p95Tps
+        self.maxTps = maxTps
+        self.minTps = minTps
+        self.avgDurationMs = avgDurationMs
+        self.avgTtftMs = avgTtftMs
+        self.speedBasis = speedBasis
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.providerId = try container.decode(String.self, forKey: .providerId)
+        self.sampleCount = try container.decode(Int64.self, forKey: .sampleCount)
+        self.meanTps = try container.decode(Double.self, forKey: .meanTps)
+        self.p50Tps = try container.decode(Double.self, forKey: .p50Tps)
+        self.p95Tps = try container.decode(Double.self, forKey: .p95Tps)
+        self.maxTps = try container.decode(Double.self, forKey: .maxTps)
+        self.minTps = try container.decode(Double.self, forKey: .minTps)
+        self.avgDurationMs = try container.decode(Double.self, forKey: .avgDurationMs)
+        self.avgTtftMs = try container.decodeIfPresent(Double.self, forKey: .avgTtftMs)
+        self.speedBasis = try container.decodeIfPresent(String.self, forKey: .speedBasis).flatMap(SpeedBasisDTO.init(rawValue:))
     }
 }
 

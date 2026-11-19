@@ -1609,3 +1609,117 @@ fn mobile_pure_rollup_auto_trends_live_speed_decay_and_remote_roi() {
         .expect("build env");
     assert!(!env_out.payg_snapshots.is_empty());
 }
+
+#[test]
+fn models_report_allocates_remote_synced_subscription_fees_on_mobile() {
+    use crate::domain::{SyncEnvelopeV1, SyncHourlyDelta, SyncSubscriptionSnapshot};
+
+    let storage = Storage::open_in_memory().expect("db");
+    let bucket = chrono::Utc
+        .with_ymd_and_hms(2026, 11, 16, 4, 0, 0)
+        .single()
+        .expect("ts")
+        .timestamp_millis();
+
+    let env = SyncEnvelopeV1 {
+        schema_version: 1,
+        device_id: "pc-workstation".to_string(),
+        device_display_name: "Workstation".to_string(),
+        generated_at_ms: bucket + 60_000,
+        since_watermark_ms: 0,
+        hourly_deltas: vec![
+            SyncHourlyDelta {
+                provider_id: "claude_code".to_string(),
+                model_id: "claude-sonnet-4-5".to_string(),
+                bucket_start_ms: bucket,
+                request_count: 8,
+                observable_step_count: 0,
+                input_tokens: 80_000,
+                output_tokens: 15_000,
+                cache_read_tokens: 20_000,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                estimated_cost_micro_usd: 30_000_000,
+                cache_saved_micro_usd: 10_000,
+                total_duration_ms: 12_000,
+                tps_sample_count: 8,
+                tps_sum: 560.0,
+                max_output_tps: 80.0,
+                updated_at_ms: bucket + 50_000,
+            },
+            SyncHourlyDelta {
+                provider_id: "claude_code".to_string(),
+                model_id: "claude-opus-4-1".to_string(),
+                bucket_start_ms: bucket,
+                request_count: 4,
+                observable_step_count: 0,
+                input_tokens: 20_000,
+                output_tokens: 5_000,
+                cache_read_tokens: 10_000,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                estimated_cost_micro_usd: 70_000_000,
+                cache_saved_micro_usd: 5_000,
+                total_duration_ms: 8_000,
+                tps_sample_count: 4,
+                tps_sum: 200.0,
+                max_output_tps: 60.0,
+                updated_at_ms: bucket + 50_000,
+            },
+        ],
+        // Two windows belonging to the same synced (device_id, plan_id) must dedupe rather than double-count.
+        subscription_snapshots: vec![
+            SyncSubscriptionSnapshot {
+                plan_id: "claude_max_5x".to_string(),
+                provider_id: "claude_code".to_string(),
+                plan_name: "Claude Max 5x".to_string(),
+                window_id: "5h".to_string(),
+                window_label: "5h 滚动窗口".to_string(),
+                used_percent: 42.0,
+                resets_at_ms: Some(bucket + 4 * HOUR_MS),
+                source: "official_api".to_string(),
+                monthly_fee_micro_usd: 100_000_000,
+            },
+            SyncSubscriptionSnapshot {
+                plan_id: "claude_max_5x".to_string(),
+                provider_id: "claude_code".to_string(),
+                plan_name: "Claude Max 5x".to_string(),
+                window_id: "7d".to_string(),
+                window_label: "7d 周额度".to_string(),
+                used_percent: 18.0,
+                resets_at_ms: Some(bucket + 5 * DAY_MS),
+                source: "official_api".to_string(),
+                monthly_fee_micro_usd: 100_000_000,
+            },
+        ],
+        payg_snapshots: Vec::new(),
+    };
+    storage
+        .apply_remote_sync_envelope_v1(&env, bucket + 60_000)
+        .expect("apply");
+
+    let filter = AnalyticsFilter {
+        start_ms: bucket,
+        end_ms: bucket + 2 * HOUR_MS,
+        provider_id: None,
+        device_id: None,
+        tz_offset_minutes: 480,
+        all_time: false,
+    };
+    let report = storage.query_models_pricing(&filter).expect("models");
+    assert_eq!(report.subscription_allocations.len(), 1);
+    let alloc = &report.subscription_allocations[0];
+    assert_eq!(alloc.provider_id, "claude_code");
+    assert_eq!(alloc.monthly_fee_micro_usd, 100_000_000);
+    assert_eq!(alloc.plan_names, vec!["Claude Max 5x".to_string()]);
+    assert_eq!(
+        alloc.period_fee_micro_usd,
+        super::monthly::prorate_monthly_fee(100_000_000, filter.start_ms, filter.end_ms)
+    );
+    let sum_allocated: i64 = report
+        .rows
+        .iter()
+        .map(|r| r.subscription_cost_micro_usd.expect("allocated"))
+        .sum();
+    assert_eq!(sum_allocated, alloc.period_fee_micro_usd);
+}

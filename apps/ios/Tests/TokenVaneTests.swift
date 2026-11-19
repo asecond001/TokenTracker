@@ -1077,6 +1077,204 @@ final class TokenVaneTests: XCTestCase {
         XCTAssertEqual(reparsedPairing.key, "pass-custom-e2ee")
     }
 
+    func testParetoFrontierCacheWriteDenominatorAndSpeedBasis() throws {
+        // 1. Counts cache writes as prompt tokens in both model & provider cache hit ratios.
+        let cacheReport = ModelStatsReportDTO(
+            rows: [
+                ModelStatRowDTO(
+                    modelId: "claude-opus-5-5",
+                    providerId: "claude_code",
+                    requests: 10,
+                    observableSteps: 0,
+                    inputTokens: 100,
+                    outputTokens: 5_000,
+                    cacheReadTokens: 980_000,
+                    cacheWriteTokens: 19_900,
+                    reasoningTokens: 0,
+                    totalTokens: 1_005_000,
+                    cacheSavedMicroUsd: 0,
+                    estimatedCostMicroUsd: 1_000_000,
+                    costShareRatio: 1.0,
+                    avgOutputTps: 0
+                )
+            ],
+            totalCostMicroUsd: 1_000_000,
+            totalCacheSavedMicroUsd: 0
+        )
+        let cacheModels = ModelComparisonBuilder.buildModelComparison(models: cacheReport, speed: nil)
+        XCTAssertEqual(cacheModels[0].cacheHitRatio ?? 0, 0.98, accuracy: 0.0001)
+        let cacheProviders = ModelComparisonBuilder.buildProviderComparison(rows: cacheModels, speed: nil, models: cacheReport)
+        XCTAssertEqual(cacheProviders[0].cacheHitRatio ?? 0, 0.98, accuracy: 0.0001)
+
+        // 2. Prices rows across list/actual/subscription and falls back to actual without a paid plan.
+        let pricingReport = ModelStatsReportDTO(
+            rows: [
+                ModelStatRowDTO(
+                    modelId: "claude-opus-5-5",
+                    providerId: "claude_code",
+                    requests: 10,
+                    observableSteps: 0,
+                    inputTokens: 0,
+                    outputTokens: 0,
+                    cacheReadTokens: 0,
+                    cacheWriteTokens: 0,
+                    reasoningTokens: 0,
+                    totalTokens: 2_000_000,
+                    cacheSavedMicroUsd: 0,
+                    estimatedCostMicroUsd: 4_000_000,
+                    costShareRatio: 0.8,
+                    avgOutputTps: 0,
+                    listCostMicroUsd: 10_000_000,
+                    subscriptionCostMicroUsd: 1_000_000
+                ),
+                ModelStatRowDTO(
+                    modelId: "k3.1-pro",
+                    providerId: "kimi_code",
+                    requests: 5,
+                    observableSteps: 0,
+                    inputTokens: 0,
+                    outputTokens: 0,
+                    cacheReadTokens: 0,
+                    cacheWriteTokens: 0,
+                    reasoningTokens: 0,
+                    totalTokens: 1_000_000,
+                    cacheSavedMicroUsd: 0,
+                    estimatedCostMicroUsd: 1_000_000,
+                    costShareRatio: 0.2,
+                    avgOutputTps: 0,
+                    listCostMicroUsd: 3_000_000,
+                    subscriptionCostMicroUsd: nil
+                )
+            ],
+            totalCostMicroUsd: 5_000_000,
+            totalCacheSavedMicroUsd: 0,
+            subscriptionAllocations: [
+                ProviderSubscriptionAllocationDTO(
+                    providerId: "claude_code",
+                    planNames: ["Claude Pro"],
+                    monthlyFeeMicroUsd: 20_000_000,
+                    periodFeeMicroUsd: 1_000_000
+                )
+            ]
+        )
+        let pricedRows = ModelComparisonBuilder.buildModelComparison(models: pricingReport, speed: nil)
+        let withPlan = try XCTUnwrap(pricedRows.first { $0.providerId == "claude_code" })
+        let withoutPlan = try XCTUnwrap(pricedRows.first { $0.providerId == "kimi_code" })
+
+        XCTAssertEqual(ModelComparisonBuilder.priceForBasis(row: withPlan, basis: .list), BasisPrice(perMMicroUsd: 5_000_000, basis: .list))
+        XCTAssertEqual(ModelComparisonBuilder.priceForBasis(row: withPlan, basis: .actual), BasisPrice(perMMicroUsd: 2_000_000, basis: .actual))
+        XCTAssertEqual(ModelComparisonBuilder.priceForBasis(row: withPlan, basis: .subscription), BasisPrice(perMMicroUsd: 500_000, basis: .subscription))
+        XCTAssertEqual(ModelComparisonBuilder.priceForBasis(row: withoutPlan, basis: .subscription), BasisPrice(perMMicroUsd: 1_000_000, basis: .actual))
+
+        let emptyRow = ModelComparisonRow(
+            key: "empty",
+            modelId: "empty",
+            providerId: "kimi_code",
+            requests: 0,
+            totalTokens: 0,
+            outputTokens: 0,
+            costMicroUsd: 0,
+            cacheSavedMicroUsd: 0,
+            costPerMMicroUsd: nil,
+            outputPricePerMMicroUsd: nil,
+            cacheHitRatio: nil,
+            meanTps: nil,
+            p95Tps: nil,
+            avgTtftMs: nil,
+            avgDurationMs: nil,
+            speedSamples: 0
+        )
+        XCTAssertNil(ModelComparisonBuilder.priceForBasis(row: emptyRow, basis: .actual))
+
+        // 3. Pareto frontier excludes dominated models and keeps exact ties.
+        let pareto = ModelComparisonBuilder.computeParetoFrontier([
+            FrontierPointInput(key: "cheap-slow", price: 0.2, tps: 20),
+            FrontierPointInput(key: "mid", price: 0.5, tps: 80),
+            FrontierPointInput(key: "pricey-fast", price: 1.2, tps: 150),
+            FrontierPointInput(key: "dominated", price: 0.8, tps: 60),
+            FrontierPointInput(key: "twin", price: 0.5, tps: 80)
+        ])
+        XCTAssertEqual(pareto.frontier, ["cheap-slow", "mid", "twin", "pricey-fast"])
+        XCTAssertEqual(pareto.dominatedBy["dominated"], "mid")
+        XCTAssertEqual(pareto.dominatedBy.count, 1)
+
+        // 4. Carries speed_basis through DTO decoding and excludes end_to_end & <20 samples from frontier eligibility.
+        let speedJSON = """
+        {
+          "providers": [
+            {
+              "provider_id": "codex",
+              "sample_count": 120,
+              "mean_tps": 42.0,
+              "p50_tps": 40.0,
+              "p95_tps": 70.0,
+              "max_tps": 90.0,
+              "min_tps": 12.0,
+              "avg_duration_ms": 9000.0,
+              "avg_ttft_ms": 3000.0,
+              "speed_basis": "decode"
+            }
+          ],
+          "models": [
+            {
+              "model_id": "gpt-6-astra",
+              "provider_id": "codex",
+              "sample_count": 120,
+              "mean_tps": 42.0,
+              "p50_tps": 40.0,
+              "p95_tps": 70.0,
+              "max_tps": 90.0,
+              "min_tps": 12.0,
+              "latest_tps": 41.0,
+              "avg_duration_ms": 9000.0,
+              "avg_ttft_ms": 3000.0,
+              "speed_basis": "decode"
+            },
+            {
+              "model_id": "gemini-pro",
+              "provider_id": "antigravity",
+              "sample_count": 120,
+              "mean_tps": 30.0,
+              "p50_tps": 28.0,
+              "p95_tps": 40.0,
+              "max_tps": 50.0,
+              "min_tps": 15.0,
+              "latest_tps": 31.0,
+              "avg_duration_ms": 9000.0,
+              "avg_ttft_ms": 3000.0,
+              "speed_basis": "end_to_end"
+            },
+            {
+              "model_id": "legacy",
+              "provider_id": "claude_code",
+              "sample_count": 25,
+              "mean_tps": 50.0,
+              "p50_tps": 50.0,
+              "p95_tps": 60.0,
+              "max_tps": 70.0,
+              "min_tps": 30.0,
+              "latest_tps": 50.0,
+              "avg_duration_ms": 5000.0,
+              "avg_ttft_ms": 500.0
+            }
+          ],
+          "from_hourly_rollups": false
+        }
+        """
+        let decodedSpeed = try JSONDecoder().decode(SpeedLatencyReportDTO.self, from: Data(speedJSON.utf8))
+        let basisRows = ModelComparisonBuilder.buildModelComparison(models: nil, speed: decodedSpeed)
+        let basisByModel = Dictionary(uniqueKeysWithValues: basisRows.map { ($0.modelId, $0.speedBasis) })
+        XCTAssertEqual(basisByModel["gpt-6-astra"] ?? nil, .decode)
+        XCTAssertEqual(basisByModel["gemini-pro"] ?? nil, .endToEnd)
+        XCTAssertEqual(basisByModel["legacy"] ?? nil, nil)
+
+        let enough = ModelComparisonBuilder.minFrontierSpeedSamples
+        XCTAssertTrue(ModelComparisonBuilder.isFrontierEligible(samples: enough, speedBasis: .decode))
+        XCTAssertTrue(ModelComparisonBuilder.isFrontierEligible(samples: enough, speedBasis: nil))
+        XCTAssertFalse(ModelComparisonBuilder.isFrontierEligible(samples: enough, speedBasis: .endToEnd))
+        XCTAssertFalse(ModelComparisonBuilder.isFrontierEligible(samples: enough - 1, speedBasis: .decode))
+    }
+
     private func encryptEnvelopeForTest(
         innerEnvelope: [String: Any],
         deviceId: String,

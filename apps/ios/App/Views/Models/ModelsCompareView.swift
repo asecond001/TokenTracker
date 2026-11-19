@@ -29,13 +29,18 @@ private struct SpeedBarPoint: Identifiable {
     var id: String { "\(providerId)::\(modelId)::\(metric)" }
 }
 
-private struct BubblePoint: Identifiable {
+private struct FrontierPlotPoint: Identifiable {
     let key: String
     let modelId: String
+    let providerId: String
     let providerLabel: String
-    let costPerMDisplay: Double
+    let displayPrice: Double
+    let xPlot: Double
     let meanTps: Double
     let tokenWeight: Double
+    let samples: Int64
+    let isFallback: Bool
+    let speedBasis: SpeedBasisDTO?
 
     var id: String { key }
 }
@@ -45,6 +50,8 @@ public struct ModelsCompareView: View {
     @State private var subTab: ModelsSubTab = .compare
     @State private var sortKey: ComparisonSortKey = .costMicroUsd
     @State private var sortDescending = true
+    @State private var priceBasis: PriceBasis = .actual
+    @State private var selectedFrontierKey: String?
     @State private var catalogQuery = ""
     @State private var editingPricingDraft: PricingOverrideDraft?
 
@@ -110,7 +117,7 @@ public struct ModelsCompareView: View {
             key: sortKey,
             descending: sortDescending
         )
-        let bubbles = buildBubblePoints(from: modelRows)
+        let frontierPoints = buildFrontierPoints(from: modelRows)
 
         return VStack(alignment: .leading, spacing: 14) {
             if modelRows.isEmpty {
@@ -118,9 +125,9 @@ public struct ModelsCompareView: View {
             } else {
                 highlightsGrid(from: modelRows)
 
-                if !bubbles.isEmpty {
+                if !frontierPoints.isEmpty {
                     HairlineDivider(insetLeading: 16)
-                    priceVsSpeedChart(bubbles: bubbles)
+                    paretoFrontierSection(points: frontierPoints)
                 }
 
                 if !providerRows.isEmpty {
@@ -193,51 +200,118 @@ public struct ModelsCompareView: View {
         .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
-    private func buildBubblePoints(from rows: [ModelComparisonRow]) -> [BubblePoint] {
-        rows.compactMap { row -> BubblePoint? in
-            guard let costMicro = row.costPerMMicroUsd,
-                  costMicro > 0,
+    private func buildFrontierPoints(from rows: [ModelComparisonRow]) -> [FrontierPlotPoint] {
+        rows.compactMap { row -> FrontierPlotPoint? in
+            guard let basisPrice = ModelComparisonBuilder.priceForBasis(row: row, basis: priceBasis),
                   let tps = row.meanTps,
                   tps > 0 else {
                 return nil
             }
+            let roundedMicro = Int64(basisPrice.perMMicroUsd.rounded())
             let displayVal = TokenVaneFormatters.convertMicroUsd(
-                Int64(costMicro.rounded()),
+                max(Int64(1), roundedMicro),
                 currency: store.currency,
                 rateString: store.usdToCnyRate
             )
-            return BubblePoint(
+            guard displayVal.isFinite, displayVal > 0 else { return nil }
+            let clamped = max(displayVal, 0.0001)
+            return FrontierPlotPoint(
                 key: row.key,
                 modelId: row.modelId,
+                providerId: row.providerId,
                 providerLabel: TokenVaneFormatters.providerDisplayName(row.providerId),
-                costPerMDisplay: displayVal,
+                displayPrice: displayVal,
+                xPlot: -Foundation.log10(clamped),
                 meanTps: tps,
-                tokenWeight: max(1.0, Double(row.totalTokens))
+                tokenWeight: max(1.0, Double(row.totalTokens)),
+                samples: row.speedSamples,
+                isFallback: basisPrice.basis != priceBasis,
+                speedBasis: row.speedBasis
             )
         }
     }
 
-    private func priceVsSpeedChart(bubbles: [BubblePoint]) -> some View {
+    private func paretoFrontierSection(points: [FrontierPlotPoint]) -> some View {
         let unitSymbol = store.currency.uppercased() == "CNY" ? "¥" : "$"
-        return VStack(alignment: .leading, spacing: 8) {
+        let eligible = points.filter {
+            ModelComparisonBuilder.isFrontierEligible(samples: $0.samples, speedBasis: $0.speedBasis)
+        }
+        let frontierResult = ModelComparisonBuilder.computeParetoFrontier(
+            eligible.map { FrontierPointInput(key: $0.key, price: $0.displayPrice, tps: $0.meanTps) }
+        )
+        let frontierSet = Set(frontierResult.frontier)
+        let byKey = Dictionary(uniqueKeysWithValues: points.map { ($0.key, $0) })
+        let frontierLinePoints = frontierResult.frontier.compactMap { byKey[$0] }
+        let maxTokens = max(1.0, points.map(\.tokenWeight).max() ?? 1.0)
+
+        let rawMinX = points.map(\.xPlot).min() ?? -1.0
+        let rawMaxX = points.map(\.xPlot).max() ?? 1.0
+        let spanX = rawMaxX - rawMinX
+        let padX = spanX < 0.05 ? 0.35 : max(0.08, spanX * 0.14)
+        let domainX: ClosedRange<Double> = (rawMinX - padX)...(rawMaxX + padX)
+        let tickXValues = buildLogPriceTicks(domainX: domainX)
+
+        let minEligiblePrice = eligible.map(\.displayPrice).min() ?? 0.0
+        let maxEligibleTps = eligible.map(\.meanTps).max() ?? 0.0
+        let medianEligiblePrice = medianValue(eligible.map(\.displayPrice))
+        let medianEligibleTps = medianValue(eligible.map(\.meanTps))
+        let showBetterArea = eligible.count >= 3 && minEligiblePrice > 0 && medianEligiblePrice > 0
+
+        let activeKey = (selectedFrontierKey.flatMap { byKey[$0]?.key })
+            ?? frontierResult.frontier.first
+            ?? points.first?.key
+        let activePoint = activeKey.flatMap { byKey[$0] }
+
+        return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text(L10n.tr("models.chart.price_speed", default: "单价 × 速率象限"))
+                Text(L10n.tr("models.chart.pareto_title", default: "性价比前沿"))
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Text(L10n.trFormat("models.chart.price_unit", default: "%@/M vs tok/s", unitSymbol))
+                Text(L10n.tr("models.chart.better_corner", default: "更便宜 · 更快 ↗"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
 
-            Chart(bubbles) { b in
-                PointMark(
-                    x: .value(L10n.tr("models.sort.cost_per_m", default: "均价/M"), b.costPerMDisplay),
-                    y: .value(L10n.tr("models.sort.tps", default: "速率"), b.meanTps)
-                )
-                .symbolSize(max(45, min(260, log10(b.tokenWeight) * 28)))
-                .foregroundStyle(by: .value(L10n.tr("analytics.dimension.provider", default: "服务商"), b.providerLabel))
+            Picker(L10n.tr("models.frontier.basis_picker", default: "价格口径"), selection: $priceBasis) {
+                ForEach(PriceBasis.allCases) { basis in
+                    Text(basis.label).tag(basis)
+                }
             }
-            .chartLegend(position: .bottom, alignment: .leading)
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("models.priceBasisPicker")
+
+            Chart {
+                if showBetterArea {
+                    RectangleMark(
+                        xStart: .value("Price", -Foundation.log10(max(medianEligiblePrice, 0.0001))),
+                        xEnd: .value("Price", -Foundation.log10(max(minEligiblePrice * 0.92, 0.0001))),
+                        yStart: .value("TPS", medianEligibleTps),
+                        yEnd: .value("TPS", maxEligibleTps * 1.04)
+                    )
+                    .foregroundStyle(SemanticColors.accentIndigo.opacity(0.08))
+                }
+
+                frontierLineMarks(frontierLinePoints)
+
+                ForEach(points) { pt in
+                    let onFrontier = frontierSet.contains(pt.key)
+                    let eligiblePoint = ModelComparisonBuilder.isFrontierEligible(
+                        samples: pt.samples,
+                        speedBasis: pt.speedBasis
+                    )
+                    let opacity: Double = onFrontier ? 0.95 : (eligiblePoint ? 0.30 : 0.62)
+                    let symbolArea = CGFloat(52.0 + Foundation.sqrt(pt.tokenWeight / maxTokens) * 190.0)
+                    let showLabel = onFrontier && frontierLinePoints.count <= 6
+                    scatterPointMark(
+                        pt,
+                        size: symbolArea,
+                        color: TokenVaneFormatters.providerColor(pt.providerId).opacity(opacity),
+                        showLabel: showLabel
+                    )
+                }
+            }
+            .chartXScale(domain: domainX)
+            .chartYScale(domain: .automatic(includesZero: false))
             .chartYAxis {
                 AxisMarks(position: .trailing) { value in
                     AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
@@ -252,21 +326,273 @@ public struct ModelsCompareView: View {
                 }
             }
             .chartXAxis {
-                AxisMarks { value in
-                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
+                AxisMarks(values: tickXValues) { value in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
                         .foregroundStyle(SemanticColors.hairline)
                     AxisValueLabel {
-                        if let v = value.as(Double.self) {
-                            Text(String(format: "%@%.2f", locale: Locale(identifier: "en_US_POSIX"), unitSymbol, v))
+                        if let xVal = value.as(Double.self) {
+                            let price = Foundation.pow(10.0, -xVal)
+                            Text(formatAxisPrice(price, symbol: unitSymbol))
                                 .font(.caption2)
                                 .tabularMetrics()
                         }
                     }
                 }
             }
-            .frame(height: 190)
+            .frame(height: 210)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(points) { pt in
+                        let selected = pt.key == activePoint?.key
+                        let onFrontier = frontierSet.contains(pt.key)
+                        Button {
+                            selectedFrontierKey = pt.key
+                        } label: {
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(TokenVaneFormatters.providerColor(pt.providerId))
+                                    .frame(width: 6, height: 6)
+                                Text(pt.modelId)
+                                    .font(.caption2.weight(selected ? .semibold : .regular))
+                                    .lineLimit(1)
+                                if onFrontier {
+                                    Image(systemName: "star.fill")
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(SemanticColors.accentIndigo)
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(
+                                selected ? SemanticColors.accentIndigo.opacity(0.14) : SemanticColors.surfaceSubtle,
+                                in: Capsule()
+                            )
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(
+                                        selected ? SemanticColors.accentIndigo.opacity(0.6) : SemanticColors.hairline,
+                                        lineWidth: 0.8
+                                    )
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            if let pt = activePoint {
+                frontierDetailCard(
+                    point: pt,
+                    unitSymbol: unitSymbol,
+                    frontierSet: frontierSet,
+                    dominatedBy: frontierResult.dominatedBy,
+                    byKey: byKey
+                )
+            }
+
+            Text(L10n.tr("models.frontier.legend_note", default: "★ 性价比前沿 · 淡点已被超越 · ◇ 无订阅回退实付 · □ 端到端口径单列"))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 16)
+    }
+
+    @ChartContentBuilder
+    private func frontierLineMarks(_ frontierPoints: [FrontierPlotPoint]) -> some ChartContent {
+        ForEach(frontierPoints) { pt in
+            LineMark(
+                x: .value("Price", pt.xPlot),
+                y: .value("TPS", pt.meanTps),
+                series: .value("Series", "frontier")
+            )
+            .interpolationMethod(.linear)
+            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+            .foregroundStyle(Color.secondary.opacity(0.75))
+        }
+    }
+
+    @ChartContentBuilder
+    private func scatterPointMark(
+        _ pt: FrontierPlotPoint,
+        size: CGFloat,
+        color: Color,
+        showLabel: Bool
+    ) -> some ChartContent {
+        if pt.isFallback {
+            PointMark(x: .value("Price", pt.xPlot), y: .value("TPS", pt.meanTps))
+                .symbol(.diamond)
+                .symbolSize(size)
+                .foregroundStyle(color)
+                .annotation(position: .top, spacing: 2) {
+                    if showLabel {
+                        frontierLabelView(pt.modelId)
+                    }
+                }
+        } else if pt.speedBasis == .endToEnd {
+            PointMark(x: .value("Price", pt.xPlot), y: .value("TPS", pt.meanTps))
+                .symbol(.square)
+                .symbolSize(size)
+                .foregroundStyle(color)
+                .annotation(position: .top, spacing: 2) {
+                    if showLabel {
+                        frontierLabelView(pt.modelId)
+                    }
+                }
+        } else {
+            PointMark(x: .value("Price", pt.xPlot), y: .value("TPS", pt.meanTps))
+                .symbol(.circle)
+                .symbolSize(size)
+                .foregroundStyle(color)
+                .annotation(position: .top, spacing: 2) {
+                    if showLabel {
+                        frontierLabelView(pt.modelId)
+                    }
+                }
+        }
+    }
+
+    private func frontierLabelView(_ modelId: String) -> some View {
+        Text(modelId)
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+    }
+
+    private func frontierDetailCard(
+        point pt: FrontierPlotPoint,
+        unitSymbol: String,
+        frontierSet: Set<String>,
+        dominatedBy: [String: String],
+        byKey: [String: FrontierPlotPoint]
+    ) -> some View {
+        let basisText = pt.isFallback ? PriceBasis.actual.label : priceBasis.label
+        let priceStr = formatAxisPrice(pt.displayPrice, symbol: unitSymbol)
+        let status = classifyFrontierStatus(
+            point: pt,
+            frontierSet: frontierSet,
+            dominatedBy: dominatedBy,
+            byKey: byKey
+        )
+
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(TokenVaneFormatters.providerColor(pt.providerId))
+                    .frame(width: 7, height: 7)
+                Text(pt.modelId)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                Text("· \(pt.providerLabel)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(status.badgeText)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(status.accentColor)
+            }
+            HStack(spacing: 10) {
+                Text("\(basisText) \(priceStr)/M")
+                Text("·")
+                Text("\(TokenVaneFormatters.formatTps(pt.meanTps))")
+                Spacer()
+                Text(L10n.trFormat("models.speed.samples_count", default: "%lld 样本", pt.samples))
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption2)
+            .tabularMetrics()
+        }
+        .padding(10)
+        .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func classifyFrontierStatus(
+        point pt: FrontierPlotPoint,
+        frontierSet: Set<String>,
+        dominatedBy: [String: String],
+        byKey: [String: FrontierPlotPoint]
+    ) -> (badgeText: String, accentColor: Color) {
+        if pt.speedBasis == .endToEnd {
+            return (
+                L10n.tr("models.frontier.status_end_to_end", default: "端到端口径 · 含首字延迟，单独展示"),
+                .secondary
+            )
+        }
+        if pt.samples < ModelComparisonBuilder.minFrontierSpeedSamples {
+            return (
+                L10n.trFormat(
+                    "models.frontier.status_accumulating",
+                    default: "速度样本积累中（%lld/%lld）",
+                    pt.samples,
+                    ModelComparisonBuilder.minFrontierSpeedSamples
+                ),
+                SemanticColors.statusWarning
+            )
+        }
+        if frontierSet.contains(pt.key) {
+            return (
+                L10n.tr("models.frontier.status_on_frontier", default: "性价比前沿"),
+                SemanticColors.statusLive
+            )
+        }
+        if let domKey = dominatedBy[pt.key], let dom = byKey[domKey] {
+            return (
+                L10n.trFormat("models.frontier.status_dominated", default: "被 %@ 全面超越", dom.modelId),
+                .secondary
+            )
+        }
+        return ("—", .secondary)
+    }
+
+    private func medianValue(_ values: [Double]) -> Double {
+        let sorted = values.sorted()
+        guard !sorted.isEmpty else { return 0 }
+        let mid = sorted.count / 2
+        if sorted.count % 2 == 1 {
+            return sorted[mid]
+        }
+        return (sorted[mid - 1] + sorted[mid]) / 2.0
+    }
+
+    private func buildLogPriceTicks(domainX: ClosedRange<Double>) -> [Double] {
+        let minDomainPrice = Foundation.pow(10.0, -domainX.upperBound)
+        let maxDomainPrice = Foundation.pow(10.0, -domainX.lowerBound)
+        var candidates: [Double] = []
+        for exp in -4...4 {
+            let base = Foundation.pow(10.0, Double(exp))
+            for mult in [1.0, 2.0, 5.0] {
+                let tick = base * mult
+                if tick >= minDomainPrice && tick <= maxDomainPrice {
+                    candidates.append(tick)
+                }
+            }
+        }
+        if candidates.count >= 2 {
+            let step = max(1, candidates.count / 4)
+            var reduced: [Double] = []
+            for idx in stride(from: 0, to: candidates.count, by: step) {
+                reduced.append(candidates[idx])
+            }
+            return reduced.map { -Foundation.log10($0) }.sorted()
+        }
+        let lower = domainX.lowerBound
+        let upper = domainX.upperBound
+        let mid = (lower + upper) / 2.0
+        return [lower, mid, upper]
+    }
+
+    private func formatAxisPrice(_ value: Double, symbol: String) -> String {
+        let posix = Locale(identifier: "en_US_POSIX")
+        if value >= 100.0 {
+            return String(format: "%@%.0f", locale: posix, symbol, value)
+        }
+        if value >= 10.0 {
+            return String(format: "%@%.1f", locale: posix, symbol, value)
+        }
+        if value >= 0.1 {
+            return String(format: "%@%.2f", locale: posix, symbol, value)
+        }
+        return String(format: "%@%.3f", locale: posix, symbol, value)
     }
 
     private func providerRollupsSection(providerRows: [ProviderComparisonRow]) -> some View {
@@ -383,6 +709,7 @@ public struct ModelsCompareView: View {
     private var costSection: some View {
         let report = store.modelsReport
         let rows = report?.rows ?? []
+        let allocations = report?.subscriptionAllocations ?? []
 
         return VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
@@ -407,6 +734,34 @@ public struct ModelsCompareView: View {
             }
             .padding(.horizontal, 16)
             .padding(.top, 14)
+
+            if !allocations.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(L10n.tr("models.cost.subscription_allocations", default: "订阅摊销"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ForEach(allocations) { alloc in
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(TokenVaneFormatters.providerColor(alloc.providerId))
+                                .frame(width: 6, height: 6)
+                            Text(TokenVaneFormatters.providerDisplayName(alloc.providerId))
+                                .font(.caption2.weight(.medium))
+                            Text(alloc.planNames.joined(separator: " + "))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            Spacer()
+                            Text(TokenVaneFormatters.formatCurrency(alloc.periodFeeMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))
+                                .font(.caption2.weight(.semibold))
+                                .tabularMetrics()
+                        }
+                    }
+                }
+                .padding(10)
+                .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .padding(.horizontal, 16)
+            }
 
             HairlineDivider(insetLeading: 16)
 
@@ -458,6 +813,18 @@ public struct ModelsCompareView: View {
                                     .tabularMetrics()
                                     .foregroundStyle(.secondary)
                                 Spacer()
+                                if let subCost = row.subscriptionCostMicroUsd, subCost > 0 {
+                                    Text(
+                                        L10n.trFormat(
+                                            "models.cost.sub_share_value",
+                                            default: "摊销 %@",
+                                            TokenVaneFormatters.formatCurrency(subCost, currency: store.currency, rateString: store.usdToCnyRate)
+                                        )
+                                    )
+                                    .font(.caption2)
+                                    .tabularMetrics()
+                                    .foregroundStyle(.secondary)
+                                }
                                 Text("省 \(TokenVaneFormatters.formatCurrency(row.cacheSavedMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))")
                                     .font(.caption2)
                                     .tabularMetrics()
@@ -532,6 +899,18 @@ public struct ModelsCompareView: View {
                                 Text(item.modelId)
                                     .font(.subheadline.weight(.medium))
                                     .lineLimit(1)
+                                if let basis = item.speedBasis {
+                                    Text(
+                                        basis == .decode
+                                            ? L10n.tr("models.speed.basis_decode", default: "解码窗")
+                                            : L10n.tr("models.speed.basis_end_to_end", default: "端到端")
+                                    )
+                                    .font(.caption2)
+                                    .foregroundStyle(basis == .decode ? SemanticColors.accentIndigo : .secondary)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 3, style: .continuous))
+                                }
                                 Spacer()
                                 Text(TokenVaneFormatters.formatTps(item.meanTps))
                                     .font(.subheadline.weight(.semibold))

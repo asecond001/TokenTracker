@@ -117,12 +117,29 @@ impl Storage {
                 }
             }
 
-            // Subscription amortization: same plan selection as the monthly ROI
-            // (enabled, user-configured, paid), prorated to the range up to now.
+            // Subscription amortization: include enabled user-configured local plans and
+            // deduped paid remote synced snapshots, prorated to the selected range up to now.
             let fee_end_ms = eff_end_ms.min(Utc::now().timestamp_millis());
-            let plans = load_subscription_plans(conn)?;
-            let subscription_allocations =
-                build_subscription_allocations(&plans, &raw_rows, eff_start_ms, fee_end_ms);
+            let local_dev = crate::storage::repository::query_local_device(conn)?;
+            let include_local_plans = device_id.is_none_or(|d| d == local_dev.device_id);
+            let plans = if include_local_plans {
+                load_subscription_plans(conn)?
+            } else {
+                Vec::new()
+            };
+            let remote_plans = load_remote_paid_plans(
+                conn,
+                &local_dev.device_id,
+                provider,
+                device_id,
+            )?;
+            let subscription_allocations = build_subscription_allocations(
+                &plans,
+                &remote_plans,
+                &raw_rows,
+                eff_start_ms,
+                fee_end_ms,
+            );
             allocate_subscription_costs(&mut raw_rows, &subscription_allocations);
 
             Ok(ModelStatsReport {
@@ -156,8 +173,56 @@ pub(crate) fn list_price_cost(
     i64::try_from(rounded).unwrap_or(i64::MAX)
 }
 
+struct RemotePaidPlan {
+    provider_id: String,
+    plan_id: String,
+    plan_name: String,
+    monthly_fee_micro_usd: i64,
+}
+
+fn load_remote_paid_plans(
+    conn: &Connection,
+    local_device_id: &str,
+    provider: Option<&str>,
+    device_id: Option<&str>,
+) -> CoreResult<Vec<RemotePaidPlan>> {
+    let mut sql = String::from(
+        "SELECT provider_id, plan_id, MAX(plan_name), MAX(monthly_fee_micro_usd)
+         FROM remote_subscription_snapshots
+         WHERE monthly_fee_micro_usd > 0 AND device_id != ?1",
+    );
+    let mut params: Vec<Value> = vec![Value::Text(local_device_id.to_string())];
+    let mut next_param = 2usize;
+    if let Some(prov) = provider {
+        sql.push_str(&format!(" AND LOWER(provider_id) = LOWER(?{next_param})"));
+        params.push(Value::Text(prov.to_string()));
+        next_param += 1;
+    }
+    if let Some(dev) = device_id {
+        sql.push_str(&format!(" AND device_id = ?{next_param}"));
+        params.push(Value::Text(dev.to_string()));
+    }
+    sql.push_str(" GROUP BY device_id, provider_id, plan_id ORDER BY MAX(updated_at_ms) DESC, plan_id ASC");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(params), |r| {
+        Ok(RemotePaidPlan {
+            provider_id: r.get(0)?,
+            plan_id: r.get(1)?,
+            plan_name: r.get(2)?,
+            monthly_fee_micro_usd: r.get(3)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for item in rows {
+        out.push(item?);
+    }
+    Ok(out)
+}
+
 fn build_subscription_allocations(
     plans: &[SubscriptionPlan],
+    remote_plans: &[RemotePaidPlan],
     rows: &[ModelStatRow],
     start_ms: i64,
     end_ms: i64,
@@ -165,22 +230,36 @@ fn build_subscription_allocations(
     let providers: BTreeSet<&str> = rows.iter().map(|r| r.provider_id.as_str()).collect();
     let mut out = Vec::new();
     for provider_id in providers {
-        let paid: Vec<&SubscriptionPlan> = plans
-            .iter()
-            .filter(|p| {
-                p.enabled
-                    && p.is_user_configured
-                    && p.monthly_fee_micro_usd > 0
-                    && p.provider_id.eq_ignore_ascii_case(provider_id)
-            })
-            .collect();
-        if paid.is_empty() {
+        let mut covered_plan_ids = HashSet::new();
+        let mut plan_names = Vec::new();
+        let mut monthly_fee_micro_usd: i64 = 0;
+
+        for p in plans.iter().filter(|p| {
+            p.enabled
+                && p.is_user_configured
+                && p.monthly_fee_micro_usd > 0
+                && p.provider_id.eq_ignore_ascii_case(provider_id)
+        }) {
+            covered_plan_ids.insert(p.plan_id.to_ascii_lowercase());
+            plan_names.push(p.plan_name.clone());
+            monthly_fee_micro_usd = monthly_fee_micro_usd.saturating_add(p.monthly_fee_micro_usd);
+        }
+
+        for rp in remote_plans.iter().filter(|rp| {
+            rp.monthly_fee_micro_usd > 0
+                && rp.provider_id.eq_ignore_ascii_case(provider_id)
+                && !covered_plan_ids.contains(&rp.plan_id.to_ascii_lowercase())
+        }) {
+            plan_names.push(rp.plan_name.clone());
+            monthly_fee_micro_usd = monthly_fee_micro_usd.saturating_add(rp.monthly_fee_micro_usd);
+        }
+
+        if monthly_fee_micro_usd <= 0 {
             continue;
         }
-        let monthly_fee_micro_usd: i64 = paid.iter().map(|p| p.monthly_fee_micro_usd).sum();
         out.push(ProviderSubscriptionAllocation {
             provider_id: provider_id.to_string(),
-            plan_names: paid.iter().map(|p| p.plan_name.clone()).collect(),
+            plan_names,
             monthly_fee_micro_usd,
             period_fee_micro_usd: prorate_monthly_fee(monthly_fee_micro_usd, start_ms, end_ms),
         });

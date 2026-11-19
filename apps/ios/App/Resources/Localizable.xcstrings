@@ -2383,6 +2383,102 @@
         "en": { "stringUnit": { "state": "translated", "value": "Ambient Opacity" } },
         "zh-Hans": { "stringUnit": { "state": "translated", "value": "光影浓度" } }
       }
+    },
+    "models.frontier.basis_list": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "API List" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "API 标价" } }
+      }
+    },
+    "models.frontier.basis_actual": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "API Actual" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "API 实付" } }
+      }
+    },
+    "models.frontier.basis_subscription": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Sub Amortized" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "订阅摊销" } }
+      }
+    },
+    "models.frontier.basis_picker": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Price Basis" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "价格口径" } }
+      }
+    },
+    "models.chart.pareto_title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Pareto Value Frontier" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "性价比前沿" } }
+      }
+    },
+    "models.chart.better_corner": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Cheaper · Faster ↗" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "更便宜 · 更快 ↗" } }
+      }
+    },
+    "models.frontier.legend_note": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "★ Frontier · Faded dominated · ◇ Fallback to actual · □ End-to-end separate" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "★ 性价比前沿 · 淡点已被超越 · ◇ 无订阅回退实付 · □ 端到端口径单列" } }
+      }
+    },
+    "models.speed.samples_count": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "%lld samples" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "%lld 样本" } }
+      }
+    },
+    "models.frontier.status_end_to_end": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "End-to-end speed · includes TTFT, shown separately" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "端到端口径 · 含首字延迟，单独展示" } }
+      }
+    },
+    "models.frontier.status_accumulating": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Sampling speed (%lld/%lld)" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "速度样本积累中（%lld/%lld）" } }
+      }
+    },
+    "models.frontier.status_on_frontier": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Pareto Frontier" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "性价比前沿" } }
+      }
+    },
+    "models.frontier.status_dominated": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Dominated by %@" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "被 %@ 全面超越" } }
+      }
+    },
+    "models.cost.subscription_allocations": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Subscription Amortization" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "订阅摊销" } }
+      }
+    },
+    "models.cost.sub_share_value": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Sub %@" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "摊销 %@" } }
+      }
+    },
+    "models.speed.basis_decode": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Decode" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "解码窗" } }
+      }
+    },
+    "models.speed.basis_end_to_end": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "End-to-End" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "端到端" } }
+      }
     }
   }
 }
