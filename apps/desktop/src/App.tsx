@@ -1,11 +1,12 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { type QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { listen } from '@tauri-apps/api/event';
+import { type EventCallback, listen } from '@tauri-apps/api/event';
 import { Sidebar } from './components/Sidebar';
 import { TitleBar } from './components/TitleBar';
 import { WorkspaceBackdrop } from './components/WorkspaceBackdrop';
 import { ipc, isTauriRuntime } from './lib/ipc';
 import { CLOCK_REFRESH_MS, createUsageRefresher } from './lib/liveRefresh';
+import { TRAY_SUMMARY_QUERY_KEY } from './lib/queryKeys';
 import { checkForUpdates } from './lib/updater';
 
 // Secondary pages and the auxiliary tray / floating windows are split into
@@ -77,8 +78,7 @@ function updateTraySummaryCurrencyCache(
         }
       : prev;
 
-  queryClient.setQueriesData<TraySummary>({ queryKey: ['tray_summary'] }, patchTray);
-  queryClient.setQueriesData<TraySummary>({ queryKey: ['tray-summary'] }, patchTray);
+  queryClient.setQueriesData<TraySummary>({ queryKey: [TRAY_SUMMARY_QUERY_KEY] }, patchTray);
 }
 
 function applyPreferencesToStoreAndCaches(
@@ -138,7 +138,7 @@ export function App() {
   });
 
   const { data: traySummary } = useQuery({
-    queryKey: ['tray_summary', tzOffsetMinutes],
+    queryKey: [TRAY_SUMMARY_QUERY_KEY, tzOffsetMinutes],
     queryFn: () => ipc.getTraySummary(tzOffsetMinutes),
     enabled: !isAuxView,
     refetchInterval: CLOCK_REFRESH_MS,
@@ -183,20 +183,26 @@ export function App() {
     const usageRefresher = createUsageRefresher(queryClient);
     unlisteners.push(usageRefresher.dispose);
 
-    void listen('usage-updated', () => {
+    // `listen` resolves asynchronously; if the effect is torn down first, drop
+    // the late subscription immediately instead of leaking it.
+    const subscribe = <T,>(event: string, handler: EventCallback<T>) => {
+      void listen<T>(event, handler)
+        .then((unlisten) => {
+          if (disposed) {
+            unlisten();
+          } else {
+            unlisteners.push(unlisten);
+          }
+        })
+        .catch(() => {});
+    };
+
+    subscribe('usage-updated', () => {
       setLivePulseSeq((seq) => seq + 1);
       usageRefresher.schedule();
-    })
-      .then((unlisten) => {
-        if (disposed) {
-          unlisten();
-        } else {
-          unlisteners.push(unlisten);
-        }
-      })
-      .catch(() => {});
+    });
 
-    void listen<AppPreferences>('preferences-updated', (event) => {
+    subscribe<AppPreferences>('preferences-updated', (event) => {
       const incoming = event.payload;
       if (!incoming) return;
       if (inFlightPrefsWritesRef.current > 0) {
@@ -204,17 +210,9 @@ export function App() {
       }
       hydratedPrefsRef.current = true;
       applyPreferencesToStoreAndCaches(queryClient, incoming);
-    })
-      .then((unlisten) => {
-        if (disposed) {
-          unlisten();
-        } else {
-          unlisteners.push(unlisten);
-        }
-      })
-      .catch(() => {});
+    });
 
-    void listen<WorkspaceNavigatePayload>('navigate-workspace', (event) => {
+    subscribe<WorkspaceNavigatePayload>('navigate-workspace', (event) => {
       const payload = event.payload;
       if (!payload) return;
       // `speed` was merged into the 模型对比 page in v0.4.6.
@@ -225,15 +223,7 @@ export function App() {
       if (payload.provider_id !== undefined) {
         setProviderFilter(payload.provider_id || 'all');
       }
-    })
-      .then((unlisten) => {
-        if (disposed) {
-          unlisten();
-        } else {
-          unlisteners.push(unlisten);
-        }
-      })
-      .catch(() => {});
+    });
 
     return () => {
       disposed = true;
@@ -248,7 +238,9 @@ export function App() {
 
   // Periodic quiet background check for signed desktop releases (offline-safe)
   useEffect(() => {
-    if (isTrayView || !autoCheckUpdates || !isTauriRuntime()) {
+    // Only the main workspace checks: the tray popup and floating monitor are
+    // separate webviews and would otherwise each run their own update checks.
+    if (isAuxView || !autoCheckUpdates || !isTauriRuntime()) {
       return;
     }
     const startupTimer = window.setTimeout(() => {
@@ -262,7 +254,7 @@ export function App() {
       window.clearTimeout(startupTimer);
       window.clearInterval(periodicTimer);
     };
-  }, [isTrayView, autoCheckUpdates]);
+  }, [isAuxView, autoCheckUpdates]);
 
   const applyPreferencesOptimistically = useCallback(
     (patch: Partial<AppPreferences>): AppPreferences | null => {

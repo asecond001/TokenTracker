@@ -8,6 +8,8 @@
     "build": "pnpm --filter desktop build",
     "desktop:dev": "pnpm --filter desktop tauri dev",
     "desktop:build": "pnpm --filter desktop tauri build",
-    "ios:check:local": "node scripts/ios/local-check.mjs"
+    "ios:check:local": "node scripts/ios/local-check.mjs",
+    "version:check": "node scripts/bump-version.mjs --check",
+    "version:bump": "node scripts/bump-version.mjs"
   }
 }

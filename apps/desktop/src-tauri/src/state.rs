@@ -11,10 +11,11 @@ use tokvane_collectors::{
     start_loopback_otlp_server, sync_catalog_and_rate, CollectorCoordinator, CredentialManager,
     OsKeyringStore, OtlpServerHandle, SyncClientHandle,
 };
-use tokvane_core::domain::CatalogSyncResult;
+use tokvane_core::domain::{provider_ids, CatalogSyncResult, ProviderConfig};
 use tokvane_core::{CoreResult, Storage};
 
-/// Resolve `%LOCALAPPDATA%\TokenVane\tokenvane.db`, seamlessly migrating legacy `%LOCALAPPDATA%\TokenVane\tokenvane.db` on first run.
+/// Resolve `%LOCALAPPDATA%\TokenVane\tokenvane.db`, copying the legacy
+/// `%LOCALAPPDATA%\TokenTracker\tokentracker.db` (and its backgrounds) on first run.
 pub fn default_db_path() -> PathBuf {
     if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
         let base = PathBuf::from(local_app_data);
@@ -320,24 +321,7 @@ async fn poll_configured_provider_apis(
     let mut any_rate_limits = false;
 
     for cfg in configs {
-        if !cfg.enabled {
-            continue;
-        }
-        let is_cli_quota_provider = match cfg.provider_id.as_str() {
-            "antigravity" => {
-                tokvane_collectors::providers::antigravity::resolve_agy_cli_binary().is_some()
-            }
-            "claude_code" => {
-                tokvane_collectors::providers::claude_cli::resolve_claude_cli_binary().is_some()
-            }
-            _ => false,
-        };
-        let is_key_balance_provider = cfg.has_credential
-            && matches!(
-                cfg.provider_id.as_str(),
-                "kimi_code" | "minimax_code" | "qcode" | "deepseek_harness"
-            );
-        if !is_cli_quota_provider && !is_key_balance_provider {
+        if !quota_refresh_available(&cfg) {
             continue;
         }
         match tokvane_collectors::refresh_provider_balance(storage, &cfg.provider_id, credentials)
@@ -370,32 +354,44 @@ async fn poll_configured_provider_apis(
     }
 }
 
-/// Whether a provider with fresh log activity can have its official quota refreshed right now.
-fn activity_refresh_eligible(storage: &Storage, provider_id: &str) -> bool {
-    let Some(kind) = activity_refresh_kind(provider_id) else {
-        return false;
-    };
-    let Ok(configs) = storage.list_provider_configs() else {
-        return false;
-    };
-    let Some(cfg) = configs.iter().find(|c| c.provider_id == provider_id) else {
-        return false;
-    };
+/// Whether the provider's official quota CLI (`agy`, `claude`) is installed locally.
+fn official_cli_installed(provider_id: &str) -> bool {
+    match provider_id {
+        provider_ids::ANTIGRAVITY => {
+            tokvane_collectors::providers::antigravity::resolve_agy_cli_binary().is_some()
+        }
+        provider_ids::CLAUDE_CODE => {
+            tokvane_collectors::providers::claude_cli::resolve_claude_cli_binary().is_some()
+        }
+        _ => false,
+    }
+}
+
+/// Whether an enabled provider's official quota / balance can be refreshed right now: CLI-backed
+/// providers need their CLI installed, API-key providers need a stored credential.
+///
+/// [`activity_refresh_kind`] is the single source of truth for which providers qualify.
+fn quota_refresh_available(cfg: &ProviderConfig) -> bool {
     if !cfg.enabled {
         return false;
     }
-    match kind {
-        QuotaRefreshKind::OfficialApiKey => cfg.has_credential,
-        QuotaRefreshKind::OfficialCli => match provider_id {
-            "antigravity" => {
-                tokvane_collectors::providers::antigravity::resolve_agy_cli_binary().is_some()
-            }
-            "claude_code" => {
-                tokvane_collectors::providers::claude_cli::resolve_claude_cli_binary().is_some()
-            }
-            _ => false,
-        },
+    match activity_refresh_kind(&cfg.provider_id) {
+        Some(QuotaRefreshKind::OfficialApiKey) => cfg.has_credential,
+        Some(QuotaRefreshKind::OfficialCli) => official_cli_installed(&cfg.provider_id),
+        None => false,
     }
+}
+
+/// Whether a provider with fresh log activity can have its official quota refreshed right now.
+fn activity_refresh_eligible(storage: &Storage, provider_id: &str) -> bool {
+    if activity_refresh_kind(provider_id).is_none() {
+        return false;
+    }
+    storage
+        .list_provider_configs()
+        .ok()
+        .and_then(|configs| configs.into_iter().find(|c| c.provider_id == provider_id))
+        .is_some_and(|cfg| quota_refresh_available(&cfg))
 }
 
 /// Refresh official quota shortly after a provider shows new local activity (at most once per

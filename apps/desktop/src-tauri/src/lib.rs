@@ -43,6 +43,12 @@ pub fn run() {
     };
 
     let builder = tauri::Builder::default()
+        // Must be registered first: a second launch (autostart + manual start, double-clicking
+        // the shortcut) would otherwise run another collector against the same SQLite database,
+        // add a duplicate tray icon and fail to bind the OTLP port. Focus the running instance.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            tray::show_main_window(app);
+        }))
         .manage(app_state)
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,

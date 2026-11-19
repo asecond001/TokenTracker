@@ -32,6 +32,8 @@ import {
   type FloatingModuleId,
 } from '../lib/floatingConfig';
 import { formatRelativeTime } from '../lib/format';
+import { APP_VERSION } from '../lib/appVersion';
+import { TRAY_SUMMARY_QUERY_KEY } from '../lib/queryKeys';
 import { ipc, isTauriRuntime, onCloudSyncProvisionProgress } from '../lib/ipc';
 import { QrCodeSvg } from '../lib/qrcode';
 import {
@@ -564,8 +566,7 @@ export function PreferencesPage({
       };
 
       setNotice({ text: '偏好设置已持久化至本地 SQLite', kind: 'success' });
-      await queryClient.invalidateQueries({ queryKey: ['tray_summary'] });
-      await queryClient.invalidateQueries({ queryKey: ['tray-summary'] });
+      await queryClient.invalidateQueries({ queryKey: [TRAY_SUMMARY_QUERY_KEY] });
     },
     onError: (err: unknown) => {
       setNotice({
@@ -861,7 +862,7 @@ export function PreferencesPage({
       await queryClient.invalidateQueries({ queryKey: ['monthly'] });
       await queryClient.invalidateQueries({ queryKey: ['models_pricing'] });
       await queryClient.invalidateQueries({ queryKey: ['speed_latency'] });
-      await queryClient.invalidateQueries({ queryKey: ['tray_summary'] });
+      await queryClient.invalidateQueries({ queryKey: [TRAY_SUMMARY_QUERY_KEY] });
       setNotice({
         text: `云端同步完成：上传 ${report.pushed_hourly_deltas} 条小时增量 / ${report.pushed_subscriptions} 条订阅快照，拉取并合并 ${report.applied_hourly_buckets} 条远端小时聚合`,
         kind: 'success',
@@ -895,7 +896,7 @@ export function PreferencesPage({
               color: 'var(--accent-tonal-text)',
             }}
           >
-            v0.4.7
+            v{APP_VERSION}
           </span>
         </div>
 

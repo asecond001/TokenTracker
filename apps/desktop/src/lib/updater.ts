@@ -112,6 +112,9 @@ export async function checkForUpdates(manual = false): Promise<AvailableUpdateIn
         return info;
       }
 
+      // Release the native resource behind a stale handle (e.g. the release
+      // was pulled) instead of dropping the reference and leaking it.
+      useUpdaterStore.getState().pendingHandle?.close().catch(() => {});
       useUpdaterStore.getState().setStatePartial({
         status: manual ? 'up_to_date' : 'idle',
         availableUpdate: null,

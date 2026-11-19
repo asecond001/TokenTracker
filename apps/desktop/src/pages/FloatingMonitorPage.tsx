@@ -37,6 +37,7 @@ import {
   providerDisplayName,
 } from '../lib/format';
 import { ipc, isTauriRuntime } from '../lib/ipc';
+import { TRAY_SUMMARY_QUERY_KEY } from '../lib/queryKeys';
 import { syncDocumentAndNativeTheme, useWorkspaceStore } from '../stores/workspaceStore';
 import type { AnalyticsFilter, ThemeMode, TraySummary } from '../types/ipc';
 import { LIVE_CLOCK_REFRESH_MS } from '../lib/liveRefresh';
@@ -158,7 +159,7 @@ export function FloatingMonitorPage({ livePulseSeq = 0 }: FloatingMonitorPagePro
   }, [prefs, setTheme, setCurrency, setUsdToCnyRate]);
 
   const { data: summary } = useQuery({
-    queryKey: ['tray_summary', tzOffsetMinutes],
+    queryKey: [TRAY_SUMMARY_QUERY_KEY, tzOffsetMinutes],
     queryFn: () => ipc.getTraySummary(tzOffsetMinutes),
     refetchInterval: LIVE_CLOCK_REFRESH_MS,
   });

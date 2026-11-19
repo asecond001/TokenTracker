@@ -14,6 +14,7 @@ import {
   resolveSubscriptionTierLabel,
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
+import { TRAY_SUMMARY_QUERY_KEY } from '../lib/queryKeys';
 import { useWorkspaceStore } from '../stores/workspaceStore';
 import type {
   CurrencyCode,
@@ -404,8 +405,7 @@ export function SubscriptionsPage() {
     await queryClient.invalidateQueries({ queryKey: ['provider-balances'] });
     await queryClient.invalidateQueries({ queryKey: ['monthly'] });
     await queryClient.invalidateQueries({ queryKey: ['overview'] });
-    await queryClient.invalidateQueries({ queryKey: ['tray_summary'] });
-    await queryClient.invalidateQueries({ queryKey: ['tray-summary'] });
+    await queryClient.invalidateQueries({ queryKey: [TRAY_SUMMARY_QUERY_KEY] });
     await queryClient.invalidateQueries({ queryKey: ['observed_rate_limits'] });
   };
 

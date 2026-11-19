@@ -8,6 +8,7 @@ import {
   Settings,
 } from 'lucide-react';
 import { AnimatedNumber } from './AnimatedNumber';
+import { APP_VERSION } from '../lib/appVersion';
 import { formatCost } from '../lib/format';
 import { useUpdaterStore } from '../lib/updater';
 import { useWorkspaceStore, type NavPage } from '../stores/workspaceStore';
@@ -105,7 +106,7 @@ export function Sidebar({ traySummary, hasBackdrop = false }: SidebarProps) {
                 </button>
               )}
               <span className="font-mono text-[10px] font-normal lowercase tabular-nums">
-                v0.4.7
+                v{APP_VERSION}
               </span>
             </div>
           </div>

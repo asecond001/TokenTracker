@@ -9,6 +9,7 @@ use tauri_plugin_autostart::ManagerExt;
 use tokvane_collectors::providers::official_api::{
     reconcile_official_usage_api, OfficialApiReconcileResult,
 };
+use tokvane_collectors::quota_refresh::{activity_refresh_kind, QuotaRefreshKind};
 use tokvane_collectors::{
     build_sync_pairing_uri, clear_sync_credentials as clear_sync_creds, has_sync_credentials,
     normalize_worker_url, provision_worker, refresh_provider_balance as collect_provider_balance,
@@ -425,18 +426,18 @@ pub async fn set_provider_api_key(
     provider_id: String,
     api_key: String,
 ) -> Result<(), IpcError> {
-    state.credentials.set_api_key(&provider_id, &api_key)?;
-    state
-        .storage
-        .set_provider_has_credential(&provider_id, true)?;
-    state
-        .storage
-        .reset_auto_subscription_dismissal(&provider_id)?;
+    let credentials = Arc::clone(&state.credentials);
+    let storage = state.storage.clone();
+    let pid = provider_id.clone();
+    run_blocking(move || {
+        credentials.set_api_key(&pid, &api_key)?;
+        storage.set_provider_has_credential(&pid, true)?;
+        storage.reset_auto_subscription_dismissal(&pid)?;
+        Ok(())
+    })
+    .await?;
 
-    if matches!(
-        provider_id.as_str(),
-        "kimi_code" | "deepseek_harness" | "qcode" | "minimax_code"
-    ) {
+    if activity_refresh_kind(&provider_id) == Some(QuotaRefreshKind::OfficialApiKey) {
         match collect_provider_balance_force(
             &state.storage,
             &provider_id,
@@ -512,7 +513,8 @@ pub async fn update_preferences(
     state: State<'_, AppState>,
     prefs: AppPreferences,
 ) -> Result<AppPreferences, IpcError> {
-    state.storage.update_preferences(&prefs)?;
+    let to_save = prefs.clone();
+    run_storage(&state, move |s| Ok(s.update_preferences(&to_save)?)).await?;
 
     if let Err(err) = state
         .sync_otlp_listener_async(prefs.otlp_enabled, prefs.otlp_port)
@@ -531,7 +533,7 @@ pub async fn update_preferences(
         tracing::warn!("Autostart update warning: {err}");
     }
 
-    let updated = state.storage.get_preferences()?;
+    let updated = run_storage(&state, |s| Ok(s.get_preferences()?)).await?;
     state.sync_client.notify_local_change();
     apply_theme_to_app(&app, &updated.theme);
     set_floating_window_visible(&app, updated.floating_window_enabled);
@@ -904,13 +906,25 @@ pub async fn refresh_provider_balance(
     Ok(outcome)
 }
 
+/// Opens the provider's official CLI login flow in a system terminal.
+///
+/// Async so the SQLite write and CLI binary lookup run on the blocking pool rather than the main
+/// (UI) thread that synchronous commands are dispatched on.
 #[tauri::command]
-pub fn launch_provider_cli_login(
+pub async fn launch_provider_cli_login(
     state: State<'_, AppState>,
     provider_id: String,
 ) -> Result<String, IpcError> {
+    let storage = state.storage.clone();
+    run_blocking(move || launch_provider_cli_login_blocking(&storage, &provider_id)).await
+}
+
+fn launch_provider_cli_login_blocking(
+    storage: &Storage,
+    provider_id: &str,
+) -> Result<String, IpcError> {
     let trimmed = provider_id.trim().to_ascii_lowercase();
-    let _ = state.storage.reset_auto_subscription_dismissal(&trimmed);
+    let _ = storage.reset_auto_subscription_dismissal(&trimmed);
 
     let (program, cli_args): (String, Vec<&'static str>) = match trimmed.as_str() {
         "antigravity" => {
@@ -1254,24 +1268,26 @@ pub async fn provision_cloud_sync_worker(
         .await
         .map_err(IpcError::from)?;
 
-    set_sync_creds(
-        state.credentials.as_ref(),
-        Some(&artifacts.bearer_token),
-        artifacts.e2ee_passphrase.as_deref(),
-    )
-    .map_err(IpcError::from)?;
-
-    let salt = resolve_missing_e2ee_salt(&state.storage, req.e2ee_enabled)?;
-    state
-        .storage
-        .update_sync_config_state(
-            true,
-            Some(&artifacts.worker_url),
-            req.e2ee_enabled,
-            salt.as_deref(),
-        )
-        .map_err(IpcError::from)?;
-    state.sync_client.reconfigure();
+    {
+        let credentials = Arc::clone(&state.credentials);
+        let storage = state.storage.clone();
+        let sync_client = state.sync_client.clone();
+        let bearer_token = artifacts.bearer_token.clone();
+        let passphrase = artifacts.e2ee_passphrase.clone();
+        let worker_url = artifacts.worker_url.clone();
+        let e2ee_enabled = req.e2ee_enabled;
+        run_blocking(move || {
+            set_sync_creds(credentials.as_ref(), Some(&bearer_token), passphrase.as_deref())
+                .map_err(IpcError::from)?;
+            let salt = resolve_missing_e2ee_salt(&storage, e2ee_enabled)?;
+            storage
+                .update_sync_config_state(true, Some(&worker_url), e2ee_enabled, salt.as_deref())
+                .map_err(IpcError::from)?;
+            sync_client.reconfigure();
+            Ok(())
+        })
+        .await?;
+    }
 
     // New workers.dev subdomains can take a moment for global edge routing propagation.
     report_progress(ProvisionStep::InitialSync);

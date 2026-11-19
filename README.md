@@ -64,8 +64,8 @@ cargo run --release --offline -p tokvane-collectors --example bench_million_line
 
 打包完成后，桌面端产物位于：
 - 可执行文件：`target/release/tokvane-desktop.exe`
-- MSI 安装包：`target/release/bundle/msi/TokenVane_0.2.3_x64_en-US.msi`
-- NSIS 安装包：`target/release/bundle/nsis/TokenVane_0.2.3_x64-setup.exe`
+- MSI 安装包：`target/release/bundle/msi/TokenVane_<版本号>_x64_en-US.msi`
+- NSIS 安装包：`target/release/bundle/nsis/TokenVane_<版本号>_x64-setup.exe`
 
 ---
 
@@ -91,6 +91,8 @@ cargo run --release --offline -p tokvane-collectors --example bench_million_line
 ## 自动更新与发布签名
 
 推送到 `main` 或提交 PR 时，`.github/workflows/ci.yml` 会运行前端、Sync Worker 与 Rust 三组检查；推送 `v*` 标签时，`.github/workflows/release-desktop.yml` 复用同一门禁，打包签名安装包并生成 `latest.json` 更新清单。
+
+发版时用 `pnpm version:bump 0.x.y` 一次性同步根目录、桌面端、Tauri、Sync Worker 与 Cargo 工作区的版本号（CI 会用 `pnpm version:check` 校验它们一致，发布流程会校验标签与版本号匹配），提交后推送 `v0.x.y` 标签即可。
 
 如果要维护自己的发布源：
 1. 运行 `pnpm tauri signer generate` 生成 Minisign 密钥对。

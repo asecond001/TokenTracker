@@ -149,8 +149,18 @@ fn position_tray_popup(
     let h = size.height as i32;
 
     if let Some(pos) = click_pos {
-        let x = pos.x as i32 - w / 2;
-        let y = pos.y as i32 - h - 12;
+        let monitor = popup
+            .monitor_from_point(pos.x, pos.y)
+            .ok()
+            .flatten()
+            .or_else(|| popup.primary_monitor().ok().flatten());
+        let bounds = monitor.map(|m| ScreenRect {
+            x: m.position().x,
+            y: m.position().y,
+            width: m.size().width as i32,
+            height: m.size().height as i32,
+        });
+        let (x, y) = tray_popup_origin(pos.x as i32, pos.y as i32, w, h, bounds);
         let _ = popup.set_position(PhysicalPosition::new(x, y));
         return;
     }
@@ -162,6 +172,49 @@ fn position_tray_popup(
         let y = (m_pos.y + m_size.height as i32 - h - 56).max(m_pos.y + 12);
         let _ = popup.set_position(PhysicalPosition::new(x, y));
     }
+}
+
+/// A monitor's bounds in physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScreenRect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+/// Gap between the tray click point and the popup, and between the popup and screen edges.
+const TRAY_POPUP_GAP: i32 = 12;
+
+/// Places the tray popup centered on the click point, above it for a bottom taskbar and below
+/// it when there is no room above (top taskbar), clamped so it stays fully on the click's monitor
+/// (side taskbars, clicks near a screen corner).
+fn tray_popup_origin(
+    click_x: i32,
+    click_y: i32,
+    w: i32,
+    h: i32,
+    monitor: Option<ScreenRect>,
+) -> (i32, i32) {
+    let x = click_x - w / 2;
+    let above = click_y - h - TRAY_POPUP_GAP;
+    let Some(m) = monitor else {
+        return (x, above);
+    };
+    let y = if above >= m.y + TRAY_POPUP_GAP {
+        above
+    } else {
+        click_y + TRAY_POPUP_GAP
+    };
+    let clamp_axis = |v: i32, start: i32, extent: i32, size: i32| {
+        let lo = start + TRAY_POPUP_GAP;
+        let hi = (start + extent - size - TRAY_POPUP_GAP).max(lo);
+        v.clamp(lo, hi)
+    };
+    (
+        clamp_axis(x, m.x, m.width, w),
+        clamp_axis(y, m.y, m.height, h),
+    )
 }
 
 fn position_floating_window(win: &tauri::WebviewWindow) {
@@ -328,5 +381,55 @@ pub fn resize_floating_window_internal(
             _ => (304.0, 248.0),
         };
         let _ = win.set_size(LogicalSize::new(w, h));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SCREEN: ScreenRect = ScreenRect {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
+
+    #[test]
+    fn tray_popup_opens_above_a_bottom_taskbar_click() {
+        assert_eq!(
+            tray_popup_origin(1000, 1060, 360, 480, Some(SCREEN)),
+            (820, 1060 - 480 - TRAY_POPUP_GAP)
+        );
+    }
+
+    #[test]
+    fn tray_popup_opens_below_a_top_taskbar_click() {
+        assert_eq!(
+            tray_popup_origin(1000, 20, 360, 480, Some(SCREEN)),
+            (820, 20 + TRAY_POPUP_GAP)
+        );
+    }
+
+    #[test]
+    fn tray_popup_is_clamped_inside_the_monitor_near_corners() {
+        // Right-side taskbar near the bottom-right corner.
+        let (x, y) = tray_popup_origin(1910, 1070, 360, 480, Some(SCREEN));
+        assert_eq!(x, 1920 - 360 - TRAY_POPUP_GAP);
+        assert!(y + 480 <= 1080);
+        // Left-side taskbar on a secondary monitor with a negative origin.
+        let left = ScreenRect {
+            x: -1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let (x, _) = tray_popup_origin(-1910, 600, 360, 480, Some(left));
+        assert_eq!(x, -1920 + TRAY_POPUP_GAP);
+    }
+
+    #[test]
+    fn tray_popup_keeps_legacy_placement_without_monitor_info() {
+        assert_eq!(tray_popup_origin(500, 900, 360, 480, None), (320, 408));
     }
 }

@@ -22,6 +22,7 @@ import {
   providerDisplayName,
 } from '../lib/format';
 import { ipc, isTauriRuntime } from '../lib/ipc';
+import { TRAY_SUMMARY_QUERY_KEY } from '../lib/queryKeys';
 import { useWorkspaceStore } from '../stores/workspaceStore';
 import type {
   AppPreferences,
@@ -197,8 +198,7 @@ export function DataSourcesPage() {
     await queryClient.invalidateQueries({ queryKey: ['overview'] });
     await queryClient.invalidateQueries({ queryKey: ['subscriptions'] });
     await queryClient.invalidateQueries({ queryKey: ['observed_rate_limits'] });
-    await queryClient.invalidateQueries({ queryKey: ['tray_summary'] });
-    await queryClient.invalidateQueries({ queryKey: ['tray-summary'] });
+    await queryClient.invalidateQueries({ queryKey: [TRAY_SUMMARY_QUERY_KEY] });
   };
 
   const updateProviderMutation = useMutation({

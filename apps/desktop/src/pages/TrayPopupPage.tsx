@@ -14,6 +14,7 @@ import {
   providerDisplayName,
 } from '../lib/format';
 import { ipc } from '../lib/ipc';
+import { TRAY_SUMMARY_QUERY_KEY } from '../lib/queryKeys';
 import { syncDocumentAndNativeTheme, useWorkspaceStore } from '../stores/workspaceStore';
 import type { ThemeMode } from '../types/ipc';
 import { CLOCK_REFRESH_MS } from '../lib/liveRefresh';
@@ -48,7 +49,7 @@ export function TrayPopupPage() {
   }, [prefs, setTheme, setCurrency, setUsdToCnyRate]);
 
   const { data: summary } = useQuery({
-    queryKey: ['tray_summary', tzOffsetMinutes],
+    queryKey: [TRAY_SUMMARY_QUERY_KEY, tzOffsetMinutes],
     queryFn: () => ipc.getTraySummary(tzOffsetMinutes),
     refetchInterval: CLOCK_REFRESH_MS,
   });
@@ -56,8 +57,7 @@ export function TrayPopupPage() {
   const scanMutation = useMutation({
     mutationFn: () => ipc.triggerScanNow(),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['tray_summary'] });
-      await queryClient.invalidateQueries({ queryKey: ['tray-summary'] });
+      await queryClient.invalidateQueries({ queryKey: [TRAY_SUMMARY_QUERY_KEY] });
     },
   });
 
