@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual release from a branch: tauri-action creates the tag at the run's commit.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create, e.g. v0.4.8 (must match the manifest version)'
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   verify:
@@ -30,8 +40,8 @@ jobs:
         shell: bash
         run: |
           expected="v$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
-          if [ "${GITHUB_REF_NAME}" != "$expected" ]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match manifest version $expected" >&2
+          if [ "${RELEASE_TAG}" != "$expected" ]; then
+            echo "Tag ${RELEASE_TAG} does not match manifest version $expected" >&2
             exit 1
           fi
       - name: Build and Sign Windows Installers
@@ -42,8 +52,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop
-          tagName: ${{ github.ref_name }}
-          releaseName: 'TokenVane ${{ github.ref_name }}'
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: 'TokenVane ${{ env.RELEASE_TAG }}'
           releaseBody: 'TokenVane desktop release with signed Windows installers and latest.json updater manifest.'
           releaseDraft: false
           prerelease: false
