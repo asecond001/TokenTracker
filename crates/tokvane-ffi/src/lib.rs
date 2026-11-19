@@ -7,7 +7,12 @@ use serde::Serialize;
 use tokvane_core::analytics::{
     export_monthly_csv, export_monthly_json, AnalyticsFilter, MonthlyQuery, TrendsQuery,
 };
-use tokvane_core::sync_mobile::{MobilePreferencesPatch, SyncPullIngestReport};
+use tokvane_core::domain::{ModelPricingEntry, PaygAccount, SubscriptionPlan};
+use tokvane_core::pricing::{parse_litellm_catalog, parse_models_dev_catalog};
+use tokvane_core::subscription::parse_subscription_catalog_json;
+use tokvane_core::sync_mobile::{
+    build_cloudflare_worker_upload_bundle, MobilePreferencesPatch, SyncPullIngestReport,
+};
 use tokvane_core::{CoreError, Storage};
 
 uniffi::setup_scaffolding!();
@@ -55,6 +60,7 @@ pub struct FfiSyncIngestOutcome {
     pub envelopes_applied: u64,
     pub hourly_buckets_applied: u64,
     pub subscription_snapshots_applied: u64,
+    pub payg_snapshots_applied: u64,
     pub next_since_ms: i64,
     pub server_seq_ms: i64,
     pub has_more: bool,
@@ -68,6 +74,7 @@ impl From<SyncPullIngestReport> for FfiSyncIngestOutcome {
             envelopes_applied: value.envelopes_applied as u64,
             hourly_buckets_applied: value.hourly_buckets_applied as u64,
             subscription_snapshots_applied: value.subscription_snapshots_applied as u64,
+            payg_snapshots_applied: value.payg_snapshots_applied as u64,
             next_since_ms: value.next_since_ms,
             server_seq_ms: value.server_seq_ms,
             has_more: value.has_more,
@@ -244,6 +251,138 @@ impl MobileCoreEngine {
             .checkpoint_for_suspend()
             .map_err(FfiError::from)
     }
+
+    pub fn apply_pricing_catalog_payload(
+        &self,
+        source: String,
+        body_json: String,
+        effective_date: String,
+        now_ms: i64,
+    ) -> Result<u64, FfiError> {
+        let entries = match source.trim().to_ascii_lowercase().as_str() {
+            "models_dev" | "models.dev" => parse_models_dev_catalog(&body_json, &effective_date)?,
+            "litellm" => parse_litellm_catalog(&body_json, &effective_date)?,
+            other => {
+                return Err(FfiError::Validation {
+                    msg: format!("Unsupported pricing catalog source '{other}'"),
+                });
+            }
+        };
+        let (_, count, _) = self
+            .storage
+            .apply_synced_pricing_catalog(&entries, now_ms)?;
+        Ok(count as u64)
+    }
+
+    pub fn apply_subscription_catalog_payload(
+        &self,
+        body_json: String,
+        now_ms: i64,
+    ) -> Result<u64, FfiError> {
+        let templates = parse_subscription_catalog_json(&body_json)?;
+        let (_, count) = self
+            .storage
+            .apply_synced_subscription_catalog(&templates, now_ms)?;
+        Ok(count as u64)
+    }
+
+    pub fn upsert_model_pricing_json(&self, entry_json: String) -> Result<(), FfiError> {
+        let entry: ModelPricingEntry = parse_json(&entry_json)?;
+        self.storage
+            .upsert_model_pricing(&entry)
+            .map_err(FfiError::from)
+    }
+
+    pub fn delete_model_pricing_override(&self, model_pattern: String) -> Result<(), FfiError> {
+        self.storage
+            .delete_model_pricing_override(&model_pattern)
+            .map_err(FfiError::from)
+    }
+
+    pub fn query_payg_accounts_json(
+        &self,
+        now_ms: i64,
+        tz_offset_minutes: i32,
+    ) -> Result<String, FfiError> {
+        let items = self.storage.query_payg_accounts(now_ms, tz_offset_minutes)?;
+        to_json(&items)
+    }
+
+    pub fn upsert_payg_account_json(&self, account_json: String) -> Result<(), FfiError> {
+        let account: PaygAccount = parse_json(&account_json)?;
+        self.storage
+            .upsert_payg_account(&account)
+            .map_err(FfiError::from)
+    }
+
+    pub fn delete_payg_account(&self, account_id: String) -> Result<(), FfiError> {
+        self.storage
+            .delete_payg_account(&account_id)
+            .map_err(FfiError::from)
+    }
+
+    pub fn apply_official_balance_payload_json(
+        &self,
+        provider_id: String,
+        endpoint: String,
+        body_json: String,
+        now_ms: i64,
+    ) -> Result<String, FfiError> {
+        let result = self.storage.apply_official_balance_payload(
+            &provider_id,
+            &endpoint,
+            &body_json,
+            now_ms,
+        )?;
+        to_json(&result)
+    }
+
+    pub fn list_subscription_templates_json(&self, now_ms: i64) -> Result<String, FfiError> {
+        let items = self.storage.query_subscription_templates(now_ms)?;
+        to_json(&items)
+    }
+
+    pub fn query_local_subscriptions_json(
+        &self,
+        now_ms: i64,
+        tz_offset_minutes: i32,
+    ) -> Result<String, FfiError> {
+        let items = self
+            .storage
+            .query_subscriptions_with_tz(now_ms, tz_offset_minutes)?;
+        to_json(&items)
+    }
+
+    pub fn upsert_subscription_plan_json(&self, plan_json: String) -> Result<(), FfiError> {
+        let plan: SubscriptionPlan = parse_json(&plan_json)?;
+        self.storage
+            .upsert_subscription_plan(&plan)
+            .map_err(FfiError::from)
+    }
+
+    pub fn delete_subscription_plan(&self, plan_id: String) -> Result<(), FfiError> {
+        self.storage
+            .delete_subscription_plan(&plan_id)
+            .map_err(FfiError::from)
+    }
+
+    pub fn build_worker_upload_bundle_json(
+        &self,
+        worker_name: Option<String>,
+        bearer_token: Option<String>,
+        e2ee_enabled: bool,
+        e2ee_passphrase: Option<String>,
+        include_migration: bool,
+    ) -> Result<String, FfiError> {
+        let bundle = build_cloudflare_worker_upload_bundle(
+            worker_name.as_deref(),
+            bearer_token.as_deref(),
+            e2ee_enabled,
+            e2ee_passphrase.as_deref(),
+            include_migration,
+        )?;
+        to_json(&bundle)
+    }
 }
 
 #[cfg(test)]
@@ -327,6 +466,23 @@ mod tests {
                         used_percent: 42.0,
                         resets_at_ms: Some(base_ms + 3_600_000),
                         source: "local_estimation".to_string(),
+                        monthly_fee_micro_usd: 200_000_000,
+                    }],
+                    payg_snapshots: vec![tokvane_core::domain::SyncPaygSnapshot {
+                        account_id: "auto_deepseek_harness".to_string(),
+                        provider_id: "deepseek_harness".to_string(),
+                        account_name: "DeepSeek".to_string(),
+                        enabled: true,
+                        currency: Some("CNY".to_string()),
+                        total_balance_micro: Some(12_000_000),
+                        granted_balance_micro: None,
+                        topped_up_balance_micro: None,
+                        remaining_manual_balance_micro_usd: None,
+                        monthly_budget_micro_usd: None,
+                        today_cost_micro_usd: 0,
+                        month_cost_micro_usd: 0,
+                        fetched_at_ms: Some(base_ms),
+                        updated_at_ms: base_ms,
                     }],
                 }),
                 encrypted_envelope: None,
@@ -339,6 +495,7 @@ mod tests {
             .expect("ingest");
         assert_eq!(outcome.envelopes_applied, 1);
         assert_eq!(outcome.hourly_buckets_applied, 1);
+        assert_eq!(outcome.payg_snapshots_applied, 1);
 
         let bootstrap_json = engine
             .get_bootstrap_json(base_ms + 5_000, 480)
@@ -410,6 +567,96 @@ mod tests {
         )
         .expect("parse monthly");
         assert_eq!(monthly.month_total_tokens, 18_500);
+        assert_eq!(monthly.subscription_monthly_fee_micro_usd, 200_000_000);
+
+        // New v0.4.6 parity FFI endpoints: PAYG, official balance ingest, pricing override,
+        // local subscription plan & templates, and Cloudflare Worker upload bundle.
+        engine
+            .upsert_payg_account_json(
+                serde_json::json!({
+                    "account_id": "ds_ios",
+                    "provider_id": "deepseek_harness",
+                    "account_name": "DeepSeek iOS",
+                    "enabled": true,
+                    "manual_balance_micro_usd": 5_000_000,
+                    "balance_anchor_ms": base_ms,
+                    "monthly_budget_micro_usd": 20_000_000,
+                    "is_auto": false,
+                    "updated_at_ms": base_ms
+                })
+                .to_string(),
+            )
+            .expect("upsert payg");
+        let payg_json = engine
+            .query_payg_accounts_json(base_ms + 5_000, 480)
+            .expect("query payg");
+        assert!(payg_json.contains("ds_ios"));
+        let bal_json = engine
+            .apply_official_balance_payload_json(
+                "deepseek_harness".to_string(),
+                "https://api.deepseek.com/user/balance".to_string(),
+                r#"{"balance_infos":[{"currency":"CNY","total_balance":"19.5"}]}"#.to_string(),
+                base_ms + 6_000,
+            )
+            .expect("official bal");
+        assert!(bal_json.contains("19500000"));
+        engine
+            .delete_payg_account("ds_ios".to_string())
+            .expect("delete payg");
+
+        engine
+            .upsert_model_pricing_json(
+                serde_json::json!({
+                    "model_pattern": "custom-test-model",
+                    "provider_id": "codex",
+                    "input_per_m_micro_usd": 1_000_000,
+                    "output_per_m_micro_usd": 2_000_000,
+                    "cache_read_per_m_micro_usd": 100_000,
+                    "cache_write_per_m_micro_usd": 0,
+                    "reasoning_per_m_micro_usd": 2_000_000,
+                    "is_user_override": true,
+                    "effective_from": "2026-11-01"
+                })
+                .to_string(),
+            )
+            .expect("upsert pricing");
+        engine
+            .delete_model_pricing_override("custom-test-model".to_string())
+            .expect("delete pricing");
+
+        let tpls_json = engine
+            .list_subscription_templates_json(base_ms + 6_000)
+            .expect("templates");
+        assert!(tpls_json.contains("claude_pro"));
+        engine
+            .upsert_subscription_plan_json(
+                serde_json::json!({
+                    "plan_id": "ios_custom_plan",
+                    "provider_id": "claude_code",
+                    "plan_name": "Claude Pro iOS",
+                    "enabled": true,
+                    "monthly_fee_micro_usd": 20_000_000,
+                    "windows": [],
+                    "is_user_configured": true,
+                    "auto_source": null,
+                    "updated_at_ms": base_ms + 6_000
+                })
+                .to_string(),
+            )
+            .expect("upsert sub");
+        let local_subs_json = engine
+            .query_local_subscriptions_json(base_ms + 6_000, 480)
+            .expect("local subs");
+        assert!(local_subs_json.contains("ios_custom_plan"));
+        engine
+            .delete_subscription_plan("ios_custom_plan".to_string())
+            .expect("delete sub");
+
+        let worker_bundle = engine
+            .build_worker_upload_bundle_json(None, None, true, None, true)
+            .expect("worker bundle");
+        assert!(worker_bundle.contains("tokenvane-sync-worker"));
+        assert!(worker_bundle.contains("multipart_body_base64"));
 
         let csv = engine
             .export_monthly_report(monthly_query, "csv".to_string())

@@ -86,6 +86,20 @@ function verifyGeneratedSwiftBindings(swiftFilePath) {
     'func updateSyncConfig(',
     'func resetSyncWatermark(',
     'func applyExchangeRatePayload(',
+    'func applyPricingCatalogPayload(',
+    'func applySubscriptionCatalogPayload(',
+    'func upsertModelPricingJson(',
+    'func deleteModelPricingOverride(',
+    'func queryPaygAccountsJson(',
+    'func upsertPaygAccountJson(',
+    'func deletePaygAccount(',
+    'func applyOfficialBalancePayloadJson(',
+    'func listSubscriptionTemplatesJson(',
+    'func queryLocalSubscriptionsJson(',
+    'func upsertSubscriptionPlanJson(',
+    'func deleteSubscriptionPlan(',
+    'func buildWorkerUploadBundleJson(',
+    'paygSnapshotsApplied',
     'func checkpointForSuspend('
   ];
   for (const sym of requiredSymbols) {

@@ -1,7 +1,13 @@
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::{Decimal, RoundingStrategy};
 
+pub mod balance_parsers;
 pub mod remote_sync;
+pub use balance_parsers::{
+    parse_deepseek_balance, parse_kimi_coding_usages, parse_minimax_remains,
+    parse_moonshot_balance, parse_official_balance_payload, parse_qcode_usage,
+    OfficialBalanceApplyResult,
+};
 pub use remote_sync::{
     compute_catalog_hash, format_exchange_rate, parse_litellm_catalog, parse_models_dev_catalog,
     parse_remote_exchange_rate_json,

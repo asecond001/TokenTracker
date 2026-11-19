@@ -683,7 +683,9 @@ fn apply_remote_sync_envelope_is_idempotent_and_multi_device_safe() {
             used_percent: 33.5,
             resets_at_ms: Some(ts + 3_600_000),
             source: "estimated".to_string(),
+            monthly_fee_micro_usd: 0,
         }],
+        payg_snapshots: Vec::new(),
     };
 
     let r1 = storage
@@ -1717,12 +1719,18 @@ fn v12_to_v13_migration_clears_local_codex_end_to_end_speed_and_resets_cursors()
             .expect("seed v12 state");
     }
 
-    let storage = Storage::open_file(&db_path).expect("migrate v12 -> v13");
+    let storage = Storage::open_file(&db_path).expect("migrate v12 -> v14");
     storage
         .with_conn(|conn| {
             let ver: i64 =
                 conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))?;
-            assert_eq!(ver, 13);
+            assert_eq!(ver, crate::storage::migrations::CURRENT_SCHEMA_VERSION);
+            let has_v13: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 13",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(has_v13, 1);
             let timing = |id: &str| -> rusqlite::Result<(Option<i64>, Option<i64>, Option<f64>)> {
                 conn.query_row(
                     "SELECT duration_ms, ttft_ms, output_tps FROM usage_events WHERE event_id = ?1",
@@ -1741,4 +1749,42 @@ fn v12_to_v13_migration_clears_local_codex_end_to_end_speed_and_resets_cursors()
             Ok(())
         })
         .expect("verify v13");
+}
+
+#[test]
+fn v13_to_v14_migration_adds_remote_subscription_fee_and_payg_snapshots() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("v13.db");
+    {
+        let storage = Storage::open_file(&db_path).expect("open current");
+        storage
+            .with_conn(|conn| {
+                conn.execute("DROP TABLE IF EXISTS remote_payg_snapshots", [])?;
+                conn.execute("DELETE FROM schema_migrations WHERE version >= 14", [])?;
+                Ok(())
+            })
+            .expect("rewind to v13");
+    }
+
+    let storage = Storage::open_file(&db_path).expect("migrate v13 -> v14");
+    storage
+        .with_conn(|conn| {
+            let ver: i64 =
+                conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))?;
+            assert_eq!(ver, 14);
+            let has_fee_col: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('remote_subscription_snapshots') WHERE name = 'monthly_fee_micro_usd'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(has_fee_col, 1);
+            let has_payg_table: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'remote_payg_snapshots'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(has_payg_table, 1);
+            Ok(())
+        })
+        .expect("verify v14");
 }

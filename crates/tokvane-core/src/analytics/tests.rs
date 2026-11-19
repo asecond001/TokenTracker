@@ -684,6 +684,7 @@ fn multi_device_filter_isolates_overview_trends_monthly_and_models() {
             updated_at_ms: base_ts + 5_000,
         }],
         subscription_snapshots: Vec::new(),
+        payg_snapshots: Vec::new(),
     };
     storage
         .apply_remote_sync_envelope_v1(&remote_envelope, base_ts + 6_000)
@@ -1415,4 +1416,196 @@ fn models_report_includes_list_price_and_subscription_amortization() {
         .iter()
         .filter(|r| r.provider_id == "codex")
         .all(|r| r.subscription_cost_micro_usd.is_none()));
+}
+
+#[test]
+fn mobile_pure_rollup_auto_trends_live_speed_decay_and_remote_roi() {
+    use crate::domain::{
+        ObservedRateLimitWindow, PaygAccount, SyncEnvelopeV1, SyncHourlyDelta, SyncPaygSnapshot,
+        SyncSubscriptionSnapshot,
+    };
+
+    let storage = Storage::open_in_memory().expect("db");
+    let bucket = chrono::Utc
+        .with_ymd_and_hms(2026, 11, 16, 4, 0, 0)
+        .single()
+        .expect("ts")
+        .timestamp_millis();
+
+    let remote_env = SyncEnvelopeV1 {
+        schema_version: 1,
+        device_id: "pc-host".to_string(),
+        device_display_name: "PC-Host".to_string(),
+        generated_at_ms: bucket + 60_000,
+        since_watermark_ms: 0,
+        hourly_deltas: vec![SyncHourlyDelta {
+            provider_id: "claude_code".to_string(),
+            model_id: "claude-sonnet-4-5".to_string(),
+            bucket_start_ms: bucket,
+            request_count: 10,
+            observable_step_count: 0,
+            input_tokens: 100_000,
+            output_tokens: 20_000,
+            cache_read_tokens: 50_000,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            estimated_cost_micro_usd: 200_000_000,
+            cache_saved_micro_usd: 135_000,
+            total_duration_ms: 25_000,
+            tps_sample_count: 10,
+            tps_sum: 650.0,
+            max_output_tps: 80.0,
+            updated_at_ms: bucket + 50_000,
+        }],
+        subscription_snapshots: vec![SyncSubscriptionSnapshot {
+            plan_id: "claude_max_5x".to_string(),
+            provider_id: "claude_code".to_string(),
+            plan_name: "Claude Max 5x".to_string(),
+            window_id: "5h".to_string(),
+            window_label: "5h 滚动窗口".to_string(),
+            used_percent: 42.0,
+            resets_at_ms: Some(bucket + 4 * HOUR_MS),
+            source: "official_api".to_string(),
+            monthly_fee_micro_usd: 100_000_000,
+        }],
+        payg_snapshots: vec![SyncPaygSnapshot {
+            account_id: "auto_deepseek_harness".to_string(),
+            provider_id: "deepseek_harness".to_string(),
+            account_name: "DeepSeek 官方账户余额".to_string(),
+            enabled: true,
+            currency: Some("CNY".to_string()),
+            total_balance_micro: Some(60_000_000),
+            granted_balance_micro: Some(10_000_000),
+            topped_up_balance_micro: Some(50_000_000),
+            remaining_manual_balance_micro_usd: None,
+            monthly_budget_micro_usd: Some(20_000_000),
+            today_cost_micro_usd: 100_000,
+            month_cost_micro_usd: 500_000,
+            fetched_at_ms: Some(bucket + 45_000),
+            updated_at_ms: bucket + 45_000,
+        }],
+    };
+    storage
+        .apply_remote_sync_envelope_v1(&remote_env, bucket + 60_000)
+        .expect("apply");
+
+    // 1. Short <= 6h Auto trends on pure-rollup mobile DB must step cleanly to Hourly buckets.
+    let trends = storage
+        .query_trends(&TrendsQuery {
+            filter: AnalyticsFilter {
+                start_ms: bucket,
+                end_ms: bucket + 3 * HOUR_MS,
+                provider_id: None,
+                device_id: None,
+                tz_offset_minutes: 480,
+                all_time: false,
+            },
+            granularity: TrendGranularity::Auto,
+            dimension: StackDimension::Provider,
+        })
+        .expect("trends");
+    assert_eq!(trends.effective_granularity, TrendGranularity::Hourly);
+
+    // 2. Live speed active within 3m of rollup update, then decays cleanly to empty after 3m.
+    let ov_active = storage
+        .query_overview(
+            &AnalyticsFilter {
+                start_ms: bucket,
+                end_ms: bucket + 120_000,
+                provider_id: None,
+                device_id: None,
+                tz_offset_minutes: 480,
+                all_time: false,
+            },
+            bucket + 120_000,
+        )
+        .expect("ov active");
+    assert_eq!(ov_active.live_model_speeds.len(), 1);
+    let claude_prov = ov_active
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "claude_code")
+        .expect("claude row");
+    assert_eq!(claude_prov.active_window_label.as_deref(), Some("5h 滚动窗口"));
+
+    let ov_idle = storage
+        .query_overview(
+            &AnalyticsFilter {
+                start_ms: bucket,
+                end_ms: bucket + 600_000,
+                provider_id: None,
+                device_id: None,
+                tz_offset_minutes: 480,
+                all_time: false,
+            },
+            bucket + 600_000,
+        )
+        .expect("ov idle");
+    assert!(ov_idle.live_model_speeds.is_empty());
+
+    // 3. Monthly / Statistics query includes remote subscription monthly fee & computes ROI.
+    let monthly = storage
+        .query_monthly(&MonthlyQuery {
+            year: 2026,
+            month: 11,
+            provider_id: None,
+            device_id: None,
+            tz_offset_minutes: 480,
+            start_ms: None,
+            end_ms: None,
+        })
+        .expect("monthly");
+    assert_eq!(monthly.subscription_monthly_fee_micro_usd, 100_000_000);
+    let roi = monthly.roi_multiplier.expect("roi present");
+    assert!((roi - 2.0).abs() < 0.01);
+
+    // 4. Official balance ingest + manual PAYG rollup deduction + envelope export round-trip.
+    let ds_applied = storage
+        .apply_official_balance_payload(
+            "deepseek_harness",
+            "https://api.deepseek.com/user/balance",
+            r#"{"balance_infos":[{"currency":"CNY","total_balance":"42.50","granted_balance":"2.50","topped_up_balance":"40.00"}]}"#,
+            bucket + 65_000,
+        )
+        .expect("ds balance");
+    assert_eq!(ds_applied.balance.total_balance_micro, Some(42_500_000));
+
+    storage
+        .upsert_payg_account(&PaygAccount {
+            account_id: "manual_claude".to_string(),
+            provider_id: "claude_code".to_string(),
+            account_name: "Manual Prepaid".to_string(),
+            enabled: true,
+            manual_balance_micro_usd: Some(300_000_000),
+            balance_anchor_ms: Some(bucket),
+            monthly_budget_micro_usd: None,
+            is_auto: false,
+            updated_at_ms: bucket + 70_000,
+        })
+        .expect("upsert payg");
+    let payg_list = storage
+        .query_payg_accounts(bucket + 120_000, 480)
+        .expect("query payg");
+    let manual = payg_list
+        .iter()
+        .find(|p| p.account.account_id == "manual_claude")
+        .expect("manual payg");
+    assert_eq!(manual.remaining_manual_balance_micro_usd, Some(100_000_000));
+
+    storage
+        .upsert_observed_rate_limits(&[ObservedRateLimitWindow {
+            provider_id: "minimax_code".to_string(),
+            window_name: "5h".to_string(),
+            used_percent: 30.0,
+            window_minutes: Some(300),
+            resets_at_ms: Some(bucket + 5 * HOUR_MS),
+            observed_at_ms: bucket + 65_000,
+            source: Some("official_api".to_string()),
+            plan_hint: Some("MiniMax Coding Plan".to_string()),
+        }])
+        .expect("obs");
+    let env_out = storage
+        .build_sync_envelope_v1(0, bucket + 120_000)
+        .expect("build env");
+    assert!(!env_out.payg_snapshots.is_empty());
 }

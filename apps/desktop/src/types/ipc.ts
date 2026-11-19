@@ -511,6 +511,24 @@ export interface SyncSubscriptionSnapshot {
   used_percent: number;
   resets_at_ms: number | null;
   source: string;
+  monthly_fee_micro_usd?: number;
+}
+
+export interface SyncPaygSnapshot {
+  account_id: string;
+  provider_id: string;
+  account_name: string;
+  enabled: boolean;
+  currency: string | null;
+  total_balance_micro: number | null;
+  granted_balance_micro: number | null;
+  topped_up_balance_micro: number | null;
+  remaining_manual_balance_micro_usd: number | null;
+  monthly_budget_micro_usd: number | null;
+  today_cost_micro_usd: number;
+  month_cost_micro_usd: number;
+  fetched_at_ms: number | null;
+  updated_at_ms: number;
 }
 
 export interface SyncEnvelopeV1 {
@@ -521,6 +539,7 @@ export interface SyncEnvelopeV1 {
   since_watermark_ms: number;
   hourly_deltas: SyncHourlyDelta[];
   subscription_snapshots: SyncSubscriptionSnapshot[];
+  payg_snapshots?: SyncPaygSnapshot[];
 }
 
 export interface CatalogSyncResult {
@@ -702,5 +721,6 @@ export interface RemoteSubscriptionSnapshot {
   used_percent: number;
   resets_at_ms: number | null;
   source: string;
+  monthly_fee_micro_usd?: number;
   updated_at_ms: number;
 }

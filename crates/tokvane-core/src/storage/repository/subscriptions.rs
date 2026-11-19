@@ -430,6 +430,12 @@ impl Storage {
                 }
             }
 
+            let has_raw_events: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM usage_events LIMIT 1)",
+                [],
+                |r| r.get(0),
+            )?;
+
             let mut statuses = Vec::with_capacity(accounts.len());
             for account in accounts {
                 let key = account.provider_id.to_ascii_lowercase();
@@ -440,15 +446,28 @@ impl Storage {
                 let remaining_manual_balance_micro_usd =
                     if let Some(initial) = account.manual_balance_micro_usd {
                         let anchor = account.balance_anchor_ms.unwrap_or(0);
-                        let spent_since: i64 = conn.query_row(
-                            r#"
-                            SELECT COALESCE(SUM(estimated_cost_micro_usd), 0)
-                            FROM usage_events
-                            WHERE LOWER(provider_id) = ?1 AND timestamp_ms >= ?2 AND timestamp_ms <= ?3
-                            "#,
-                            params![key, anchor, now_ms],
-                            |r| r.get(0),
-                        )?;
+                        let spent_since: i64 = if has_raw_events {
+                            conn.query_row(
+                                r#"
+                                SELECT COALESCE(SUM(estimated_cost_micro_usd), 0)
+                                FROM usage_events
+                                WHERE LOWER(provider_id) = ?1 AND timestamp_ms >= ?2 AND timestamp_ms <= ?3
+                                "#,
+                                params![key, anchor, now_ms],
+                                |r| r.get(0),
+                            )?
+                        } else {
+                            let aligned_anchor = anchor.div_euclid(HOUR_MS) * HOUR_MS;
+                            conn.query_row(
+                                r#"
+                                SELECT COALESCE(SUM(estimated_cost_micro_usd), 0)
+                                FROM usage_hourly_rollups
+                                WHERE LOWER(provider_id) = ?1 AND bucket_start_ms >= ?2 AND bucket_start_ms <= ?3
+                                "#,
+                                params![key, aligned_anchor, now_ms],
+                                |r| r.get(0),
+                            )?
+                        };
                         Some(initial - spent_since)
                     } else {
                         None

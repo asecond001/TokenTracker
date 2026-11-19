@@ -684,6 +684,399 @@ final class TokenVaneTests: XCTestCase {
         XCTAssertEqual(store.usdToCnyRate, "7.35")
     }
 
+    func testModelComparisonBuilderAndReceiptModelBuilderAndHeatmap() {
+        let pricing = ModelPricingEntryDTO(
+            modelPattern: "claude-sonnet-4-5",
+            providerId: "claude_code",
+            inputPerMMicroUsd: 3_000_000,
+            outputPerMMicroUsd: 15_000_000,
+            cacheReadPerMMicroUsd: 300_000,
+            cacheWritePerMMicroUsd: 3_750_000,
+            reasoningPerMMicroUsd: 15_000_000,
+            isUserOverride: false,
+            effectiveFrom: "2026-11-18"
+        )
+        let modelStats = ModelStatsReportDTO(
+            rows: [
+                ModelStatRowDTO(
+                    modelId: "claude-sonnet-4-5",
+                    providerId: "claude_code",
+                    requests: 10,
+                    observableSteps: 10,
+                    inputTokens: 100_000,
+                    outputTokens: 50_000,
+                    cacheReadTokens: 300_000,
+                    cacheWriteTokens: 0,
+                    reasoningTokens: 0,
+                    totalTokens: 450_000,
+                    cacheSavedMicroUsd: 500_000,
+                    estimatedCostMicroUsd: 1_140_000,
+                    costShareRatio: 1.0,
+                    avgOutputTps: 60.0,
+                    effectivePricing: pricing
+                )
+            ],
+            totalCostMicroUsd: 1_140_000,
+            totalCacheSavedMicroUsd: 500_000,
+            catalog: [pricing]
+        )
+        let speedReport = SpeedLatencyReportDTO(
+            providers: [
+                ProviderSpeedStatsDTO(
+                    providerId: "claude_code",
+                    sampleCount: 10,
+                    meanTps: 62.5,
+                    p50Tps: 61.0,
+                    p95Tps: 78.0,
+                    maxTps: 84.0,
+                    minTps: 42.0,
+                    avgDurationMs: 2_100.0,
+                    avgTtftMs: 410.0
+                )
+            ],
+            models: [
+                ModelSpeedStatsDTO(
+                    modelId: "claude-sonnet-4-5",
+                    providerId: "claude_code",
+                    sampleCount: 10,
+                    meanTps: 62.5,
+                    p50Tps: 61.0,
+                    p95Tps: 78.0,
+                    maxTps: 84.0,
+                    minTps: 42.0,
+                    latestTps: 64.0,
+                    avgDurationMs: 2_100.0,
+                    avgTtftMs: 410.0
+                ),
+                ModelSpeedStatsDTO(
+                    modelId: "gpt-5.3-codex",
+                    providerId: "codex",
+                    sampleCount: 3,
+                    meanTps: 80.0,
+                    p50Tps: 80.0,
+                    p95Tps: 85.0,
+                    maxTps: 88.0,
+                    minTps: 70.0,
+                    latestTps: 81.0,
+                    avgDurationMs: 1_500.0,
+                    avgTtftMs: nil
+                )
+            ],
+            fromHourlyRollups: false
+        )
+
+        let builtModels = ModelComparisonBuilder.buildModelComparison(models: modelStats, speed: speedReport)
+        XCTAssertEqual(builtModels.count, 2)
+        XCTAssertEqual(builtModels[0].modelId, "claude-sonnet-4-5")
+        XCTAssertEqual(builtModels[0].outputPricePerMMicroUsd, 15_000_000)
+        XCTAssertEqual(builtModels[0].cacheHitRatio ?? 0, 0.75, accuracy: 0.001)
+        XCTAssertEqual(builtModels[1].modelId, "gpt-5.3-codex")
+        XCTAssertNil(builtModels[1].costPerMMicroUsd)
+
+        let sortedAsc = ModelComparisonBuilder.sortComparisonRows(builtModels, key: .costPerMMicroUsd, descending: false)
+        XCTAssertEqual(sortedAsc.last?.modelId, "gpt-5.3-codex")
+        let sortedDesc = ModelComparisonBuilder.sortComparisonRows(builtModels, key: .costPerMMicroUsd, descending: true)
+        XCTAssertEqual(sortedDesc.last?.modelId, "gpt-5.3-codex")
+
+        let providers = ModelComparisonBuilder.buildProviderComparison(rows: builtModels, speed: speedReport, models: modelStats)
+        XCTAssertEqual(providers.count, 2)
+        XCTAssertEqual(providers.first?.providerId, "claude_code")
+        XCTAssertEqual(providers.first?.costShare ?? 0, 1.0, accuracy: 0.001)
+
+        let shares: [UsageShareItemDTO] = (1...10).map { idx in
+            UsageShareItemDTO(
+                key: "model-\(idx)",
+                label: "Model \(idx)",
+                tokens: Int64(idx * 10_000),
+                tokenSharePercent: 10.0,
+                costMicroUsd: Int64(idx * 1_000_000),
+                costSharePercent: 10.0
+            )
+        }
+        let report = MonthlyReportDTO(
+            year: 2026,
+            month: 11,
+            apiEquivalentCostMicroUsd: 55_000_000,
+            subscriptionMonthlyFeeMicroUsd: 20_000_000,
+            roiMultiplier: 2.75,
+            monthTotalTokens: 550_000,
+            monthTotalRequests: 42,
+            monthCacheSavedMicroUsd: 3_000_000,
+            providerShares: [],
+            modelShares: shares,
+            dailyLedger: [
+                MonthlyDailyLedgerRowDTO(
+                    date: "2026-11-17",
+                    requests: 20,
+                    observableSteps: 20,
+                    inputTokens: 100_000,
+                    outputTokens: 20_000,
+                    cacheReadTokens: 80_000,
+                    cacheWriteTokens: 0,
+                    reasoningTokens: 0,
+                    totalTokens: 200_000,
+                    costMicroUsd: 20_000_000,
+                    cacheSavedMicroUsd: 1_000_000,
+                    topModel: "model-10"
+                ),
+                MonthlyDailyLedgerRowDTO(
+                    date: "2026-11-18",
+                    requests: 22,
+                    observableSteps: 22,
+                    inputTokens: 150_000,
+                    outputTokens: 30_000,
+                    cacheReadTokens: 170_000,
+                    cacheWriteTokens: 0,
+                    reasoningTokens: 0,
+                    totalTokens: 350_000,
+                    costMicroUsd: 35_000_000,
+                    cacheSavedMicroUsd: 2_000_000,
+                    topModel: "model-10"
+                )
+            ],
+            heatmap365d: [
+                HeatmapDayCellDTO(date: "2026-11-15", totalTokens: 0, costMicroUsd: 0, requests: 0, topModel: nil),
+                HeatmapDayCellDTO(date: "2026-11-16", totalTokens: 1_000, costMicroUsd: 100, requests: 1, topModel: nil),
+                HeatmapDayCellDTO(date: "2026-11-17", totalTokens: 200_000, costMicroUsd: 20_000_000, requests: 20, topModel: nil),
+                HeatmapDayCellDTO(date: "2026-11-18", totalTokens: 350_000, costMicroUsd: 35_000_000, requests: 22, topModel: nil)
+            ],
+            rangeStartMs: nil,
+            rangeEndMs: nil,
+            subscriptionPeriodFeeMicroUsd: 20_000_000
+        )
+
+        let receipt = ReceiptModelBuilder.buildReceiptModel(
+            report: report,
+            currency: "USD",
+            usdToCnyRate: "7.25",
+            periodLabel: "2026-11"
+        )
+        XCTAssertEqual(receipt.fileName, "tokenvane-receipt-2026-11.png")
+        XCTAssertTrue(receipt.lines.contains {
+            if case .row(let left, let right, _) = $0 {
+                return left == L10n.tr("receipt.order_no", default: "单号") && right.hasPrefix("TV202611-")
+            }
+            return false
+        })
+        XCTAssertTrue(receipt.lines.contains {
+            if case .item(let left, _, _) = $0 {
+                return left.contains("2")
+            }
+            return false
+        })
+        XCTAssertEqual(ReceiptModelBuilder.longestActiveStreak(report: report), 2)
+
+        let levels = ReceiptModelBuilder.computeHeatmapIntensityLevels(report.heatmap365d)
+        XCTAssertEqual(levels["2026-11-15"], 0)
+        XCTAssertEqual(levels["2026-11-18"], 4)
+    }
+
+    func testPairingURIGeneratorAndExtendedKeychainAccounts() throws {
+        let uri = DesktopPairingPayload.makePairingURI(
+            url: "https://sync.example.workers.dev/",
+            token: "tok-abc",
+            e2ee: true,
+            key: "pass-xyz"
+        )
+        let uriString = try XCTUnwrap(uri)
+        let reparsed = try DesktopPairingPayload.parse(uriString)
+        XCTAssertEqual(reparsed.url, "https://sync.example.workers.dev")
+        XCTAssertEqual(reparsed.token, "tok-abc")
+        XCTAssertTrue(reparsed.e2ee)
+        XCTAssertEqual(reparsed.key, "pass-xyz")
+
+        let store = InMemorySecretStore()
+        try store.saveSecret("cf-secret", account: .cloudflareApiToken)
+        try store.saveSecret("ds-key", account: .providerApiKey("acct-1"))
+        XCTAssertEqual(try store.loadSecret(account: .cloudflareApiToken), "cf-secret")
+        XCTAssertEqual(try store.loadSecret(account: .providerApiKey("acct-1")), "ds-key")
+    }
+
+    func testCoreClientNewFFIMethodsRoundTrip() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let actor = try CoreClientActor(
+            dbPath: tempDir.appendingPathComponent("ffi-parity.sqlite").path,
+            localDeviceName: "iPhone-FFI",
+            snapshotURL: tempDir.appendingPathComponent("snap.json")
+        )
+
+        let pricingEntry = ModelPricingEntryDTO(
+            modelPattern: "custom-fast-model",
+            providerId: "deepseek_harness",
+            inputPerMMicroUsd: 1_000_000,
+            outputPerMMicroUsd: 2_000_000,
+            cacheReadPerMMicroUsd: 100_000,
+            cacheWritePerMMicroUsd: 0,
+            reasoningPerMMicroUsd: 2_000_000,
+            isUserOverride: true,
+            effectiveFrom: "2026-11-18"
+        )
+        try await actor.upsertModelPricing(pricingEntry)
+        let afterUpsert = try await actor.queryModelsPricing(filter: AnalyticsFilterDTO(startMs: 0, endMs: 9_999_999_999_999, allTime: true))
+        XCTAssertTrue(afterUpsert.catalog.contains { $0.modelPattern == "custom-fast-model" && $0.isUserOverride })
+        try await actor.deleteModelPricingOverride(modelPattern: "custom-fast-model")
+
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let account = PaygAccountDTO(
+            accountId: "payg-ds-1",
+            providerId: "deepseek_harness",
+            accountName: "DeepSeek Test",
+            enabled: true,
+            manualBalanceMicroUsd: 5_000_000,
+            balanceAnchorMs: nowMs,
+            monthlyBudgetMicroUsd: 20_000_000,
+            isAuto: false,
+            updatedAtMs: nowMs
+        )
+        try await actor.upsertPaygAccount(account)
+
+        let dsBody = #"{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"68.50","granted_balance":"10.00","topped_up_balance":"58.50"}]}"#
+        let applied = try await actor.applyOfficialBalancePayload(
+            providerId: "deepseek_harness",
+            endpoint: "https://api.deepseek.com/user/balance",
+            bodyJSON: dsBody,
+            nowMs: nowMs
+        )
+        XCTAssertEqual(applied.balance.currency, "CNY")
+        XCTAssertEqual(applied.balance.totalBalanceMicro, 68_500_000)
+
+        let paygList = try await actor.queryPaygAccounts(nowMs: nowMs)
+        XCTAssertEqual(paygList.count, 1)
+        XCTAssertEqual(paygList.first?.officialBalance?.totalBalanceMicro, 68_500_000)
+        try await actor.deletePaygAccount(accountId: "payg-ds-1")
+        let afterDeletePayg = try await actor.queryPaygAccounts(nowMs: nowMs)
+        XCTAssertTrue(afterDeletePayg.isEmpty)
+
+        let templates = try await actor.listSubscriptionTemplates(nowMs: nowMs)
+        XCTAssertFalse(templates.isEmpty)
+
+        let plan = SubscriptionPlanDTO(
+            planId: "plan-ios-test",
+            providerId: "claude_code",
+            planName: "Claude Pro Test",
+            enabled: true,
+            monthlyFeeMicroUsd: 20_000_000,
+            windows: [
+                SubscriptionWindowRuleDTO(
+                    windowId: "5h",
+                    label: "5h 滚动",
+                    durationHours: 5,
+                    rolling: true,
+                    unit: "micro_usd",
+                    limitValue: 5_000_000
+                )
+            ],
+            isUserConfigured: true,
+            autoSource: nil,
+            updatedAtMs: nowMs
+        )
+        try await actor.upsertSubscriptionPlan(plan)
+        let localSubs = try await actor.queryLocalSubscriptions(nowMs: nowMs)
+        XCTAssertEqual(localSubs.count, 1)
+        try await actor.deleteSubscriptionPlan(planId: "plan-ios-test")
+        let afterDeleteSubs = try await actor.queryLocalSubscriptions(nowMs: nowMs)
+        XCTAssertTrue(afterDeleteSubs.isEmpty)
+
+        let bundle = try await actor.buildWorkerUploadBundle(
+            workerName: "custom-mobile-worker",
+            bearerToken: "tok-mobile-1234567890",
+            e2eeEnabled: true,
+            e2eePassphrase: "pass-mobile-1234",
+            includeMigration: true
+        )
+        XCTAssertEqual(bundle.workerName, "custom-mobile-worker")
+        XCTAssertTrue(bundle.contentType.hasPrefix("multipart/form-data; boundary="))
+        XCTAssertNotNil(Data(base64Encoded: bundle.multipartBodyBase64))
+    }
+
+    @MainActor
+    func testSyncCoordinatorCloudflareWorkerProvisioningWithMigrationRetry() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let actor = try CoreClientActor(
+            dbPath: tempDir.appendingPathComponent("provision.sqlite").path,
+            localDeviceName: "iPhone-Provision",
+            snapshotURL: tempDir.appendingPathComponent("snap.json")
+        )
+        let secrets = InMemorySecretStore()
+        let mockId = "cf-\(UUID().uuidString)"
+        let scriptPutAttempts = AtomicCounter()
+
+        MockProtocolRegistry.shared.setHandler(id: mockId) { req in
+            let url = req.url?.absoluteString ?? ""
+            let method = req.httpMethod ?? "GET"
+            let resp200 = { (obj: Any) -> (HTTPURLResponse, Data) in
+                let data = try JSONSerialization.data(withJSONObject: obj)
+                return (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+            }
+
+            if url.contains("/client/v4/accounts?per_page=5") {
+                return try resp200(["success": true, "result": [["id": "acc1234567890"]]])
+            }
+            if url.hasSuffix("/workers/subdomain") && method == "GET" {
+                return try resp200(["success": true, "result": ["subdomain": "myteam"]])
+            }
+            if url.hasSuffix("/workers/scripts/tokenvane-sync-worker/settings") {
+                return (HTTPURLResponse(url: req.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+            }
+            if url.hasSuffix("/workers/scripts/tokenvane-sync-worker") && method == "PUT" {
+                let attempt = scriptPutAttempts.incrementAndGet()
+                if attempt == 1 {
+                    let errData = Data(#"{"success":false,"errors":[{"code":10079,"message":"migration already applied"}]}"#.utf8)
+                    return (HTTPURLResponse(url: req.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!, errData)
+                }
+                return try resp200(["success": true, "result": ["id": "tokenvane-sync-worker"]])
+            }
+            if url.hasSuffix("/workers/scripts/tokenvane-sync-worker/subdomain") && method == "POST" {
+                return try resp200(["success": true, "result": ["enabled": true]])
+            }
+            if url.contains("/v1/sync/pull") {
+                return try resp200([
+                    "ok": true,
+                    "server_seq_ms": 10,
+                    "next_since_ms": 11,
+                    "has_more": false,
+                    "items": []
+                ])
+            }
+            return (HTTPURLResponse(url: req.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+        }
+        defer { MockProtocolRegistry.shared.setHandler(id: mockId, handler: nil) }
+
+        @MainActor final class StepLog {
+            var steps: [CloudSyncProvisionStep] = []
+        }
+        let stepLog = StepLog()
+        let coordinator = SyncCoordinator(core: actor, secrets: secrets, session: makeMockSession(id: mockId))
+        let outcome = try await coordinator.provisionCloudflareWorker(
+            workerName: "tokenvane-sync-worker",
+            cfApiToken: "cf-tok-secret",
+            cfAccountId: nil,
+            bearerToken: "bearer-custom-tok",
+            e2eeEnabled: true,
+            e2eePassphrase: "pass-custom-e2ee",
+            onProgress: { step in
+                stepLog.steps.append(step)
+            }
+        )
+
+        XCTAssertEqual(scriptPutAttempts.get(), 2)
+        XCTAssertEqual(outcome.workerURL, "https://tokenvane-sync-worker.myteam.workers.dev")
+        XCTAssertTrue(outcome.initialSyncOK)
+        XCTAssertEqual(stepLog.steps, CloudSyncProvisionStep.allCases)
+        XCTAssertEqual(try secrets.loadSecret(account: .cloudflareApiToken), "cf-tok-secret")
+        XCTAssertEqual(try secrets.loadSecret(account: .syncBearerToken), "bearer-custom-tok")
+        XCTAssertEqual(try secrets.loadSecret(account: .e2eePassphrase), "pass-custom-e2ee")
+
+        let reparsedPairing = try DesktopPairingPayload.parse(outcome.pairingURI)
+        XCTAssertEqual(reparsedPairing.url, "https://tokenvane-sync-worker.myteam.workers.dev")
+        XCTAssertEqual(reparsedPairing.token, "bearer-custom-tok")
+        XCTAssertEqual(reparsedPairing.key, "pass-custom-e2ee")
+    }
+
     private func encryptEnvelopeForTest(
         innerEnvelope: [String: Any],
         deviceId: String,

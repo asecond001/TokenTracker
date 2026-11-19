@@ -41,7 +41,7 @@ final class TokenVaneUITests: XCTestCase {
         XCTAssertTrue(app.buttons["global.currencyToggle"].waitForExistence(timeout: 3))
 
         // Switch across main sections (works on iPhone TabBar or iPad Sidebar)
-        for label in ["趋势", "订阅", "设置", "概览"] {
+        for label in ["趋势", "模型", "订阅", "设置", "概览"] {
             let tabButton = app.tabBars.buttons[label]
             if tabButton.exists {
                 tabButton.tap()

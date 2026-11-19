@@ -10,11 +10,11 @@ use crate::domain::{
     is_valid_tps_sample, provider_ids, sanitize_session_title, AppPreferences, CollectionMode,
     CurrencyCode, CustomProtocolKind, CustomProviderRule, DeclarativeMappingSpec, DeviceRecord,
     IngestionCursor, ModelPricingEntry, NormalizedUsageEvent, ObservedRateLimitWindow, PaygAccount,
-    PaygAccountStatus, ProviderBalanceSnapshot, ProviderConfig, QuotaUnit,
+    PaygAccountStatus, ProviderBalanceSnapshot, ProviderConfig, QuotaUnit, RemotePaygSnapshot,
     RemoteSubscriptionSnapshot, RemoteSyncApplyResult, SessionTitleRecord, SubscriptionPlan,
     SubscriptionPlanTemplate, SubscriptionWindowRule, SyncConfigState, SyncEnvelopeV1,
-    SyncHourlyDelta, SyncSubscriptionSnapshot, MAX_VALID_OUTPUT_TPS, MIN_VALID_TPS_DURATION_MS,
-    MIN_VALID_TPS_OUTPUT_TOKENS,
+    SyncHourlyDelta, SyncPaygSnapshot, SyncSubscriptionSnapshot, MAX_VALID_OUTPUT_TPS,
+    MIN_VALID_TPS_DURATION_MS, MIN_VALID_TPS_OUTPUT_TOKENS,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::pricing::{
@@ -243,7 +243,7 @@ pub(crate) fn configure_connection(conn: &Connection, enable_wal: bool) -> CoreR
 
 pub(crate) fn query_local_device(conn: &Connection) -> CoreResult<DeviceRecord> {
     conn.query_row(
-        "SELECT device_id, device_name, platform, created_at_ms FROM devices ORDER BY created_at_ms ASC LIMIT 1",
+        "SELECT device_id, device_name, platform, created_at_ms FROM devices WHERE platform != 'remote' ORDER BY created_at_ms ASC LIMIT 1",
         [],
         |row| {
             Ok(DeviceRecord {

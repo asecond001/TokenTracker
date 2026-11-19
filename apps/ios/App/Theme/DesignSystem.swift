@@ -122,3 +122,157 @@ public struct LinearProgressStrip: View {
         .frame(height: 5)
     }
 }
+
+public struct DeltaBadge: View {
+    public let percent: Double?
+    public let prefix: String
+
+    public init(percent: Double?, prefix: String = L10n.tr("delta.vs_yesterday", default: "较昨日")) {
+        self.percent = percent
+        self.prefix = prefix
+    }
+
+    public var body: some View {
+        if let percent, percent.isFinite {
+            let positive = percent >= 0
+            let sign = positive ? "+" : ""
+            let formatted = String(format: "%@%.1f%%", locale: Locale(identifier: "en_US_POSIX"), sign, percent)
+            Text("\(prefix) \(formatted)")
+                .font(.caption2.weight(.medium))
+                .tabularMetrics()
+                .foregroundStyle(positive ? SemanticColors.statusLive : SemanticColors.statusDanger)
+                .lineLimit(1)
+        } else {
+            Text("\(prefix) —")
+                .font(.caption2)
+                .tabularMetrics()
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+}
+
+public struct BackdropPresetOption: Equatable, Identifiable, Sendable {
+    public let id: String
+    public let title: String
+    public let subtitle: String
+    public let darkStops: [Color]
+    public let lightStops: [Color]
+
+    public static let allPresets: [BackdropPresetOption] = [
+        BackdropPresetOption(
+            id: "aurora_slate",
+            title: L10n.tr("backdrop.aurora_slate.title", default: "极光石板"),
+            subtitle: L10n.tr("backdrop.aurora_slate.subtitle", default: "靛蓝 / 翠绿冷调微光"),
+            darkStops: [
+                Color(red: 0.388, green: 0.400, blue: 0.945, opacity: 0.85),
+                Color(red: 0.063, green: 0.725, blue: 0.506, opacity: 0.62),
+                Color(red: 0.220, green: 0.741, blue: 0.973, opacity: 0.44)
+            ],
+            lightStops: [
+                Color(red: 0.310, green: 0.275, blue: 0.898, opacity: 0.42),
+                Color(red: 0.020, green: 0.588, blue: 0.412, opacity: 0.34),
+                Color(red: 0.008, green: 0.518, blue: 0.780, opacity: 0.28)
+            ]
+        ),
+        BackdropPresetOption(
+            id: "obsidian_mist",
+            title: L10n.tr("backdrop.obsidian_mist.title", default: "黑曜薄雾"),
+            subtitle: L10n.tr("backdrop.obsidian_mist.subtitle", default: "灰紫 / 岩灰低饱和雾光"),
+            darkStops: [
+                Color(red: 0.545, green: 0.361, blue: 0.965, opacity: 0.68),
+                Color(red: 0.392, green: 0.455, blue: 0.545, opacity: 0.78),
+                Color(red: 0.278, green: 0.333, blue: 0.412, opacity: 0.62)
+            ],
+            lightStops: [
+                Color(red: 0.427, green: 0.157, blue: 0.851, opacity: 0.32),
+                Color(red: 0.392, green: 0.455, blue: 0.545, opacity: 0.42),
+                Color(red: 0.580, green: 0.639, blue: 0.722, opacity: 0.46)
+            ]
+        ),
+        BackdropPresetOption(
+            id: "nordic_frost",
+            title: L10n.tr("backdrop.nordic_frost.title", default: "北欧霜蓝"),
+            subtitle: L10n.tr("backdrop.nordic_frost.subtitle", default: "冰青 / 钴蓝清冽视域"),
+            darkStops: [
+                Color(red: 0.220, green: 0.741, blue: 0.973, opacity: 0.76),
+                Color(red: 0.231, green: 0.510, blue: 0.965, opacity: 0.68),
+                Color(red: 0.580, green: 0.639, blue: 0.722, opacity: 0.40)
+            ],
+            lightStops: [
+                Color(red: 0.008, green: 0.518, blue: 0.780, opacity: 0.38),
+                Color(red: 0.145, green: 0.388, blue: 0.922, opacity: 0.32),
+                Color(red: 0.055, green: 0.647, blue: 0.914, opacity: 0.24)
+            ]
+        ),
+        BackdropPresetOption(
+            id: "amber_dusk",
+            title: L10n.tr("backdrop.amber_dusk.title", default: "琥珀暮光"),
+            subtitle: L10n.tr("backdrop.amber_dusk.subtitle", default: "暖金 / 霞红克制氛围"),
+            darkStops: [
+                Color(red: 0.961, green: 0.620, blue: 0.043, opacity: 0.72),
+                Color(red: 0.957, green: 0.247, blue: 0.369, opacity: 0.52),
+                Color(red: 0.388, green: 0.400, blue: 0.945, opacity: 0.42)
+            ],
+            lightStops: [
+                Color(red: 0.851, green: 0.467, blue: 0.024, opacity: 0.38),
+                Color(red: 0.882, green: 0.114, blue: 0.282, opacity: 0.26),
+                Color(red: 0.310, green: 0.275, blue: 0.898, opacity: 0.22)
+            ]
+        )
+    ]
+
+    public static func resolve(_ id: String?) -> BackdropPresetOption {
+        allPresets.first(where: { $0.id == id }) ?? allPresets[0]
+    }
+}
+
+public struct WorkspaceBackdropView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    public let mode: String
+    public let presetId: String
+    public let opacity: Double
+
+    public init(mode: String, presetId: String, opacity: Double) {
+        self.mode = mode
+        self.presetId = presetId
+        self.opacity = opacity
+    }
+
+    public var body: some View {
+        let clampedOpacity = min(0.6, max(0.0, opacity.isFinite ? opacity : 0.18))
+        let preset = BackdropPresetOption.resolve(presetId)
+        let stops = colorScheme == .dark ? preset.darkStops : preset.lightStops
+
+        ZStack {
+            SemanticColors.surfacePrimary
+            if mode == "gradient" && clampedOpacity > 0.005 {
+                GeometryReader { geo in
+                    ZStack {
+                        RadialGradient(
+                            colors: [stops[0], stops[0].opacity(0)],
+                            center: UnitPoint(x: 0.14, y: 0.08),
+                            startRadius: 0,
+                            endRadius: max(geo.size.width, geo.size.height) * 0.65
+                        )
+                        RadialGradient(
+                            colors: [stops[1], stops[1].opacity(0)],
+                            center: UnitPoint(x: 0.86, y: 0.14),
+                            startRadius: 0,
+                            endRadius: max(geo.size.width, geo.size.height) * 0.58
+                        )
+                        RadialGradient(
+                            colors: [stops[2], stops[2].opacity(0)],
+                            center: UnitPoint(x: 0.52, y: 0.94),
+                            startRadius: 0,
+                            endRadius: max(geo.size.width, geo.size.height) * 0.68
+                        )
+                    }
+                    .opacity(clampedOpacity)
+                }
+            }
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+    }
+}

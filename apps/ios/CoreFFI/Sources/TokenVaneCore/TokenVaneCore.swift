@@ -532,9 +532,23 @@ public protocol MobileCoreEngineProtocol : AnyObject {
     
     func applyExchangeRatePayload(source: String, bodyJson: String, nowMs: Int64) throws  -> Double
     
+    func applyOfficialBalancePayloadJson(providerId: String, endpoint: String, bodyJson: String, nowMs: Int64) throws  -> String
+    
+    func applyPricingCatalogPayload(source: String, bodyJson: String, effectiveDate: String, nowMs: Int64) throws  -> UInt64
+    
+    func applySubscriptionCatalogPayload(bodyJson: String, nowMs: Int64) throws  -> UInt64
+    
     func buildWidgetSnapshotJson(nowMs: Int64, tzOffsetMinutes: Int32) throws  -> String
     
+    func buildWorkerUploadBundleJson(workerName: String?, bearerToken: String?, e2eeEnabled: Bool, e2eePassphrase: String?, includeMigration: Bool) throws  -> String
+    
     func checkpointForSuspend() throws 
+    
+    func deleteModelPricingOverride(modelPattern: String) throws 
+    
+    func deletePaygAccount(accountId: String) throws 
+    
+    func deleteSubscriptionPlan(planId: String) throws 
     
     func exportMonthlyReport(queryJson: String, format: String) throws  -> String
     
@@ -542,11 +556,17 @@ public protocol MobileCoreEngineProtocol : AnyObject {
     
     func ingestPullResponseJson(pullBodyJson: String, e2eePassphrase: String?, nowMs: Int64) throws  -> FfiSyncIngestOutcome
     
+    func listSubscriptionTemplatesJson(nowMs: Int64) throws  -> String
+    
+    func queryLocalSubscriptionsJson(nowMs: Int64, tzOffsetMinutes: Int32) throws  -> String
+    
     func queryModelsPricingJson(filterJson: String) throws  -> String
     
     func queryMonthlyJson(queryJson: String) throws  -> String
     
     func queryOverviewJson(filterJson: String, nowMs: Int64) throws  -> String
+    
+    func queryPaygAccountsJson(nowMs: Int64, tzOffsetMinutes: Int32) throws  -> String
     
     func queryRemoteSubscriptionsJson() throws  -> String
     
@@ -559,6 +579,12 @@ public protocol MobileCoreEngineProtocol : AnyObject {
     func updateMobilePreferencesJson(patchJson: String, nowMs: Int64) throws  -> String
     
     func updateSyncConfig(enabled: Bool, workerUrl: String?, e2eeEnabled: Bool, nowMs: Int64) throws  -> String
+    
+    func upsertModelPricingJson(entryJson: String) throws 
+    
+    func upsertPaygAccountJson(accountJson: String) throws 
+    
+    func upsertSubscriptionPlanJson(planJson: String) throws 
     
 }
 
@@ -631,6 +657,37 @@ open func applyExchangeRatePayload(source: String, bodyJson: String, nowMs: Int6
 })
 }
     
+open func applyOfficialBalancePayloadJson(providerId: String, endpoint: String, bodyJson: String, nowMs: Int64)throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_tokvane_ffi_fn_method_mobilecoreengine_apply_official_balance_payload_json(self.uniffiClonePointer(),
+        FfiConverterString.lower(providerId),
+        FfiConverterString.lower(endpoint),
+        FfiConverterString.lower(bodyJson),
+        FfiConverterInt64.lower(nowMs),$0
+    )
+})
+}
+    
+open func applyPricingCatalogPayload(source: String, bodyJson: String, effectiveDate: String, nowMs: Int64)throws  -> UInt64 {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_tokvane_ffi_fn_method_mobilecoreengine_apply_pricing_catalog_payload(self.uniffiClonePointer(),
+        FfiConverterString.lower(source),
+        FfiConverterString.lower(bodyJson),
+        FfiConverterString.lower(effectiveDate),
+        FfiConverterInt64.lower(nowMs),$0
+    )
+})
+}
+    
+open func applySubscriptionCatalogPayload(bodyJson: String, nowMs: Int64)throws  -> UInt64 {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_tokvane_ffi_fn_method_mobilecoreengine_apply_subscription_catalog_payload(self.uniffiClonePointer(),
+        FfiConverterString.lower(bodyJson),
+        FfiConverterInt64.lower(nowMs),$0
+    )
+})
+}
+    
 open func buildWidgetSnapshotJson(nowMs: Int64, tzOffsetMinutes: Int32)throws  -> String {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError.lift) {
     uniffi_tokvane_ffi_fn_method_mobilecoreengine_build_widget_snapshot_json(self.uniffiClonePointer(),
@@ -640,8 +697,41 @@ open func buildWidgetSnapshotJson(nowMs: Int64, tzOffsetMinutes: Int32)throws  -
 })
 }
     
+open func buildWorkerUploadBundleJson(workerName: String?, bearerToken: String?, e2eeEnabled: Bool, e2eePassphrase: String?, includeMigration: Bool)throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_tokvane_ffi_fn_method_mobilecoreengine_build_worker_upload_bundle_json(self.uniffiClonePointer(),
+        FfiConverterOptionString.lower(workerName),
+        FfiConverterOptionString.lower(bearerToken),
+        FfiConverterBool.lower(e2eeEnabled),
+        FfiConverterOptionString.lower(e2eePassphrase),
+        FfiConverterBool.lower(includeMigration),$0
+    )
+})
+}
+    
 open func checkpointForSuspend()throws  {try rustCallWithError(FfiConverterTypeFfiError.lift) {
     uniffi_tokvane_ffi_fn_method_mobilecoreengine_checkpoint_for_suspend(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
+open func deleteModelPricingOverride(modelPattern: String)throws  {try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_tokvane_ffi_fn_method_mobilecoreengine_delete_model_pricing_override(self.uniffiClonePointer(),
+        FfiConverterString.lower(modelPattern),$0
+    )
+}
+}
+    
+open func deletePaygAccount(accountId: String)throws  {try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_tokvane_ffi_fn_method_mobilecoreengine_delete_payg_account(self.uniffiClonePointer(),
+        FfiConverterString.lower(accountId),$0
+    )
+}
+}
+    
+open func deleteSubscriptionPlan(planId: String)throws  {try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_tokvane_ffi_fn_method_mobilecoreengine_delete_subscription_plan(self.uniffiClonePointer(),
+        FfiConverterString.lower(planId),$0
     )
 }
 }
@@ -674,6 +764,23 @@ open func ingestPullResponseJson(pullBodyJson: String, e2eePassphrase: String?, 
 })
 }
     
+open func listSubscriptionTemplatesJson(nowMs: Int64)throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_tokvane_ffi_fn_method_mobilecoreengine_list_subscription_templates_json(self.uniffiClonePointer(),
+        FfiConverterInt64.lower(nowMs),$0
+    )
+})
+}
+    
+open func queryLocalSubscriptionsJson(nowMs: Int64, tzOffsetMinutes: Int32)throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_tokvane_ffi_fn_method_mobilecoreengine_query_local_subscriptions_json(self.uniffiClonePointer(),
+        FfiConverterInt64.lower(nowMs),
+        FfiConverterInt32.lower(tzOffsetMinutes),$0
+    )
+})
+}
+    
 open func queryModelsPricingJson(filterJson: String)throws  -> String {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError.lift) {
     uniffi_tokvane_ffi_fn_method_mobilecoreengine_query_models_pricing_json(self.uniffiClonePointer(),
@@ -695,6 +802,15 @@ open func queryOverviewJson(filterJson: String, nowMs: Int64)throws  -> String {
     uniffi_tokvane_ffi_fn_method_mobilecoreengine_query_overview_json(self.uniffiClonePointer(),
         FfiConverterString.lower(filterJson),
         FfiConverterInt64.lower(nowMs),$0
+    )
+})
+}
+    
+open func queryPaygAccountsJson(nowMs: Int64, tzOffsetMinutes: Int32)throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_tokvane_ffi_fn_method_mobilecoreengine_query_payg_accounts_json(self.uniffiClonePointer(),
+        FfiConverterInt64.lower(nowMs),
+        FfiConverterInt32.lower(tzOffsetMinutes),$0
     )
 })
 }
@@ -748,6 +864,27 @@ open func updateSyncConfig(enabled: Bool, workerUrl: String?, e2eeEnabled: Bool,
         FfiConverterInt64.lower(nowMs),$0
     )
 })
+}
+    
+open func upsertModelPricingJson(entryJson: String)throws  {try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_tokvane_ffi_fn_method_mobilecoreengine_upsert_model_pricing_json(self.uniffiClonePointer(),
+        FfiConverterString.lower(entryJson),$0
+    )
+}
+}
+    
+open func upsertPaygAccountJson(accountJson: String)throws  {try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_tokvane_ffi_fn_method_mobilecoreengine_upsert_payg_account_json(self.uniffiClonePointer(),
+        FfiConverterString.lower(accountJson),$0
+    )
+}
+}
+    
+open func upsertSubscriptionPlanJson(planJson: String)throws  {try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_tokvane_ffi_fn_method_mobilecoreengine_upsert_subscription_plan_json(self.uniffiClonePointer(),
+        FfiConverterString.lower(planJson),$0
+    )
+}
 }
     
 
@@ -810,6 +947,7 @@ public struct FfiSyncIngestOutcome {
     public var envelopesApplied: UInt64
     public var hourlyBucketsApplied: UInt64
     public var subscriptionSnapshotsApplied: UInt64
+    public var paygSnapshotsApplied: UInt64
     public var nextSinceMs: Int64
     public var serverSeqMs: Int64
     public var hasMore: Bool
@@ -817,11 +955,12 @@ public struct FfiSyncIngestOutcome {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(itemsReceived: UInt64, envelopesApplied: UInt64, hourlyBucketsApplied: UInt64, subscriptionSnapshotsApplied: UInt64, nextSinceMs: Int64, serverSeqMs: Int64, hasMore: Bool, appliedDeviceIds: [String]) {
+    public init(itemsReceived: UInt64, envelopesApplied: UInt64, hourlyBucketsApplied: UInt64, subscriptionSnapshotsApplied: UInt64, paygSnapshotsApplied: UInt64, nextSinceMs: Int64, serverSeqMs: Int64, hasMore: Bool, appliedDeviceIds: [String]) {
         self.itemsReceived = itemsReceived
         self.envelopesApplied = envelopesApplied
         self.hourlyBucketsApplied = hourlyBucketsApplied
         self.subscriptionSnapshotsApplied = subscriptionSnapshotsApplied
+        self.paygSnapshotsApplied = paygSnapshotsApplied
         self.nextSinceMs = nextSinceMs
         self.serverSeqMs = serverSeqMs
         self.hasMore = hasMore
@@ -845,6 +984,9 @@ extension FfiSyncIngestOutcome: Equatable, Hashable {
         if lhs.subscriptionSnapshotsApplied != rhs.subscriptionSnapshotsApplied {
             return false
         }
+        if lhs.paygSnapshotsApplied != rhs.paygSnapshotsApplied {
+            return false
+        }
         if lhs.nextSinceMs != rhs.nextSinceMs {
             return false
         }
@@ -865,6 +1007,7 @@ extension FfiSyncIngestOutcome: Equatable, Hashable {
         hasher.combine(envelopesApplied)
         hasher.combine(hourlyBucketsApplied)
         hasher.combine(subscriptionSnapshotsApplied)
+        hasher.combine(paygSnapshotsApplied)
         hasher.combine(nextSinceMs)
         hasher.combine(serverSeqMs)
         hasher.combine(hasMore)
@@ -884,6 +1027,7 @@ public struct FfiConverterTypeFfiSyncIngestOutcome: FfiConverterRustBuffer {
                 envelopesApplied: FfiConverterUInt64.read(from: &buf), 
                 hourlyBucketsApplied: FfiConverterUInt64.read(from: &buf), 
                 subscriptionSnapshotsApplied: FfiConverterUInt64.read(from: &buf), 
+                paygSnapshotsApplied: FfiConverterUInt64.read(from: &buf), 
                 nextSinceMs: FfiConverterInt64.read(from: &buf), 
                 serverSeqMs: FfiConverterInt64.read(from: &buf), 
                 hasMore: FfiConverterBool.read(from: &buf), 
@@ -896,6 +1040,7 @@ public struct FfiConverterTypeFfiSyncIngestOutcome: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.envelopesApplied, into: &buf)
         FfiConverterUInt64.write(value.hourlyBucketsApplied, into: &buf)
         FfiConverterUInt64.write(value.subscriptionSnapshotsApplied, into: &buf)
+        FfiConverterUInt64.write(value.paygSnapshotsApplied, into: &buf)
         FfiConverterInt64.write(value.nextSinceMs, into: &buf)
         FfiConverterInt64.write(value.serverSeqMs, into: &buf)
         FfiConverterBool.write(value.hasMore, into: &buf)
@@ -1070,10 +1215,31 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_apply_exchange_rate_payload() != 1852) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_apply_official_balance_payload_json() != 45584) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_apply_pricing_catalog_payload() != 54767) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_apply_subscription_catalog_payload() != 9899) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_build_widget_snapshot_json() != 1118) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_build_worker_upload_bundle_json() != 61824) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_checkpoint_for_suspend() != 33368) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_delete_model_pricing_override() != 5021) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_delete_payg_account() != 38411) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_delete_subscription_plan() != 7734) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_export_monthly_report() != 53182) {
@@ -1085,6 +1251,12 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_ingest_pull_response_json() != 594) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_list_subscription_templates_json() != 57367) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_query_local_subscriptions_json() != 50640) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_query_models_pricing_json() != 43439) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1092,6 +1264,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_query_overview_json() != 61834) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_query_payg_accounts_json() != 23172) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_query_remote_subscriptions_json() != 62039) {
@@ -1110,6 +1285,15 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_update_sync_config() != 2058) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_upsert_model_pricing_json() != 18573) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_upsert_payg_account_json() != 52715) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tokvane_ffi_checksum_method_mobilecoreengine_upsert_subscription_plan_json() != 14004) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tokvane_ffi_checksum_constructor_mobilecoreengine_open() != 7700) {

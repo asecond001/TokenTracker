@@ -11,7 +11,23 @@ private enum AnalyticsSubMode: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .trends: return L10n.tr("analytics.mode.trends", default: "趋势")
-        case .monthly: return L10n.tr("analytics.mode.monthly", default: "月报")
+        case .monthly: return L10n.tr("analytics.mode.monthly", default: "统计")
+        }
+    }
+}
+
+private enum LedgerSortMode: String, CaseIterable, Identifiable {
+    case date
+    case cost
+    case tokens
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .date: return L10n.tr("analytics.ledger.sort.date", default: "日期")
+        case .cost: return L10n.tr("analytics.ledger.sort.cost", default: "花费")
+        case .tokens: return L10n.tr("analytics.ledger.sort.tokens", default: "Tokens")
         }
     }
 }
@@ -21,10 +37,20 @@ private struct FlatTrendPoint: Identifiable {
     let seriesLabel: String
     let date: Date
     let bucketMs: Int64
-    let tokens: Double
+    let value: Double
+    let tokens: Int64
     let costMicroUsd: Int64
+    let requests: Int64
 
     var id: String { "\(seriesKey)::\(bucketMs)" }
+}
+
+private struct PreviousOverlayPoint: Identifiable {
+    let date: Date
+    let bucketMs: Int64
+    let value: Double
+
+    var id: Int64 { bucketMs }
 }
 
 private struct SeriesScaleEntry {
@@ -39,6 +65,9 @@ public struct AnalyticsView: View {
     @State private var selectedBucketMs: Int64?
     @State private var selectedChartDate: Date?
     @State private var exportItem: ExportFileItem?
+    @State private var showingShareReceipt = false
+    @State private var roiExpanded = true
+    @State private var ledgerSort: LedgerSortMode = .date
 
     public init(store: AppStore) {
         self.store = store
@@ -67,9 +96,19 @@ public struct AnalyticsView: View {
             }
             .padding(.bottom, 24)
         }
-        .background(SemanticColors.surfacePrimary)
+        .background(Color.clear)
         .sheet(item: $exportItem) { item in
             ShareSheetView(url: item.url)
+        }
+        .sheet(isPresented: $showingShareReceipt) {
+            if let mo = store.monthly {
+                ShareReceiptSheet(
+                    report: mo,
+                    currency: store.currency,
+                    usdToCnyRate: store.usdToCnyRate,
+                    periodLabel: store.resolvedDateSpanLabel
+                )
+            }
         }
     }
 
@@ -81,54 +120,18 @@ public struct AnalyticsView: View {
         let isSubDay = (granularity == .hourly || granularity == .fifteenMinutes)
         let isDateOnly = !isSubDay
         let flatPoints = flattenedPoints(from: report, stepSec: stepSec)
+        let overlayPoints = previousOverlayPoints(
+            current: report,
+            previous: store.previousPeriodTrends,
+            stepSec: stepSec
+        )
         let scaleEntries = buildScaleEntries(from: report)
         let colorByKey = Dictionary(uniqueKeysWithValues: scaleEntries.map { ($0.key, $0.color) })
         let domainRange = xScaleDomain(buckets: report?.buckets ?? [], stepSec: stepSec)
         let tickDates = sampledTickDates(buckets: report?.buckets ?? [], stepSec: stepSec)
 
         return VStack(alignment: .leading, spacing: 14) {
-            // Controls row
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text(L10n.tr("analytics.dimension", default: "维度"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Picker(L10n.tr("analytics.dimension", default: "维度"), selection: $store.trendDimension) {
-                        ForEach(StackDimensionDTO.allCases, id: \.self) { dim in
-                            Text(dim.label).tag(dim)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 240)
-                    .onChange(of: store.trendDimension) { _, _ in
-                        selectedBucketMs = nil
-                        selectedChartDate = nil
-                        Task { await store.reloadTrendsOnly() }
-                    }
-                }
-
-                HStack {
-                    Text(L10n.tr("analytics.granularity", default: "粒度"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Picker(L10n.tr("analytics.granularity", default: "粒度"), selection: $store.trendGranularity) {
-                        ForEach([TrendGranularityDTO.auto, .hourly, .daily, .weekly], id: \.self) { gran in
-                            Text(gran.label).tag(gran)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 240)
-                    .onChange(of: store.trendGranularity) { _, _ in
-                        selectedBucketMs = nil
-                        selectedChartDate = nil
-                        Task { await store.reloadTrendsOnly() }
-                    }
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
+            trendsControls(scaleEntries: scaleEntries)
 
             // Crosshair readout strip
             if let bucketMs = selectedBucketMs,
@@ -138,7 +141,7 @@ public struct AnalyticsView: View {
                         .font(.caption.weight(.semibold))
                         .tabularMetrics()
                     Spacer()
-                    Text("\(TokenVaneFormatters.formatCompactTokens(summary.tokens)) · \(TokenVaneFormatters.formatCurrency(summary.costMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))")
+                    Text("\(TokenVaneFormatters.formatCompactTokens(summary.tokens)) · \(TokenVaneFormatters.formatCurrency(summary.costMicroUsd, currency: store.currency, rateString: store.usdToCnyRate)) · \(summary.requests) req")
                         .font(.caption.weight(.semibold))
                         .tabularMetrics()
                         .foregroundStyle(SemanticColors.accentIndigo)
@@ -158,11 +161,21 @@ public struct AnalyticsView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     Spacer()
+                    if store.comparePreviousPeriod && store.timeRange != .all && !overlayPoints.isEmpty {
+                        HStack(spacing: 4) {
+                            Rectangle()
+                                .stroke(style: StrokeStyle(lineWidth: 1.5, dash: [3, 3]))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 16, height: 2)
+                            Text(L10n.tr("trends.prev_period", default: "上期对照"))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
                 .padding(.horizontal, 16)
             }
 
-            // Frameless full-width Swift Chart with aligned bar centers, explicit domain, and chartXSelection
             if flatPoints.isEmpty {
                 Text(L10n.tr("analytics.trends.waiting", default: "等待趋势数据"))
                     .font(.caption)
@@ -170,82 +183,17 @@ public struct AnalyticsView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 36)
             } else {
-                GeometryReader { geo in
-                    let barWidth = computedBarWidth(
-                        chartWidth: geo.size.width,
-                        buckets: report?.buckets ?? [],
-                        stepMs: stepMs
-                    )
-                    Chart {
-                        ForEach(flatPoints) { pt in
-                            BarMark(
-                                x: .value(L10n.tr("chart.axis.time", default: "时间"), pt.date),
-                                y: .value(L10n.tr("chart.axis.tokens", default: "Tokens"), pt.tokens),
-                                width: .fixed(barWidth)
-                            )
-                            .foregroundStyle(by: .value(L10n.tr("chart.axis.series", default: "系列"), pt.seriesLabel))
-                        }
-
-                        if let selectedBucketMs {
-                            let center = Date(timeIntervalSince1970: Double(selectedBucketMs) / 1000.0 + stepSec * 0.5)
-                            RuleMark(x: .value(L10n.tr("chart.axis.selected", default: "选中"), center))
-                                .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                                .foregroundStyle(Color.secondary)
-                        }
-                    }
-                    .chartForegroundStyleScale(
-                        domain: scaleEntries.map(\.label),
-                        range: scaleEntries.map(\.color)
-                    )
-                    .chartXScale(domain: domainRange)
-                    .chartLegend(position: .bottom, alignment: .leading)
-                    .chartXAxis {
-                        AxisMarks(values: tickDates) { value in
-                            AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                                .foregroundStyle(SemanticColors.hairline)
-                            AxisValueLabel {
-                                if let d = value.as(Date.self) {
-                                    let bucketStart = d.addingTimeInterval(-stepSec * 0.5)
-                                    Text(TokenVaneFormatters.formatChartAxisDate(bucketStart, subDay: isSubDay))
-                                        .font(.caption2)
-                                        .tabularMetrics()
-                                }
-                            }
-                        }
-                    }
-                    .chartYAxis {
-                        AxisMarks(position: .trailing) { value in
-                            AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                                .foregroundStyle(SemanticColors.hairline)
-                            AxisValueLabel {
-                                if let v = value.as(Double.self) {
-                                    Text(TokenVaneFormatters.formatCompactTokens(Int64(v)))
-                                        .font(.caption2)
-                                        .tabularMetrics()
-                                }
-                            }
-                        }
-                    }
-                    .chartXSelection(value: $selectedChartDate)
-                    .onChange(of: selectedChartDate) { _, newDate in
-                        guard let newDate, let buckets = report?.buckets, !buckets.isEmpty else {
-                            selectedBucketMs = nil
-                            return
-                        }
-                        let targetMs = Int64(newDate.timeIntervalSince1970 * 1000.0)
-                        let halfStep = stepMs / 2
-                        let nearest = buckets.min(by: {
-                            abs(($0 + halfStep) - targetMs) < abs(($1 + halfStep) - targetMs)
-                        })
-                        if let nearest, nearest != selectedBucketMs {
-                            selectedBucketMs = nearest
-                            let gen = UIImpactFeedbackGenerator(style: .light)
-                            gen.impactOccurred()
-                        }
-                    }
-                }
-                .frame(height: 224)
-                .padding(.horizontal, 16)
+                trendsChart(
+                    flatPoints: flatPoints,
+                    overlayPoints: overlayPoints,
+                    scaleEntries: scaleEntries,
+                    domainRange: domainRange,
+                    tickDates: tickDates,
+                    stepSec: stepSec,
+                    stepMs: stepMs,
+                    isSubDay: isSubDay,
+                    buckets: report?.buckets ?? []
+                )
             }
 
             HairlineDivider(insetLeading: 16)
@@ -262,24 +210,46 @@ public struct AnalyticsView: View {
                             seriesKey: row.key,
                             index: idx
                         )
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(dotColor)
-                            .frame(width: 7, height: 7)
-                        Text(row.label)
-                            .font(.caption.weight(.medium))
-                            .lineLimit(1)
-                        Spacer()
-                        Text(TokenVaneFormatters.formatCompactTokens(row.currentTokens))
-                            .font(.caption)
-                            .tabularMetrics()
-                        Text(formatDelta(row.deltaPct))
-                            .font(.caption2.weight(.semibold))
-                            .tabularMetrics()
-                            .foregroundStyle(deltaColor(row.deltaPct))
-                            .frame(width: 64, alignment: .trailing)
+                    let isFocused = store.focusedSeriesKey == row.key
+                    let delta = store.trendMetric == .cost ? row.costDeltaPct : row.deltaPct
+
+                    Button {
+                        store.focusedSeriesKey = isFocused ? nil : row.key
+                    } label: {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(dotColor)
+                                .frame(width: 7, height: 7)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(row.label)
+                                    .font(.caption.weight(isFocused ? .bold : .medium))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                Text("\(row.requests) req · 命中 \(TokenVaneFormatters.formatPercent(row.cacheHitRatio * 100, decimals: 0))")
+                                    .font(.caption2)
+                                    .tabularMetrics()
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text(comparisonPrimaryValue(row))
+                                    .font(.caption.weight(.medium))
+                                    .tabularMetrics()
+                                    .foregroundStyle(.primary)
+                                Text(store.timeRange == .all ? "—" : formatDelta(delta))
+                                    .font(.caption2.weight(.semibold))
+                                    .tabularMetrics()
+                                    .foregroundStyle(store.timeRange == .all ? Color.secondary : deltaColor(delta))
+                            }
+                        }
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, isFocused ? 6 : 0)
+                        .background(
+                            isFocused ? SemanticColors.surfaceSubtle : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        )
                     }
-                    .padding(.vertical, 3)
+                    .buttonStyle(.plain)
                     HairlineDivider()
                 }
             }
@@ -287,10 +257,258 @@ public struct AnalyticsView: View {
         }
     }
 
+    private func trendsControls(scaleEntries: [SeriesScaleEntry]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker(L10n.tr("trends.metric.label", default: "指标"), selection: $store.trendMetric) {
+                ForEach(TrendMetricMode.allCases) { m in
+                    Text(m.label).tag(m)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            HStack {
+                Picker(L10n.tr("analytics.dimension", default: "维度"), selection: $store.trendDimension) {
+                    ForEach(StackDimensionDTO.allCases, id: \.self) { dim in
+                        Text(dim.label).tag(dim)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: store.trendDimension) { _, _ in
+                    selectedBucketMs = nil
+                    selectedChartDate = nil
+                    store.focusedSeriesKey = nil
+                    Task { await store.reloadTrendsOnly() }
+                }
+
+                Picker(L10n.tr("trends.style.label", default: "图表"), selection: $store.trendChartStyle) {
+                    ForEach(TrendChartStyleMode.allCases) { st in
+                        Text(st.label).tag(st)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 112)
+            }
+
+            HStack {
+                Picker(L10n.tr("analytics.granularity", default: "粒度"), selection: $store.trendGranularity) {
+                    ForEach(TrendGranularityDTO.allCases, id: \.self) { gran in
+                        Text(gran.label).tag(gran)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: store.trendGranularity) { _, _ in
+                    selectedBucketMs = nil
+                    selectedChartDate = nil
+                    Task { await store.reloadTrendsOnly() }
+                }
+
+                if store.timeRange != .all {
+                    Toggle(
+                        L10n.tr("trends.compare_prev", default: "对比上期"),
+                        isOn: Binding(
+                            get: { store.comparePreviousPeriod },
+                            set: { val in Task { await store.setComparePreviousPeriod(val) } }
+                        )
+                    )
+                    .font(.caption)
+                    .fixedSize()
+                }
+            }
+
+            if !scaleEntries.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        Button {
+                            store.focusedSeriesKey = nil
+                        } label: {
+                            Text(L10n.tr("trends.series.all", default: "全部系列"))
+                                .font(.caption2.weight(store.focusedSeriesKey == nil ? .semibold : .regular))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    store.focusedSeriesKey == nil
+                                        ? SemanticColors.accentIndigo.opacity(0.15)
+                                        : SemanticColors.surfaceSubtle,
+                                    in: Capsule()
+                                )
+                        }
+                        .buttonStyle(.plain)
+
+                        ForEach(scaleEntries, id: \.key) { entry in
+                            let selected = store.focusedSeriesKey == entry.key
+                            Button {
+                                store.focusedSeriesKey = selected ? nil : entry.key
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Circle()
+                                        .fill(entry.color)
+                                        .frame(width: 6, height: 6)
+                                    Text(entry.label)
+                                        .font(.caption2.weight(selected ? .semibold : .regular))
+                                        .lineLimit(1)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    selected ? entry.color.opacity(0.18) : SemanticColors.surfaceSubtle,
+                                    in: Capsule()
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+    }
+
+    @ViewBuilder
+    private func trendsChart(
+        flatPoints: [FlatTrendPoint],
+        overlayPoints: [PreviousOverlayPoint],
+        scaleEntries: [SeriesScaleEntry],
+        domainRange: ClosedRange<Date>,
+        tickDates: [Date],
+        stepSec: TimeInterval,
+        stepMs: Int64,
+        isSubDay: Bool,
+        buckets: [Int64]
+    ) -> some View {
+        let activeEntries = store.focusedSeriesKey.flatMap { focused in
+            let matched = scaleEntries.filter { $0.key == focused }
+            return matched.isEmpty ? nil : matched
+        } ?? scaleEntries
+
+        GeometryReader { geo in
+            let barWidth = computedBarWidth(
+                chartWidth: geo.size.width,
+                buckets: buckets,
+                stepMs: stepMs
+            )
+            Chart {
+                trendsMarks(
+                    flatPoints: flatPoints,
+                    overlayPoints: overlayPoints,
+                    barWidth: barWidth,
+                    stepSec: stepSec
+                )
+            }
+            .chartForegroundStyleScale(
+                domain: activeEntries.map(\.label),
+                range: activeEntries.map(\.color)
+            )
+            .chartXScale(domain: domainRange)
+            .chartLegend(position: .bottom, alignment: .leading)
+            .chartXAxis {
+                AxisMarks(values: tickDates) { value in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
+                        .foregroundStyle(SemanticColors.hairline)
+                    AxisValueLabel {
+                        if let d = value.as(Date.self) {
+                            let bucketStart = d.addingTimeInterval(-stepSec * 0.5)
+                            Text(TokenVaneFormatters.formatChartAxisDate(bucketStart, subDay: isSubDay))
+                                .font(.caption2)
+                                .tabularMetrics()
+                        }
+                    }
+                }
+            }
+            .chartYAxis {
+                AxisMarks(position: .trailing) { value in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
+                        .foregroundStyle(SemanticColors.hairline)
+                    AxisValueLabel {
+                        if let v = value.as(Double.self) {
+                            Text(formatChartYAxisValue(v))
+                                .font(.caption2)
+                                .tabularMetrics()
+                        }
+                    }
+                }
+            }
+            .chartXSelection(value: $selectedChartDate)
+            .onChange(of: selectedChartDate) { _, newDate in
+                guard let newDate, !buckets.isEmpty else {
+                    selectedBucketMs = nil
+                    return
+                }
+                let targetMs = Int64(newDate.timeIntervalSince1970 * 1000.0)
+                let halfStep = stepMs / 2
+                let nearest = buckets.min(by: {
+                    abs(($0 + halfStep) - targetMs) < abs(($1 + halfStep) - targetMs)
+                })
+                if let nearest, nearest != selectedBucketMs {
+                    selectedBucketMs = nearest
+                    let gen = UIImpactFeedbackGenerator(style: .light)
+                    gen.impactOccurred()
+                }
+            }
+        }
+        .frame(height: 236)
+        .padding(.horizontal, 16)
+    }
+
+    @ChartContentBuilder
+    private func trendsMarks(
+        flatPoints: [FlatTrendPoint],
+        overlayPoints: [PreviousOverlayPoint],
+        barWidth: CGFloat,
+        stepSec: TimeInterval
+    ) -> some ChartContent {
+        if store.trendChartStyle == .bar {
+            ForEach(flatPoints) { pt in
+                BarMark(
+                    x: .value(L10n.tr("chart.axis.time", default: "时间"), pt.date),
+                    y: .value(store.trendMetric.label, pt.value),
+                    width: .fixed(barWidth)
+                )
+                .foregroundStyle(by: .value(L10n.tr("chart.axis.series", default: "系列"), pt.seriesLabel))
+            }
+        } else {
+            ForEach(flatPoints) { pt in
+                LineMark(
+                    x: .value(L10n.tr("chart.axis.time", default: "时间"), pt.date),
+                    y: .value(store.trendMetric.label, pt.value),
+                    series: .value(L10n.tr("chart.axis.series", default: "系列"), pt.seriesLabel)
+                )
+                .interpolationMethod(.monotone)
+                .lineStyle(StrokeStyle(lineWidth: 2))
+                .foregroundStyle(by: .value(L10n.tr("chart.axis.series", default: "系列"), pt.seriesLabel))
+            }
+        }
+
+        if store.comparePreviousPeriod && store.timeRange != .all {
+            ForEach(overlayPoints) { prevPt in
+                LineMark(
+                    x: .value(L10n.tr("chart.axis.time", default: "时间"), prevPt.date),
+                    y: .value(store.trendMetric.label, prevPt.value),
+                    series: .value("Comparison", "__previous__")
+                )
+                .interpolationMethod(.monotone)
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+                .foregroundStyle(Color.secondary.opacity(0.65))
+            }
+        }
+
+        if let selectedBucketMs {
+            let center = Date(timeIntervalSince1970: Double(selectedBucketMs) / 1000.0 + stepSec * 0.5)
+            RuleMark(x: .value(L10n.tr("chart.axis.selected", default: "选中"), center))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                .foregroundStyle(Color.secondary)
+        }
+    }
+
     private var monthlySection: some View {
         let mo = store.monthly
+        let feeMicro = mo?.subscriptionPeriodFeeMicroUsd ?? mo?.subscriptionMonthlyFeeMicroUsd ?? 0
+        let apiMicro = mo?.apiEquivalentCostMicroUsd ?? 0
+        let netSavedMicro = max(Int64(0), apiMicro - feeMicro)
+
         return VStack(alignment: .leading, spacing: 14) {
-            HStack {
+            // Range & Action header
+            HStack(spacing: 8) {
                 Button {
                     Task { await store.shiftMonth(by: -1) }
                 } label: {
@@ -298,9 +516,18 @@ public struct AnalyticsView: View {
                         .padding(6)
                 }
 
-                Text(String(format: "%04d-%02d", store.selectedYear, store.selectedMonth))
-                    .font(.headline)
-                    .tabularMetrics()
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(store.resolvedDateSpanLabel)
+                        .font(.subheadline.weight(.semibold))
+                        .tabularMetrics()
+                        .lineLimit(1)
+                    if let mo {
+                        Text(String(format: "%04d-%02d", mo.year, mo.month))
+                            .font(.caption2)
+                            .tabularMetrics()
+                            .foregroundStyle(.secondary)
+                    }
+                }
 
                 Button {
                     Task { await store.shiftMonth(by: 1) }
@@ -310,6 +537,19 @@ public struct AnalyticsView: View {
                 }
 
                 Spacer()
+
+                if mo != nil {
+                    Button {
+                        showingShareReceipt = true
+                    } label: {
+                        Label(L10n.tr("analytics.monthly.receipt", default: "小票"), systemImage: "doc.text.image")
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
 
                 Menu {
                     Button(L10n.tr("analytics.monthly.export_csv", default: "导出 CSV")) {
@@ -334,14 +574,22 @@ public struct AnalyticsView: View {
             .padding(.horizontal, 16)
             .padding(.top, 12)
 
-            HStack(spacing: 0) {
+            // 4 Summary KPI cells
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+                spacing: 12
+            ) {
                 monthlySummaryCell(
-                    title: L10n.tr("analytics.monthly.cost", default: "月度花费"),
-                    value: TokenVaneFormatters.formatCurrency(mo?.apiEquivalentCostMicroUsd ?? 0, currency: store.currency, rateString: store.usdToCnyRate)
+                    title: L10n.tr("analytics.monthly.cost", default: "等效花费"),
+                    value: TokenVaneFormatters.formatCurrency(apiMicro, currency: store.currency, rateString: store.usdToCnyRate)
                 )
                 monthlySummaryCell(
-                    title: L10n.tr("analytics.monthly.tokens", default: "月度 Tokens"),
+                    title: L10n.tr("analytics.monthly.tokens", default: "Token 合计"),
                     value: TokenVaneFormatters.formatCompactTokens(mo?.monthTotalTokens ?? 0)
+                )
+                monthlySummaryCell(
+                    title: L10n.tr("analytics.monthly.requests", default: "请求次数"),
+                    value: TokenVaneFormatters.formatExactInt(mo?.monthTotalRequests ?? 0)
                 )
                 monthlySummaryCell(
                     title: L10n.tr("analytics.monthly.saved", default: "缓存节省"),
@@ -350,26 +598,110 @@ public struct AnalyticsView: View {
             }
             .padding(.horizontal, 16)
 
+            // Provider & Model Bill Shares
+            if !(mo?.providerShares.isEmpty ?? true) || !(mo?.modelShares.isEmpty ?? true) {
+                HairlineDivider(insetLeading: 16)
+                billSharesSection(mo: mo)
+            }
+
             HairlineDivider(insetLeading: 16)
 
+            // 365-day Quartile Heatmap
             VStack(alignment: .leading, spacing: 8) {
-                Text(L10n.tr("analytics.heatmap.title", default: "年度活跃"))
-                    .font(.subheadline.weight(.semibold))
+                HStack {
+                    Text(L10n.tr("analytics.heatmap.title", default: "年度活跃"))
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    HStack(spacing: 3) {
+                        Text(L10n.tr("analytics.heatmap.less", default: "少"))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        ForEach(0..<5, id: \.self) { level in
+                            RoundedRectangle(cornerRadius: 1.5)
+                                .fill(heatmapColor(for: level))
+                                .frame(width: 8, height: 8)
+                        }
+                        Text(L10n.tr("analytics.heatmap.more", default: "多"))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Heatmap365Canvas(
                     cells: mo?.heatmap365d ?? [],
-                    year: Int(store.selectedYear),
-                    month: Int(store.selectedMonth)
+                    year: Int(mo?.year ?? store.selectedYear),
+                    month: Int(mo?.month ?? store.selectedMonth)
                 )
-                .frame(height: 80)
+                .frame(height: 82)
             }
             .padding(.horizontal, 16)
 
             HairlineDivider(insetLeading: 16)
 
+            // Collapsible Subscription ROI
+            VStack(alignment: .leading, spacing: 10) {
+                Button {
+                    roiExpanded.toggle()
+                } label: {
+                    HStack {
+                        Text(L10n.tr("analytics.roi.title", default: "订阅 ROI 测算"))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        if let roi = mo?.roiMultiplier, roi.isFinite, feeMicro > 0 {
+                            Text(String(format: "%.2f×", locale: Locale(identifier: "en_US_POSIX"), roi))
+                                .font(.caption.weight(.semibold))
+                                .tabularMetrics()
+                                .foregroundStyle(SemanticColors.statusLive)
+                        }
+                        Image(systemName: roiExpanded ? "chevron.up" : "chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+
+                if roiExpanded {
+                    if feeMicro > 0 {
+                        LazyVGrid(
+                            columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+                            spacing: 10
+                        ) {
+                            monthlySummaryCell(
+                                title: L10n.tr("analytics.roi.period_fee", default: "周期订阅实付"),
+                                value: TokenVaneFormatters.formatCurrency(feeMicro, currency: store.currency, rateString: store.usdToCnyRate)
+                            )
+                            monthlySummaryCell(
+                                title: L10n.tr("analytics.roi.net_saved", default: "净等效盈余"),
+                                value: TokenVaneFormatters.formatCurrency(netSavedMicro, currency: store.currency, rateString: store.usdToCnyRate)
+                            )
+                        }
+                    } else {
+                        Text(L10n.tr("analytics.roi.empty", default: "暂未配置付费订阅计划，可前往「订阅」页添加"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+
+            HairlineDivider(insetLeading: 16)
+
+            // Daily Ledger
             VStack(alignment: .leading, spacing: 8) {
-                Text(L10n.tr("analytics.ledger.title", default: "按日明细"))
-                    .font(.subheadline.weight(.semibold))
-                let rows = (mo?.dailyLedger ?? []).sorted { $0.date > $1.date }
+                HStack {
+                    Text(L10n.tr("analytics.ledger.title", default: "按日明细"))
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Picker(L10n.tr("analytics.ledger.sort", default: "排序"), selection: $ledgerSort) {
+                        ForEach(LedgerSortMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 190)
+                }
+
+                let rows = sortedLedgerRows(mo?.dailyLedger ?? [])
                 if rows.isEmpty {
                     Text(L10n.tr("analytics.ledger.waiting", default: "账单待同步"))
                         .font(.caption)
@@ -378,15 +710,21 @@ public struct AnalyticsView: View {
                     ForEach(rows) { day in
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(day.date)
-                                    .font(.caption.weight(.medium))
-                                    .tabularMetrics()
-                                if let topModel = day.topModel {
-                                    Text(topModel)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                                HStack(spacing: 6) {
+                                    Text(day.date)
+                                        .font(.caption.weight(.medium))
+                                        .tabularMetrics()
+                                    if let topModel = day.topModel {
+                                        Text(topModel)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
                                 }
+                                Text("In \(TokenVaneFormatters.formatCompactTokens(day.inputTokens)) · Out \(TokenVaneFormatters.formatCompactTokens(day.outputTokens)) · Cache \(TokenVaneFormatters.formatCompactTokens(day.cacheReadTokens))")
+                                    .font(.caption2)
+                                    .tabularMetrics()
+                                    .foregroundStyle(.secondary)
                             }
                             Spacer()
                             VStack(alignment: .trailing, spacing: 2) {
@@ -408,6 +746,90 @@ public struct AnalyticsView: View {
         }
     }
 
+    @ViewBuilder
+    private func billSharesSection(mo: MonthlyReportDTO?) -> some View {
+        let providers = mo?.providerShares ?? []
+        let models = mo?.modelShares ?? []
+        let segments = providers.prefix(6).map {
+            ShareBarSegment(
+                id: $0.key,
+                label: $0.label,
+                sharePercent: $0.costSharePercent,
+                color: TokenVaneFormatters.providerColor($0.key)
+            )
+        }
+
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L10n.tr("analytics.shares.title", default: "账单构成"))
+                .font(.subheadline.weight(.semibold))
+
+            if !segments.isEmpty {
+                InlineShareBar(segments: segments, height: 6)
+            }
+
+            if !providers.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(L10n.tr("overview.shares.by_provider", default: "服务商"))
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    ForEach(providers.prefix(5)) { item in
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(TokenVaneFormatters.providerColor(item.key))
+                                .frame(width: 7, height: 7)
+                            Text(item.label)
+                                .font(.caption)
+                                .lineLimit(1)
+                            Spacer()
+                            Text(TokenVaneFormatters.formatPercent(item.costSharePercent))
+                                .font(.caption2)
+                                .tabularMetrics()
+                                .foregroundStyle(.secondary)
+                            Text(TokenVaneFormatters.formatCurrency(item.costMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))
+                                .font(.caption.weight(.medium))
+                                .tabularMetrics()
+                                .frame(minWidth: 64, alignment: .trailing)
+                        }
+                    }
+                }
+            }
+
+            if !models.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(L10n.tr("overview.shares.top_models", default: "Top 模型"))
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    ForEach(models.prefix(5)) { item in
+                        HStack(spacing: 8) {
+                            Text(item.label)
+                                .font(.caption)
+                                .lineLimit(1)
+                            Spacer()
+                            Text(TokenVaneFormatters.formatCompactTokens(item.tokens))
+                                .font(.caption2)
+                                .tabularMetrics()
+                                .foregroundStyle(.secondary)
+                            Text(TokenVaneFormatters.formatCurrency(item.costMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))
+                                .font(.caption.weight(.medium))
+                                .tabularMetrics()
+                                .frame(minWidth: 64, alignment: .trailing)
+                        }
+                    }
+                }
+                .padding(.top, 4)
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private func sortedLedgerRows(_ rows: [MonthlyDailyLedgerRowDTO]) -> [MonthlyDailyLedgerRowDTO] {
+        switch ledgerSort {
+        case .date: return rows.sorted { $0.date > $1.date }
+        case .cost: return rows.sorted { $0.costMicroUsd > $1.costMicroUsd }
+        case .tokens: return rows.sorted { $0.totalTokens > $1.totalTokens }
+        }
+    }
+
     private func monthlySummaryCell(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
@@ -420,6 +842,29 @@ public struct AnalyticsView: View {
                 .minimumScaleFactor(0.75)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func comparisonPrimaryValue(_ row: TrendComparisonRowDTO) -> String {
+        switch store.trendMetric {
+        case .tokens: return TokenVaneFormatters.formatCompactTokens(row.currentTokens)
+        case .cost: return TokenVaneFormatters.formatCurrency(row.currentCostMicroUsd, currency: store.currency, rateString: store.usdToCnyRate)
+        case .cacheHit: return TokenVaneFormatters.formatPercent(row.cacheHitRatio * 100.0)
+        case .requests: return TokenVaneFormatters.formatExactInt(row.requests)
+        }
+    }
+
+    private func formatChartYAxisValue(_ v: Double) -> String {
+        switch store.trendMetric {
+        case .tokens:
+            return TokenVaneFormatters.formatCompactTokens(Int64(v))
+        case .cost:
+            let symbol = store.currency.uppercased() == "CNY" ? "¥" : "$"
+            return String(format: "%@%.2f", locale: Locale(identifier: "en_US_POSIX"), symbol, v)
+        case .cacheHit:
+            return String(format: "%.0f%%", locale: Locale(identifier: "en_US_POSIX"), v)
+        case .requests:
+            return TokenVaneFormatters.formatExactInt(Int64(v.rounded()))
+        }
     }
 
     private func bucketDurationSeconds(for granularity: TrendGranularityDTO) -> TimeInterval {
@@ -487,35 +932,115 @@ public struct AnalyticsView: View {
         return result
     }
 
+    private func metricValue(for pt: TrendPointDTO) -> Double {
+        switch store.trendMetric {
+        case .tokens:
+            return Double(pt.tokens)
+        case .cost:
+            return TokenVaneFormatters.convertMicroUsd(
+                pt.costMicroUsd,
+                currency: store.currency,
+                rateString: store.usdToCnyRate
+            )
+        case .cacheHit:
+            return pt.cacheHitRatio * 100.0
+        case .requests:
+            return Double(pt.requests)
+        }
+    }
+
     private func flattenedPoints(from report: TrendsReportDTO?, stepSec: TimeInterval) -> [FlatTrendPoint] {
         guard let report else { return [] }
+        let selectedSeries = report.series.prefix(6).filter { s in
+            store.focusedSeriesKey == nil || store.focusedSeriesKey == s.key
+        }
         var out: [FlatTrendPoint] = []
-        for s in report.series.prefix(6) {
-            for p in s.points where p.tokens > 0 {
+        for s in selectedSeries {
+            for p in s.points where (p.tokens > 0 || p.requests > 0 || p.costMicroUsd > 0 || store.trendChartStyle == .line) {
+                let val = metricValue(for: p)
+                if store.trendChartStyle == .bar && val <= 0 { continue }
                 out.append(FlatTrendPoint(
                     seriesKey: s.key,
                     seriesLabel: s.label,
                     date: Date(timeIntervalSince1970: Double(p.bucketStartMs) / 1000.0 + stepSec * 0.5),
                     bucketMs: p.bucketStartMs,
-                    tokens: Double(p.tokens),
-                    costMicroUsd: p.costMicroUsd
+                    value: val,
+                    tokens: p.tokens,
+                    costMicroUsd: p.costMicroUsd,
+                    requests: p.requests
                 ))
             }
         }
         return out
     }
 
-    private func bucketSummary(bucketMs: Int64, report: TrendsReportDTO?) -> (tokens: Int64, costMicroUsd: Int64)? {
+    private func previousOverlayPoints(
+        current: TrendsReportDTO?,
+        previous: TrendsReportDTO?,
+        stepSec: TimeInterval
+    ) -> [PreviousOverlayPoint] {
+        guard store.comparePreviousPeriod,
+              store.timeRange != .all,
+              let current,
+              let previous,
+              !current.buckets.isEmpty,
+              !previous.buckets.isEmpty else {
+            return []
+        }
+
+        let targetSeries = previous.series.filter { s in
+            store.focusedSeriesKey == nil || store.focusedSeriesKey == s.key
+        }
+        let pointMaps: [[Int64: TrendPointDTO]] = targetSeries.map { s in
+            Dictionary(uniqueKeysWithValues: s.points.map { ($0.bucketStartMs, $0) })
+        }
+
+        let count = min(current.buckets.count, previous.buckets.count)
+        var out: [PreviousOverlayPoint] = []
+        out.reserveCapacity(count)
+        for i in 0..<count {
+            let curMs = current.buckets[i]
+            let prevMs = previous.buckets[i]
+            let date = Date(timeIntervalSince1970: Double(curMs) / 1000.0 + stepSec * 0.5)
+
+            if store.trendMetric == .cacheHit {
+                var sumRatio = 0.0
+                var samples = 0
+                for map in pointMaps {
+                    if let pt = map[prevMs], pt.tokens > 0 {
+                        sumRatio += pt.cacheHitRatio * 100.0
+                        samples += 1
+                    }
+                }
+                let avg = samples > 0 ? sumRatio / Double(samples) : 0.0
+                out.append(PreviousOverlayPoint(date: date, bucketMs: curMs, value: avg))
+            } else {
+                var total = 0.0
+                for map in pointMaps {
+                    if let pt = map[prevMs] {
+                        total += metricValue(for: pt)
+                    }
+                }
+                out.append(PreviousOverlayPoint(date: date, bucketMs: curMs, value: total))
+            }
+        }
+        return out
+    }
+
+    private func bucketSummary(bucketMs: Int64, report: TrendsReportDTO?) -> (tokens: Int64, costMicroUsd: Int64, requests: Int64)? {
         guard let report else { return nil }
         var tokens: Int64 = 0
         var cost: Int64 = 0
+        var requests: Int64 = 0
         for s in report.series {
+            if let focused = store.focusedSeriesKey, s.key != focused { continue }
             if let pt = s.points.first(where: { $0.bucketStartMs == bucketMs }) {
                 tokens += pt.tokens
                 cost += pt.costMicroUsd
+                requests += pt.requests
             }
         }
-        return (tokens, cost)
+        return (tokens, cost, requests)
     }
 
     private func formatDelta(_ delta: Double?) -> String {
@@ -532,14 +1057,23 @@ public struct AnalyticsView: View {
     }
 }
 
+private func heatmapColor(for level: Int) -> Color {
+    switch level {
+    case 1: return SemanticColors.accentIndigo.opacity(0.25)
+    case 2: return SemanticColors.accentIndigo.opacity(0.45)
+    case 3: return SemanticColors.accentIndigo.opacity(0.70)
+    case 4: return SemanticColors.accentIndigo.opacity(0.96)
+    default: return SemanticColors.hairline
+    }
+}
+
 private struct Heatmap365Canvas: View {
     let cells: [HeatmapDayCellDTO]
     let year: Int
     let month: Int
 
     var body: some View {
-        let lookup = buildTokenLookup(cells)
-        let maxTokens = max(1, lookup.values.max() ?? 1)
+        let levelLookup = ReceiptModelBuilder.computeHeatmapIntensityLevels(cells)
         let cal = Calendar(identifier: .gregorian)
         let endDate = resolvedEndDate(calendar: cal)
         let endWeekdayRow = (cal.component(.weekday, from: endDate) + 5) % 7
@@ -593,16 +1127,9 @@ private struct Heatmap365Canvas: View {
                     let y = topMargin + CGFloat(row) * (cellSide + spacing)
                     let rect = CGRect(x: x, y: y, width: cellSide, height: cellSide)
 
-                    let key = integerDateKey(cellDate, calendar: cal)
-                    let tokens = lookup[key] ?? 0
-                    let color: Color
-                    if tokens <= 0 {
-                        color = SemanticColors.hairline
-                    } else {
-                        let ratio = Double(tokens) / Double(maxTokens)
-                        let opacity = 0.25 + min(1.0, ratio) * 0.75
-                        color = SemanticColors.accentIndigo.opacity(opacity)
-                    }
+                    let key = ymdString(cellDate, calendar: cal)
+                    let level = levelLookup[key] ?? 0
+                    let color = heatmapColor(for: level)
                     context.fill(Path(roundedRect: rect, cornerRadius: 1.5), with: .color(color))
                 }
             }
@@ -623,31 +1150,9 @@ private struct Heatmap365Canvas: View {
         return min(lastOfMonth, today)
     }
 
-    private func buildTokenLookup(_ cells: [HeatmapDayCellDTO]) -> [Int: Int64] {
-        var map: [Int: Int64] = [:]
-        map.reserveCapacity(cells.count)
-        for cell in cells {
-            if let key = parseDateKey(cell.date) {
-                map[key, default: 0] += cell.totalTokens
-            }
-        }
-        return map
-    }
-
-    private func parseDateKey(_ raw: String) -> Int? {
-        let parts = raw.split(separator: "-")
-        guard parts.count == 3,
-              let y = Int(parts[0]),
-              let m = Int(parts[1]),
-              let d = Int(parts[2]) else {
-            return nil
-        }
-        return y * 10_000 + m * 100 + d
-    }
-
-    private func integerDateKey(_ date: Date, calendar: Calendar) -> Int {
+    private func ymdString(_ date: Date, calendar: Calendar) -> String {
         let c = calendar.dateComponents([.year, .month, .day], from: date)
-        return (c.year ?? 0) * 10_000 + (c.month ?? 0) * 100 + (c.day ?? 0)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 
     private func buildMonthLabels(firstWeekMonday: Date, endDate: Date, calendar: Calendar) -> [(col: Int, text: String)] {

@@ -235,6 +235,7 @@ impl Storage {
             let samples_map = load_window_samples_map(conn, now_ms)?;
 
             let mut prov_rows = Vec::new();
+            let mut seen_providers: HashSet<String> = HashSet::new();
             let mut cfg_stmt = conn.prepare(
                 "SELECT provider_id, enabled, last_sync_at_ms, last_error FROM provider_configs ORDER BY provider_id ASC",
             )?;
@@ -247,8 +248,25 @@ impl Storage {
                 ))
             })?;
 
+            let mut provider_entries: Vec<(String, bool, Option<i64>, Option<String>)> = Vec::new();
             for cfg in cfg_rows {
-                let (pid, enabled, last_sync_at_ms, last_error) = cfg?;
+                let item = cfg?;
+                seen_providers.insert(item.0.to_ascii_lowercase());
+                provider_entries.push(item);
+            }
+
+            // Include any custom or dynamically synced providers present in rollups.
+            let mut extra_stmt =
+                conn.prepare("SELECT DISTINCT provider_id FROM usage_hourly_rollups ORDER BY provider_id ASC")?;
+            let extra_rows = extra_stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for extra in extra_rows {
+                let pid = extra?;
+                if seen_providers.insert(pid.to_ascii_lowercase()) {
+                    provider_entries.push((pid, true, None, None));
+                }
+            }
+
+            for (pid, enabled, last_sync_at_ms, last_error) in provider_entries {
                 if let Some(filter_pid) = provider {
                     if !pid.eq_ignore_ascii_case(filter_pid) {
                         continue;
@@ -264,7 +282,7 @@ impl Storage {
                 let active_plan = plans.iter().find(|p| {
                     p.enabled && p.is_user_configured && p.provider_id.eq_ignore_ascii_case(&pid)
                 });
-                let (active_window_label, active_window_used_percent) =
+                let (mut active_window_label, mut active_window_used_percent) =
                     if let Some(plan) = active_plan {
                         let samples = samples_map.get(&pid).map(Vec::as_slice).unwrap_or(&[]);
                         let eval = evaluate_subscription_plan(plan, samples, &observed, now_ms);
@@ -275,6 +293,12 @@ impl Storage {
                     } else {
                         fallback_observed_window_status(&observed, &pid, now_ms)
                     };
+                if active_window_label.is_none() {
+                    let (remote_lbl, remote_pct) =
+                        fallback_remote_window_status(conn, &pid, device_id)?;
+                    active_window_label = remote_lbl;
+                    active_window_used_percent = remote_pct;
+                }
 
                 prov_rows.push(ProviderSummaryRow {
                     provider_id: pid,
@@ -308,8 +332,24 @@ impl Storage {
             )?;
             let active_sessions =
                 query_active_sessions(conn, now_ms, provider, device_id, 8)?;
-            let (latest_output_tps, live_model_speeds) =
-                compute_live_model_speeds_and_tps(&active_sessions, fallback_latest);
+            let has_raw_events: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM usage_events LIMIT 1)",
+                [],
+                |r| r.get(0),
+            )?;
+            let (latest_output_tps, live_model_speeds) = if active_sessions.is_empty() && !has_raw_events {
+                let rollup_live =
+                    query_recent_rollup_live_speeds(conn, now_ms, provider, device_id)?;
+                if !rollup_live.is_empty() {
+                    let primary = rollup_live.iter().map(|s| s.output_tps).sum::<f64>()
+                        / rollup_live.len() as f64;
+                    (Some(primary), rollup_live)
+                } else {
+                    (fallback_latest.map(|(tps, _, _)| tps), Vec::new())
+                }
+            } else {
+                compute_live_model_speeds_and_tps(&active_sessions, fallback_latest)
+            };
 
             Ok(OverviewReport {
                 total_tokens: current.total_tokens(),
@@ -389,19 +429,6 @@ impl Storage {
             })
         })
     }
-}
-
-pub(crate) fn query_latest_tps(
-    conn: &Connection,
-    start_ms: i64,
-    end_ms: i64,
-    provider: Option<&str>,
-    device_id: Option<&str>,
-) -> CoreResult<Option<f64>> {
-    Ok(
-        query_latest_tps_with_model(conn, start_ms, end_ms, provider, device_id)?
-            .map(|(tps, _, _)| tps),
-    )
 }
 
 pub(crate) fn query_latest_tps_with_model(
@@ -535,6 +562,80 @@ pub(super) fn compute_live_model_speeds_and_tps(
     }
 
     (fallback_recent.map(|(tps, _, _)| tps), Vec::new())
+}
+
+fn fallback_remote_window_status(
+    conn: &Connection,
+    provider_id: &str,
+    device_id: Option<&str>,
+) -> CoreResult<(Option<String>, Option<f64>)> {
+    let mut sql = String::from(
+        "SELECT window_label, used_percent FROM remote_subscription_snapshots WHERE LOWER(provider_id) = LOWER(?1)",
+    );
+    let mut params_vec: Vec<Value> = vec![Value::Text(provider_id.to_string())];
+    if let Some(dev) = device_id {
+        sql.push_str(" AND device_id = ?2");
+        params_vec.push(Value::Text(dev.to_string()));
+    }
+    sql.push_str(" ORDER BY used_percent DESC, updated_at_ms DESC LIMIT 1");
+    match conn.query_row(&sql, params_from_iter(params_vec), |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+    }) {
+        Ok((lbl, pct)) => Ok((Some(lbl), Some(pct))),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok((None, None)),
+        Err(e) => Err(CoreError::from(e)),
+    }
+}
+
+/// Recent live generation speeds for pure-rollup mobile databases (active if updated within 3 minutes).
+pub(crate) fn query_recent_rollup_live_speeds(
+    conn: &Connection,
+    now_ms: i64,
+    provider: Option<&str>,
+    device_id: Option<&str>,
+) -> CoreResult<Vec<LiveModelSpeed>> {
+    const MOBILE_ROLLUP_ACTIVE_WINDOW_MS: i64 = 180_000;
+    let since_ms = now_ms.saturating_sub(MOBILE_ROLLUP_ACTIVE_WINDOW_MS);
+    let scope = build_scope_clause(2, provider, device_id);
+    let bound = bound_range_params(since_ms, now_ms, &scope.params);
+    let sql = format!(
+        r#"
+        SELECT provider_id,
+               model_id,
+               SUM(tps_sum) / SUM(tps_sample_count) AS mean_tps
+        FROM usage_hourly_rollups
+        WHERE updated_at_ms >= ?1 AND updated_at_ms <= ?2{where_and}
+          AND tps_sample_count > 0
+          AND tps_sum > 0.0
+          AND LOWER(model_id) NOT LIKE '%auto-review%'
+          AND LOWER(model_id) NOT LIKE '%auto_review%'
+        GROUP BY provider_id, model_id
+        ORDER BY MAX(updated_at_ms) DESC, SUM(tps_sample_count) DESC
+        LIMIT 6
+        "#,
+        where_and = scope.sql_and
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(bound), |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, f64>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        let (provider_id, model_id, tps) = r?;
+        if tps.is_finite() && tps > 0.0 && tps <= MAX_VALID_OUTPUT_TPS {
+            out.push(LiveModelSpeed {
+                provider_id,
+                model_id,
+                output_tps: tps,
+                activity_state: "active".to_string(),
+            });
+        }
+    }
+    Ok(out)
 }
 
 pub(crate) fn query_provider_shares(

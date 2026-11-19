@@ -8,6 +8,7 @@ public struct SyncIngestOutcomeDTO: Equatable, Sendable {
     public let envelopesApplied: UInt64
     public let hourlyBucketsApplied: UInt64
     public let subscriptionSnapshotsApplied: UInt64
+    public let paygSnapshotsApplied: UInt64
     public let nextSinceMs: Int64
     public let serverSeqMs: Int64
     public let hasMore: Bool
@@ -18,6 +19,7 @@ public struct SyncIngestOutcomeDTO: Equatable, Sendable {
         envelopesApplied: UInt64,
         hourlyBucketsApplied: UInt64,
         subscriptionSnapshotsApplied: UInt64,
+        paygSnapshotsApplied: UInt64 = 0,
         nextSinceMs: Int64,
         serverSeqMs: Int64,
         hasMore: Bool,
@@ -27,6 +29,7 @@ public struct SyncIngestOutcomeDTO: Equatable, Sendable {
         self.envelopesApplied = envelopesApplied
         self.hourlyBucketsApplied = hourlyBucketsApplied
         self.subscriptionSnapshotsApplied = subscriptionSnapshotsApplied
+        self.paygSnapshotsApplied = paygSnapshotsApplied
         self.nextSinceMs = nextSinceMs
         self.serverSeqMs = serverSeqMs
         self.hasMore = hasMore
@@ -86,6 +89,7 @@ public actor CoreClientActor {
             envelopesApplied: outcome.envelopesApplied,
             hourlyBucketsApplied: outcome.hourlyBucketsApplied,
             subscriptionSnapshotsApplied: outcome.subscriptionSnapshotsApplied,
+            paygSnapshotsApplied: outcome.paygSnapshotsApplied,
             nextSinceMs: outcome.nextSinceMs,
             serverSeqMs: outcome.serverSeqMs,
             hasMore: outcome.hasMore,
@@ -166,6 +170,110 @@ public actor CoreClientActor {
         let updated = try engine.applyExchangeRatePayload(source: source, bodyJson: bodyJSON, nowMs: Self.nowMs())
         _ = try? refreshWidgetSnapshot(reloadTimelines: false)
         return updated
+    }
+
+    @discardableResult
+    public func applyPricingCatalogPayload(
+        source: String,
+        bodyJSON: String,
+        effectiveDate: String,
+        nowMs: Int64? = nil
+    ) throws -> UInt64 {
+        try engine.applyPricingCatalogPayload(
+            source: source,
+            bodyJson: bodyJSON,
+            effectiveDate: effectiveDate,
+            nowMs: nowMs ?? Self.nowMs()
+        )
+    }
+
+    @discardableResult
+    public func applySubscriptionCatalogPayload(bodyJSON: String, nowMs: Int64? = nil) throws -> UInt64 {
+        try engine.applySubscriptionCatalogPayload(
+            bodyJson: bodyJSON,
+            nowMs: nowMs ?? Self.nowMs()
+        )
+    }
+
+    public func upsertModelPricing(_ entry: ModelPricingEntryDTO) throws {
+        let json = try encodeJSON(entry)
+        try engine.upsertModelPricingJson(entryJson: json)
+    }
+
+    public func deleteModelPricingOverride(modelPattern: String) throws {
+        try engine.deleteModelPricingOverride(modelPattern: modelPattern)
+    }
+
+    public func queryPaygAccounts(nowMs: Int64? = nil) throws -> [PaygAccountStatusDTO] {
+        let raw = try engine.queryPaygAccountsJson(
+            nowMs: nowMs ?? Self.nowMs(),
+            tzOffsetMinutes: Self.currentTzOffsetMinutes
+        )
+        return try decodeJSON(raw)
+    }
+
+    public func upsertPaygAccount(_ account: PaygAccountDTO) throws {
+        let json = try encodeJSON(account)
+        try engine.upsertPaygAccountJson(accountJson: json)
+    }
+
+    public func deletePaygAccount(accountId: String) throws {
+        try engine.deletePaygAccount(accountId: accountId)
+    }
+
+    @discardableResult
+    public func applyOfficialBalancePayload(
+        providerId: String,
+        endpoint: String,
+        bodyJSON: String,
+        nowMs: Int64? = nil
+    ) throws -> OfficialBalanceApplyResultDTO {
+        let raw = try engine.applyOfficialBalancePayloadJson(
+            providerId: providerId,
+            endpoint: endpoint,
+            bodyJson: bodyJSON,
+            nowMs: nowMs ?? Self.nowMs()
+        )
+        return try decodeJSON(raw)
+    }
+
+    public func listSubscriptionTemplates(nowMs: Int64? = nil) throws -> [SubscriptionPlanTemplateDTO] {
+        let raw = try engine.listSubscriptionTemplatesJson(nowMs: nowMs ?? Self.nowMs())
+        return try decodeJSON(raw)
+    }
+
+    public func queryLocalSubscriptions(nowMs: Int64? = nil) throws -> [SubscriptionPlanStatusDTO] {
+        let raw = try engine.queryLocalSubscriptionsJson(
+            nowMs: nowMs ?? Self.nowMs(),
+            tzOffsetMinutes: Self.currentTzOffsetMinutes
+        )
+        return try decodeJSON(raw)
+    }
+
+    public func upsertSubscriptionPlan(_ plan: SubscriptionPlanDTO) throws {
+        let json = try encodeJSON(plan)
+        try engine.upsertSubscriptionPlanJson(planJson: json)
+    }
+
+    public func deleteSubscriptionPlan(planId: String) throws {
+        try engine.deleteSubscriptionPlan(planId: planId)
+    }
+
+    public func buildWorkerUploadBundle(
+        workerName: String? = nil,
+        bearerToken: String? = nil,
+        e2eeEnabled: Bool = false,
+        e2eePassphrase: String? = nil,
+        includeMigration: Bool = true
+    ) throws -> CloudflareWorkerUploadBundleDTO {
+        let raw = try engine.buildWorkerUploadBundleJson(
+            workerName: workerName,
+            bearerToken: bearerToken,
+            e2eeEnabled: e2eeEnabled,
+            e2eePassphrase: e2eePassphrase,
+            includeMigration: includeMigration
+        )
+        return try decodeJSON(raw)
     }
 
     /// Writes the < 8 KB App Group snapshot. Intermediate writes (each pull page, preference

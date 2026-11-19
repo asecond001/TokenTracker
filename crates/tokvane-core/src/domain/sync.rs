@@ -34,6 +34,36 @@ pub struct SyncSubscriptionSnapshot {
     pub used_percent: f64,
     pub resets_at_ms: Option<i64>,
     pub source: String,
+    #[serde(default)]
+    pub monthly_fee_micro_usd: i64,
+}
+
+/// Desensitized pay-as-you-go account balance & spend snapshot for multi-device sync.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncPaygSnapshot {
+    pub account_id: String,
+    pub provider_id: String,
+    pub account_name: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub currency: Option<String>,
+    #[serde(default)]
+    pub total_balance_micro: Option<i64>,
+    #[serde(default)]
+    pub granted_balance_micro: Option<i64>,
+    #[serde(default)]
+    pub topped_up_balance_micro: Option<i64>,
+    #[serde(default)]
+    pub remaining_manual_balance_micro_usd: Option<i64>,
+    #[serde(default)]
+    pub monthly_budget_micro_usd: Option<i64>,
+    #[serde(default)]
+    pub today_cost_micro_usd: i64,
+    #[serde(default)]
+    pub month_cost_micro_usd: i64,
+    #[serde(default)]
+    pub fetched_at_ms: Option<i64>,
+    pub updated_at_ms: i64,
 }
 
 /// SyncEnvelope v1 contract defined upfront in Phase 1 so Phase 2 Cloudflare Worker
@@ -47,6 +77,8 @@ pub struct SyncEnvelopeV1 {
     pub since_watermark_ms: i64,
     pub hourly_deltas: Vec<SyncHourlyDelta>,
     pub subscription_snapshots: Vec<SyncSubscriptionSnapshot>,
+    #[serde(default)]
+    pub payg_snapshots: Vec<SyncPaygSnapshot>,
 }
 
 /// Persistent cloud synchronization configuration and watermarks (`sync_state` row `id = 1`).
@@ -77,6 +109,38 @@ pub struct RemoteSubscriptionSnapshot {
     pub used_percent: f64,
     pub resets_at_ms: Option<i64>,
     pub source: String,
+    #[serde(default)]
+    pub monthly_fee_micro_usd: i64,
+    pub updated_at_ms: i64,
+}
+
+/// Remote device pay-as-you-go account balance snapshot synced via `SyncEnvelopeV1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePaygSnapshot {
+    pub device_id: String,
+    pub device_display_name: String,
+    pub account_id: String,
+    pub provider_id: String,
+    pub account_name: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub currency: Option<String>,
+    #[serde(default)]
+    pub total_balance_micro: Option<i64>,
+    #[serde(default)]
+    pub granted_balance_micro: Option<i64>,
+    #[serde(default)]
+    pub topped_up_balance_micro: Option<i64>,
+    #[serde(default)]
+    pub remaining_manual_balance_micro_usd: Option<i64>,
+    #[serde(default)]
+    pub monthly_budget_micro_usd: Option<i64>,
+    #[serde(default)]
+    pub today_cost_micro_usd: i64,
+    #[serde(default)]
+    pub month_cost_micro_usd: i64,
+    #[serde(default)]
+    pub fetched_at_ms: Option<i64>,
     pub updated_at_ms: i64,
 }
 
@@ -97,4 +161,6 @@ pub struct RemoteSyncApplyResult {
     pub device_id: String,
     pub hourly_buckets_applied: usize,
     pub subscription_snapshots_applied: usize,
+    #[serde(default)]
+    pub payg_snapshots_applied: usize,
 }

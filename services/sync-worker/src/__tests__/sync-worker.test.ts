@@ -87,6 +87,25 @@ function makeEnvelope(deviceId: string, displayName: string, tokens: number): Sy
         used_percent: 42.5,
         resets_at_ms: 1_776_018_000_000,
         source: 'local_estimate',
+        monthly_fee_micro_usd: 20_000_000,
+      },
+    ],
+    payg_snapshots: [
+      {
+        account_id: 'auto_deepseek_harness',
+        provider_id: 'deepseek_harness',
+        account_name: 'DeepSeek 官方账户余额',
+        enabled: true,
+        currency: 'CNY',
+        total_balance_micro: 48_500_000,
+        granted_balance_micro: 10_000_000,
+        topped_up_balance_micro: 38_500_000,
+        remaining_manual_balance_micro_usd: null,
+        monthly_budget_micro_usd: 50_000_000,
+        today_cost_micro_usd: 120_000,
+        month_cost_micro_usd: 1_500_000,
+        fetched_at_ms: 1_776_000_000_000,
+        updated_at_ms: 1_776_000_000_500,
       },
     ],
   };
@@ -179,6 +198,11 @@ describe('tokenvane-sync-worker SQLite Durable Object hub', () => {
     expect(pullData.items[0].envelope?.hourly_deltas).toHaveLength(1);
     expect(pullData.items[0].envelope?.hourly_deltas[0].input_tokens).toBe(1800);
     expect(pullData.items[0].envelope?.subscription_snapshots).toHaveLength(1);
+    expect(pullData.items[0].envelope?.subscription_snapshots[0].monthly_fee_micro_usd).toBe(
+      20_000_000
+    );
+    expect(pullData.items[0].envelope?.payg_snapshots).toHaveLength(1);
+    expect(pullData.items[0].envelope?.payg_snapshots?.[0].total_balance_micro).toBe(48_500_000);
 
     // Device A pulls excluding itself -> 0 remote items
     const pullForA = await handleWorkerFetch(
@@ -380,5 +404,42 @@ describe('tokenvane-sync-worker SQLite Durable Object hub', () => {
     const pullBody = (await pullRes.json()) as SyncPullResponseV1;
     expect(pullBody.items).toHaveLength(1);
     expect(pullBody.items[0].envelope?.hourly_deltas[0].input_tokens).toBe(2400);
+    expect(pullBody.items[0].envelope?.subscription_snapshots[0].monthly_fee_micro_usd).toBe(
+      20_000_000
+    );
+    expect(pullBody.items[0].envelope?.payg_snapshots).toHaveLength(1);
+  });
+
+  it('migrates legacy device_subscriptions table without monthly_fee_micro_usd cleanly', () => {
+    const legacyDb = new DatabaseSync(':memory:');
+    legacyDb.exec(`
+      CREATE TABLE device_subscriptions (
+        device_id TEXT NOT NULL,
+        plan_id TEXT NOT NULL,
+        window_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        plan_name TEXT NOT NULL,
+        window_label TEXT NOT NULL,
+        used_percent REAL NOT NULL,
+        resets_at_ms INTEGER,
+        source TEXT NOT NULL,
+        server_seq_ms INTEGER NOT NULL,
+        PRIMARY KEY (device_id, plan_id, window_id)
+      );
+    `);
+    const legacyHub = new SyncHubCore(new NodeSqliteAdapter(legacyDb));
+    const pushResp = legacyHub.push({
+      mode: 'plaintext',
+      envelope: makeEnvelope('dev-legacy', 'Legacy PC', 900),
+    });
+    expect(pushResp.subscriptions_stored).toBe(1);
+    const pulled = legacyHub.pull(0, null, 10);
+    expect(pulled.items[0].envelope?.subscription_snapshots[0].monthly_fee_micro_usd).toBe(
+      20_000_000
+    );
+    expect(pulled.items[0].envelope?.payg_snapshots?.[0].account_id).toBe(
+      'auto_deepseek_harness'
+    );
+    legacyDb.close();
   });
 });

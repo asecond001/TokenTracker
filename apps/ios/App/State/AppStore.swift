@@ -2,12 +2,35 @@ import Foundation
 import Observation
 import SwiftUI
 
+public struct CustomTimeRangeState: Equatable, Sendable {
+    public var startDate: Date
+    public var endDate: Date
+    public var isPrecise: Bool
+    public var startMs: Int64?
+    public var endMs: Int64?
+
+    public init(
+        startDate: Date,
+        endDate: Date,
+        isPrecise: Bool = false,
+        startMs: Int64? = nil,
+        endMs: Int64? = nil
+    ) {
+        self.startDate = startDate
+        self.endDate = endDate
+        self.isPrecise = isPrecise
+        self.startMs = startMs
+        self.endMs = endMs
+    }
+}
+
 public enum TimeRangePreset: String, CaseIterable, Identifiable, Sendable {
     case today
     case sevenDays
     case thirtyDays
     case month
     case all
+    case custom
 
     public var id: String { rawValue }
 
@@ -18,41 +41,115 @@ public enum TimeRangePreset: String, CaseIterable, Identifiable, Sendable {
         case .thirtyDays: return L10n.tr("range.30d", default: "30日")
         case .month: return L10n.tr("range.month", default: "本月")
         case .all: return L10n.tr("range.all", default: "全部")
+        case .custom: return L10n.tr("range.custom", default: "自定义")
         }
     }
 
-    public func makeFilter(providerId: String?, deviceId: String?, now: Date = Date()) -> AnalyticsFilterDTO {
+    public func makeFilter(
+        providerId: String?,
+        deviceId: String?,
+        customRange: CustomTimeRangeState? = nil,
+        now: Date = Date()
+    ) -> AnalyticsFilterDTO {
         let nowMs = Int64(now.timeIntervalSince1970 * 1000)
         let cal = Calendar.current
         let tzOffset = Int32(TimeZone.current.secondsFromGMT(for: now) / 60)
-        let startDate: Date
+        let todayStart = cal.startOfDay(for: now)
+        let startMs: Int64
+        let endMs: Int64
+
         switch self {
         case .today:
-            startDate = cal.startOfDay(for: now)
+            startMs = Int64(todayStart.timeIntervalSince1970 * 1000)
+            endMs = nowMs
         case .sevenDays:
-            startDate = cal.date(byAdding: .day, value: -6, to: cal.startOfDay(for: now)) ?? now.addingTimeInterval(-7 * 86_400)
+            let startDate = cal.date(byAdding: .day, value: -6, to: todayStart) ?? now.addingTimeInterval(-6 * 86_400)
+            startMs = Int64(startDate.timeIntervalSince1970 * 1000)
+            endMs = Self.endOfDayMs(for: now, calendar: cal)
         case .thirtyDays:
-            startDate = cal.date(byAdding: .day, value: -29, to: cal.startOfDay(for: now)) ?? now.addingTimeInterval(-30 * 86_400)
+            let startDate = cal.date(byAdding: .day, value: -29, to: todayStart) ?? now.addingTimeInterval(-29 * 86_400)
+            startMs = Int64(startDate.timeIntervalSince1970 * 1000)
+            endMs = Self.endOfDayMs(for: now, calendar: cal)
         case .month:
             let comps = cal.dateComponents([.year, .month], from: now)
-            startDate = cal.date(from: comps) ?? cal.startOfDay(for: now)
+            let startDate = cal.date(from: comps) ?? todayStart
+            startMs = Int64(startDate.timeIntervalSince1970 * 1000)
+            endMs = Self.endOfDayMs(for: now, calendar: cal)
         case .all:
-            startDate = Date(timeIntervalSince1970: 0)
+            startMs = 0
+            endMs = nowMs
+        case .custom:
+            if let customRange, customRange.isPrecise, let preciseStart = customRange.startMs {
+                let rawEnd = customRange.endMs ?? nowMs
+                startMs = min(preciseStart, rawEnd)
+                endMs = max(preciseStart, rawEnd)
+            } else if let customRange {
+                let d1 = cal.startOfDay(for: customRange.startDate)
+                let d2 = cal.startOfDay(for: customRange.endDate)
+                let firstDay = min(d1, d2)
+                let lastDay = max(d1, d2)
+                startMs = Int64(firstDay.timeIntervalSince1970 * 1000)
+                endMs = Self.endOfDayMs(for: lastDay, calendar: cal)
+            } else {
+                let startDate = cal.date(byAdding: .day, value: -6, to: todayStart) ?? now.addingTimeInterval(-6 * 86_400)
+                startMs = Int64(startDate.timeIntervalSince1970 * 1000)
+                endMs = Self.endOfDayMs(for: now, calendar: cal)
+            }
         }
+
         return AnalyticsFilterDTO(
-            startMs: Int64(startDate.timeIntervalSince1970 * 1000),
-            endMs: nowMs,
+            startMs: startMs,
+            endMs: endMs,
             providerId: providerId,
             deviceId: deviceId,
             tzOffsetMinutes: tzOffset,
             allTime: self == .all
         )
     }
+
+    private static func endOfDayMs(for date: Date, calendar: Calendar) -> Int64 {
+        let dayStart = calendar.startOfDay(for: date)
+        let nextDay = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart.addingTimeInterval(86_400)
+        return Int64(nextDay.timeIntervalSince1970 * 1000) - 1
+    }
+}
+
+public enum TrendMetricMode: String, CaseIterable, Identifiable, Sendable {
+    case tokens
+    case cost
+    case cacheHit = "cache_hit"
+    case requests
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .tokens: return L10n.tr("trends.metric.tokens", default: "Tokens")
+        case .cost: return L10n.tr("trends.metric.cost", default: "费用")
+        case .cacheHit: return L10n.tr("trends.metric.cache_hit", default: "命中率")
+        case .requests: return L10n.tr("trends.metric.requests", default: "请求")
+        }
+    }
+}
+
+public enum TrendChartStyleMode: String, CaseIterable, Identifiable, Sendable {
+    case line
+    case bar
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .line: return L10n.tr("trends.style.line", default: "折线")
+        case .bar: return L10n.tr("trends.style.bar", default: "柱状")
+        }
+    }
 }
 
 public enum MainTab: String, CaseIterable, Identifiable, Hashable, Sendable {
     case overview
     case analytics
+    case models
     case quotas
     case settings
 
@@ -62,6 +159,7 @@ public enum MainTab: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .overview: return L10n.tr("tab.overview", default: "概览")
         case .analytics: return L10n.tr("tab.analytics", default: "趋势")
+        case .models: return L10n.tr("tab.models", default: "模型")
         case .quotas: return L10n.tr("tab.quotas", default: "订阅")
         case .settings: return L10n.tr("tab.settings", default: "设置")
         }
@@ -70,8 +168,9 @@ public enum MainTab: String, CaseIterable, Identifiable, Hashable, Sendable {
     public var navTitle: String {
         switch self {
         case .overview: return L10n.tr("nav.overview", default: "概览")
-        case .analytics: return L10n.tr("nav.analytics", default: "趋势与月报")
-        case .quotas: return L10n.tr("nav.quotas", default: "订阅与模型")
+        case .analytics: return L10n.tr("nav.analytics", default: "趋势与统计")
+        case .models: return L10n.tr("nav.models", default: "模型对比")
+        case .quotas: return L10n.tr("nav.quotas", default: "订阅与配额")
         case .settings: return L10n.tr("nav.settings", default: "同步与设置")
         }
     }
@@ -80,6 +179,7 @@ public enum MainTab: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .overview: return "gauge.with.dots.needle.33percent"
         case .analytics: return "chart.bar.xaxis"
+        case .models: return "square.stack.3d.up"
         case .quotas: return "cpu"
         case .settings: return "arrow.triangle.2.circlepath.circle"
         }
@@ -105,21 +205,40 @@ public final class AppStore {
     public var selectedDeviceId: String? = nil
     public var selectedProviderId: String? = nil
     public var timeRange: TimeRangePreset = .sevenDays
+    public var customStartDate: Date
+    public var customEndDate: Date
+    public var customPrecise = false
+    public var customStartMs: Int64? = nil
+    public var customEndMs: Int64? = nil
+
     public var trendGranularity: TrendGranularityDTO = .auto
     public var trendDimension: StackDimensionDTO = .provider
+    public var trendMetric: TrendMetricMode = .tokens
+    public var trendChartStyle: TrendChartStyleMode = .line
+    public var comparePreviousPeriod = true
+    public var focusedSeriesKey: String? = nil
     public var selectedYear: Int32
     public var selectedMonth: UInt32
 
     public var bootstrap: MobileBootstrapStateDTO?
     public var overview: OverviewReportDTO?
     public var trends: TrendsReportDTO?
+    public var previousPeriodTrends: TrendsReportDTO?
     public var monthly: MonthlyReportDTO?
     public var modelsReport: ModelStatsReportDTO?
     public var speedReport: SpeedLatencyReportDTO?
+    public var localSubscriptions: [SubscriptionPlanStatusDTO] = []
+    public var subscriptionTemplates: [SubscriptionPlanTemplateDTO] = []
+    public var paygAccounts: [PaygAccountStatusDTO] = []
     public var connectionState: SyncConnectionState = .offline
     public var pinnedWatchKeys: Set<String> = []
     public var lastErrorMessage: String?
     public var isLoading = false
+    public var isSyncingCatalogs = false
+    public var isProvisioning = false
+    public var provisionStep: CloudSyncProvisionStep? = nil
+    public var latestPairingURI: String? = nil
+    public var refreshingPaygAccountIds: Set<String> = []
     /// Set when the local SQLite core fails to open; views surface it instead of a blank screen.
     public private(set) var coreInitError: String?
     /// Pairing payload parsed from a deep link / QR / clipboard, awaiting user confirmation.
@@ -139,7 +258,7 @@ public final class AppStore {
         set { resetNotifier.notificationsEnabled = newValue }
     }
 
-    /// Monotonic tokens: newer loads drop stale results; targeted reloads avoid full 5-query sweeps.
+    /// Monotonic tokens: newer loads drop stale results; targeted reloads avoid full queries.
     private var reloadGeneration = 0
     private var trendsGeneration = 0
     private var monthlyGeneration = 0
@@ -162,9 +281,13 @@ public final class AppStore {
         stageDemoPairing: Bool = ProcessInfo.processInfo.arguments.contains("--uitest-stage-pairing")
     ) {
         let now = Date()
-        let comps = Calendar.current.dateComponents([.year, .month], from: now)
+        let cal = Calendar.current
+        let todayStart = cal.startOfDay(for: now)
+        let comps = cal.dateComponents([.year, .month], from: now)
         self.selectedYear = Int32(comps.year ?? 2026)
         self.selectedMonth = UInt32(comps.month ?? 1)
+        self.customStartDate = cal.date(byAdding: .day, value: -6, to: todayStart) ?? todayStart
+        self.customEndDate = todayStart
         self.userDefaults = userDefaults
         self.isDemoMode = demoMode
         self.stageDemoPairing = stageDemoPairing
@@ -239,8 +362,67 @@ public final class AppStore {
         return !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    public var customRangeState: CustomTimeRangeState {
+        CustomTimeRangeState(
+            startDate: customStartDate,
+            endDate: customEndDate,
+            isPrecise: customPrecise,
+            startMs: customStartMs,
+            endMs: customEndMs
+        )
+    }
+
     public var currentFilter: AnalyticsFilterDTO {
-        timeRange.makeFilter(providerId: selectedProviderId, deviceId: selectedDeviceId)
+        timeRange.makeFilter(
+            providerId: selectedProviderId,
+            deviceId: selectedDeviceId,
+            customRange: customRangeState
+        )
+    }
+
+    public var overviewTodayFilter: AnalyticsFilterDTO {
+        TimeRangePreset.today.makeFilter(
+            providerId: selectedProviderId,
+            deviceId: selectedDeviceId
+        )
+    }
+
+    public var resolvedDateSpanLabel: String {
+        let now = Date()
+        let filter = currentFilter
+        if timeRange == .all {
+            return L10n.tr("range.span.all", default: "全量历史")
+        }
+        if timeRange == .custom && customPrecise, customStartMs != nil {
+            let sLabel = TokenVaneFormatters.formatBucketTimestamp(filter.startMs, isDateOnly: false)
+            let eLabel = customEndMs == nil
+                ? L10n.tr("range.span.now", default: "现在")
+                : TokenVaneFormatters.formatBucketTimestamp(filter.endMs, isDateOnly: false)
+            return "\(sLabel) ~ \(eLabel)"
+        }
+        let sStr = TokenVaneFormatters.formatDayKey(Date(timeIntervalSince1970: Double(filter.startMs) / 1000.0))
+        let eStr = TokenVaneFormatters.formatDayKey(Date(timeIntervalSince1970: Double(min(filter.endMs, Int64(now.timeIntervalSince1970 * 1000))) / 1000.0))
+        return sStr == eStr ? sStr : "\(sStr) ~ \(eStr)"
+    }
+
+    public var availableProviders: [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        func appendIfNew(_ pid: String) {
+            let trimmed = pid.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { return }
+            result.append(trimmed)
+        }
+        for row in overview?.providers ?? [] { appendIfNew(row.providerId) }
+        for row in modelsReport?.rows ?? [] { appendIfNew(row.providerId) }
+        for sub in bootstrap?.remoteSubscriptions ?? [] { appendIfNew(sub.providerId) }
+        for payg in bootstrap?.remotePaygAccounts ?? [] { appendIfNew(payg.providerId) }
+        for sub in localSubscriptions { appendIfNew(sub.plan.providerId) }
+        for payg in paygAccounts { appendIfNew(payg.account.providerId) }
+        for builtIn in ["claude_code", "codex", "antigravity", "kimi_code", "deepseek_harness", "qcode", "minimax_code", "workbuddy"] {
+            appendIfNew(builtIn)
+        }
+        return result
     }
 
     public func registerBackgroundTasks() {
@@ -304,25 +486,36 @@ public final class AppStore {
             }
 
             let filter = currentFilter
+            let ovFilter = overviewTodayFilter
             let trendsQuery = TrendsQueryDTO(
                 filter: filter,
                 granularity: trendGranularity,
                 dimension: trendDimension
             )
-            let monthlyQuery = MonthlyQueryDTO(
-                year: selectedYear,
-                month: selectedMonth,
-                providerId: selectedProviderId,
-                deviceId: selectedDeviceId
-            )
+            let monthlyQuery = makeMonthlyQuery(from: filter)
 
-            async let ov = core.queryOverview(filter: filter)
+            async let ov = core.queryOverview(filter: ovFilter)
             async let tr = core.queryTrends(query: trendsQuery)
             async let mo = core.queryMonthly(query: monthlyQuery)
             async let md = core.queryModelsPricing(filter: filter)
             async let sp = core.querySpeedLatency(filter: filter)
+            async let localSubs = core.queryLocalSubscriptions()
+            async let templates = core.listSubscriptionTemplates()
+            async let payg = core.queryPaygAccounts()
 
-            let results = try await (ov, tr, mo, md, sp)
+            let results = try await (ov, tr, mo, md, sp, localSubs, templates, payg)
+
+            var prevTrends: TrendsReportDTO? = nil
+            if comparePreviousPeriod && !filter.allTime {
+                let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+                let prevFilter = makePreviousPeriodFilter(from: filter, nowMs: nowMs)
+                let prevQuery = TrendsQueryDTO(
+                    filter: prevFilter,
+                    granularity: results.1.effectiveGranularity,
+                    dimension: trendDimension
+                )
+                prevTrends = try? await core.queryTrends(query: prevQuery)
+            }
 
             // A newer reload (filter change, sync update) superseded this one; drop stale results.
             guard generation == reloadGeneration else { return }
@@ -331,12 +524,17 @@ public final class AppStore {
             self.overview = results.0
             if tGen == trendsGeneration {
                 self.trends = results.1
+                self.previousPeriodTrends = prevTrends
             }
             if mGen == monthlyGeneration {
                 self.monthly = results.2
             }
             self.modelsReport = results.3
             self.speedReport = results.4
+            self.localSubscriptions = results.5
+            self.subscriptionTemplates = results.6
+            self.paygAccounts = results.7
+            self.latestPairingURI = buildCurrentPairingURI(from: boot)
             self.lastErrorMessage = nil
 
             if !isDemoMode && !stageDemoPairing {
@@ -359,15 +557,28 @@ public final class AppStore {
         guard let core else { return }
         trendsGeneration &+= 1
         let gen = trendsGeneration
+        let filter = currentFilter
         let query = TrendsQueryDTO(
-            filter: currentFilter,
+            filter: filter,
             granularity: trendGranularity,
             dimension: trendDimension
         )
         do {
             let report = try await core.queryTrends(query: query)
+            var prevReport: TrendsReportDTO? = nil
+            if comparePreviousPeriod && !filter.allTime {
+                let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+                let prevFilter = makePreviousPeriodFilter(from: filter, nowMs: nowMs)
+                let prevQuery = TrendsQueryDTO(
+                    filter: prevFilter,
+                    granularity: report.effectiveGranularity,
+                    dimension: trendDimension
+                )
+                prevReport = try? await core.queryTrends(query: prevQuery)
+            }
             guard gen == trendsGeneration else { return }
             self.trends = report
+            self.previousPeriodTrends = prevReport
             self.lastErrorMessage = nil
         } catch {
             if gen == trendsGeneration {
@@ -380,12 +591,7 @@ public final class AppStore {
         guard let core else { return }
         monthlyGeneration &+= 1
         let gen = monthlyGeneration
-        let query = MonthlyQueryDTO(
-            year: selectedYear,
-            month: selectedMonth,
-            providerId: selectedProviderId,
-            deviceId: selectedDeviceId
-        )
+        let query = makeMonthlyQuery(from: currentFilter)
         do {
             let report = try await core.queryMonthly(query: query)
             guard gen == monthlyGeneration else { return }
@@ -396,6 +602,52 @@ public final class AppStore {
                 self.lastErrorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func makePreviousPeriodFilter(from filter: AnalyticsFilterDTO, nowMs: Int64) -> AnalyticsFilterDTO {
+        let effectiveEnd = max(filter.startMs, min(filter.endMs, nowMs))
+        let span = effectiveEnd - filter.startMs + 1
+        return AnalyticsFilterDTO(
+            startMs: filter.startMs - span,
+            endMs: filter.startMs - 1,
+            providerId: filter.providerId,
+            deviceId: filter.deviceId,
+            tzOffsetMinutes: filter.tzOffsetMinutes,
+            allTime: false
+        )
+    }
+
+    private func makeMonthlyQuery(from filter: AnalyticsFilterDTO, now: Date = Date()) -> MonthlyQueryDTO {
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        let anchorMs = filter.allTime ? nowMs : min(filter.endMs, nowMs)
+        let anchor = Date(timeIntervalSince1970: Double(anchorMs) / 1000.0)
+        let comps = Calendar.current.dateComponents([.year, .month], from: anchor)
+        return MonthlyQueryDTO(
+            year: Int32(comps.year ?? Int(selectedYear)),
+            month: UInt32(comps.month ?? Int(selectedMonth)),
+            providerId: filter.providerId,
+            deviceId: filter.deviceId,
+            tzOffsetMinutes: filter.tzOffsetMinutes,
+            startMs: filter.startMs,
+            endMs: filter.endMs
+        )
+    }
+
+    private func buildCurrentPairingURI(from boot: MobileBootstrapStateDTO) -> String? {
+        guard boot.syncConfig.enabled,
+              let url = boot.syncConfig.workerUrl,
+              !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let token = loadSecretMasked(account: .syncBearerToken)
+        guard !token.isEmpty else { return nil }
+        let pass = boot.syncConfig.e2eeEnabled ? loadSecretMasked(account: .e2eePassphrase) : nil
+        return DesktopPairingPayload.makePairingURI(
+            url: url,
+            token: token,
+            e2ee: boot.syncConfig.e2eeEnabled,
+            key: pass
+        )
     }
 
     @discardableResult
@@ -492,18 +744,58 @@ public final class AppStore {
         await reloadAllData()
     }
 
+    public func selectProvider(_ providerId: String?) async {
+        selectedProviderId = providerId
+        await reloadAllData()
+    }
+
     public func selectTimeRange(_ range: TimeRangePreset) async {
         timeRange = range
+        if range != .custom {
+            customPrecise = false
+            customStartMs = nil
+            customEndMs = nil
+        }
+        await reloadAllData()
+    }
+
+    public func applyCustomDateRange(start: Date, end: Date) async {
+        let cal = Calendar.current
+        let d1 = cal.startOfDay(for: start)
+        let d2 = cal.startOfDay(for: end)
+        customStartDate = min(d1, d2)
+        customEndDate = max(d1, d2)
+        customPrecise = false
+        customStartMs = nil
+        customEndMs = nil
+        timeRange = .custom
+        await reloadAllData()
+    }
+
+    public func applyPreciseTimeRange(startMs: Int64, endMs: Int64?) async {
+        let effectiveEndMs = endMs ?? Int64(Date().timeIntervalSince1970 * 1000)
+        customStartDate = Date(timeIntervalSince1970: Double(min(startMs, effectiveEndMs)) / 1000.0)
+        customEndDate = Date(timeIntervalSince1970: Double(max(startMs, effectiveEndMs)) / 1000.0)
+        customPrecise = true
+        customStartMs = min(startMs, endMs ?? startMs)
+        customEndMs = endMs
+        timeRange = .custom
         await reloadAllData()
     }
 
     public func selectTrendDimension(_ dimension: StackDimensionDTO) async {
         trendDimension = dimension
+        focusedSeriesKey = nil
         await reloadTrendsOnly()
     }
 
     public func selectTrendGranularity(_ granularity: TrendGranularityDTO) async {
         trendGranularity = granularity
+        await reloadTrendsOnly()
+    }
+
+    public func setComparePreviousPeriod(_ enabled: Bool) async {
+        comparePreviousPeriod = enabled
         await reloadTrendsOnly()
     }
 
@@ -520,7 +812,25 @@ public final class AppStore {
         }
         selectedYear = Int32(year)
         selectedMonth = UInt32(month)
-        await reloadMonthlyOnly()
+
+        var comps = DateComponents()
+        comps.year = year
+        comps.month = month
+        comps.day = 1
+        let cal = Calendar.current
+        if let firstDay = cal.date(from: comps),
+           let nextMonth = cal.date(byAdding: .month, value: 1, to: firstDay),
+           let lastDay = cal.date(byAdding: .day, value: -1, to: nextMonth) {
+            customStartDate = firstDay
+            customEndDate = lastDay
+            customPrecise = false
+            customStartMs = nil
+            customEndMs = nil
+            timeRange = .custom
+            await reloadAllData()
+        } else {
+            await reloadMonthlyOnly()
+        }
     }
 
     public func triggerManualSync() async {
@@ -667,19 +977,187 @@ public final class AppStore {
 
     public func generateMonthlyExportFile(format: String) async -> URL? {
         guard let core else { return nil }
-        let query = MonthlyQueryDTO(
-            year: selectedYear,
-            month: selectedMonth,
-            providerId: selectedProviderId,
-            deviceId: selectedDeviceId
-        )
+        let query = makeMonthlyQuery(from: currentFilter)
         do {
             let content = try await core.exportMonthlyReport(query: query, format: format)
             let ext = format.lowercased() == "json" ? "json" : "csv"
-            let fileName = String(format: "tokenvane-%04d-%02d.%@", selectedYear, selectedMonth, ext)
+            let fileName = String(format: "tokenvane-%04d-%02d.%@", query.year, query.month, ext)
             let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
             try content.write(to: url, atomically: true, encoding: .utf8)
             return url
+        } catch {
+            lastErrorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    public func setBackdrop(mode: String, presetId: String, opacity: Double) async {
+        await applyPreferencesPatch(
+            MobilePreferencesPatchDTO(
+                bgMode: mode,
+                bgPresetId: presetId,
+                bgOpacity: opacity
+            )
+        )
+    }
+
+    public func updateDeviceDisplayName(_ name: String) async {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        await applyPreferencesPatch(MobilePreferencesPatchDTO(deviceDisplayName: trimmed))
+    }
+
+    @discardableResult
+    public func syncAllCatalogsNow() async -> CatalogRefreshSummary? {
+        guard let syncCoordinator else { return nil }
+        isSyncingCatalogs = true
+        defer { isSyncingCatalogs = false }
+        let summary = await syncCoordinator.refreshPublicCatalogs(force: true)
+        await reloadAllData()
+        return summary
+    }
+
+    @discardableResult
+    public func upsertModelPricing(_ entry: ModelPricingEntryDTO) async -> Bool {
+        guard let core else { return false }
+        do {
+            try await core.upsertModelPricing(entry)
+            await reloadAllData()
+            return true
+        } catch {
+            lastErrorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func deleteModelPricingOverride(modelPattern: String) async -> Bool {
+        guard let core else { return false }
+        do {
+            try await core.deleteModelPricingOverride(modelPattern: modelPattern)
+            await reloadAllData()
+            return true
+        } catch {
+            lastErrorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func upsertPaygAccount(_ account: PaygAccountDTO, apiKey: String? = nil) async -> Bool {
+        guard let core else { return false }
+        do {
+            if let apiKey {
+                let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmedKey.isEmpty {
+                    try secrets.deleteSecret(account: .providerApiKey(account.accountId))
+                } else {
+                    try secrets.saveSecret(trimmedKey, account: .providerApiKey(account.accountId))
+                }
+            }
+            try await core.upsertPaygAccount(account)
+            await reloadAllData()
+            return true
+        } catch {
+            lastErrorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func deletePaygAccount(accountId: String) async -> Bool {
+        guard let core else { return false }
+        do {
+            try? secrets.deleteSecret(account: .providerApiKey(accountId))
+            try await core.deletePaygAccount(accountId: accountId)
+            await reloadAllData()
+            return true
+        } catch {
+            lastErrorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func refreshPaygBalance(_ account: PaygAccountDTO, bypassCooldown: Bool = false) async -> OfficialBalanceApplyResultDTO? {
+        guard let syncCoordinator else { return nil }
+        refreshingPaygAccountIds.insert(account.accountId)
+        defer { refreshingPaygAccountIds.remove(account.accountId) }
+        do {
+            let result = try await syncCoordinator.refreshOfficialBalance(
+                account: account,
+                bypassCooldown: bypassCooldown
+            )
+            lastErrorMessage = nil
+            await reloadAllData()
+            return result
+        } catch {
+            lastErrorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    public func upsertSubscriptionPlan(_ plan: SubscriptionPlanDTO) async -> Bool {
+        guard let core else { return false }
+        do {
+            try await core.upsertSubscriptionPlan(plan)
+            await reloadAllData()
+            return true
+        } catch {
+            lastErrorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func deleteSubscriptionPlan(planId: String) async -> Bool {
+        guard let core else { return false }
+        do {
+            try await core.deleteSubscriptionPlan(planId: planId)
+            await reloadAllData()
+            return true
+        } catch {
+            lastErrorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func provisionWorker(
+        workerName: String?,
+        cfApiToken: String?,
+        cfAccountId: String?,
+        bearerToken: String?,
+        e2eeEnabled: Bool,
+        e2eePassphrase: String?
+    ) async -> CloudSyncProvisionOutcome? {
+        guard let syncCoordinator else { return nil }
+        isProvisioning = true
+        provisionStep = .preparing
+        lastErrorMessage = nil
+        defer {
+            isProvisioning = false
+        }
+        do {
+            let outcome = try await syncCoordinator.provisionCloudflareWorker(
+                workerName: workerName,
+                cfApiToken: cfApiToken,
+                cfAccountId: cfAccountId,
+                bearerToken: bearerToken,
+                e2eeEnabled: e2eeEnabled,
+                e2eePassphrase: e2eePassphrase,
+                onProgress: { [weak self] step in
+                    self?.provisionStep = step
+                }
+            )
+            latestPairingURI = outcome.pairingURI
+            syncConfigRevision &+= 1
+            await reloadAllData()
+            if !isDemoMode && !stageDemoPairing {
+                syncCoordinator.startForegroundPolling()
+            }
+            return outcome
         } catch {
             lastErrorMessage = error.localizedDescription
             return nil
@@ -759,7 +1237,8 @@ public final class AppStore {
                                 "window_label": "5h",
                                 "used_percent": 78.4,
                                 "resets_at_ms": resetsFiveHours,
-                                "source": "local_estimation"
+                                "source": "local_estimation",
+                                "monthly_fee_micro_usd": 200_000_000
                             ],
                             [
                                 "plan_id": "chatgpt_pro",
@@ -769,7 +1248,26 @@ public final class AppStore {
                                 "window_label": "7d",
                                 "used_percent": 34.2,
                                 "resets_at_ms": resetsSevenDays,
-                                "source": "official_header"
+                                "source": "official_header",
+                                "monthly_fee_micro_usd": 200_000_000
+                            ]
+                        ],
+                        "payg_snapshots": [
+                            [
+                                "account_id": "demo-ds-payg",
+                                "provider_id": "deepseek_harness",
+                                "account_name": "DeepSeek 官方账户",
+                                "enabled": true,
+                                "currency": "CNY",
+                                "total_balance_micro": 125_400_000,
+                                "granted_balance_micro": 20_000_000,
+                                "topped_up_balance_micro": 105_400_000,
+                                "remaining_manual_balance_micro_usd": NSNull(),
+                                "monthly_budget_micro_usd": 50_000_000,
+                                "today_cost_micro_usd": 1_850_000,
+                                "month_cost_micro_usd": 18_420_000,
+                                "fetched_at_ms": nowMs - 60_000,
+                                "updated_at_ms": nowMs - 60_000
                             ]
                         ]
                     ]

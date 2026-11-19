@@ -164,18 +164,44 @@ impl Storage {
                 });
             }
 
-            // Active user-configured subscription monthly fee total
+            // Active user-configured local subscription monthly fee total + synced remote fees
+            let local_dev = crate::storage::repository::query_local_device(conn)?;
+            let include_local_plans = device_id.is_none_or(|d| d == local_dev.device_id);
             let plans = load_subscription_plans(conn)?;
-            let subscription_monthly_fee_micro_usd: i64 = plans
-                .iter()
-                .filter(|p| {
-                    p.enabled
-                        && p.is_user_configured
-                        && p.monthly_fee_micro_usd > 0
-                        && provider.is_none_or(|pid| p.provider_id.eq_ignore_ascii_case(pid))
-                })
-                .map(|p| p.monthly_fee_micro_usd)
-                .sum();
+            let local_fee_micro_usd: i64 = if include_local_plans {
+                plans
+                    .iter()
+                    .filter(|p| {
+                        p.enabled
+                            && p.is_user_configured
+                            && p.monthly_fee_micro_usd > 0
+                            && provider.is_none_or(|pid| p.provider_id.eq_ignore_ascii_case(pid))
+                    })
+                    .map(|p| p.monthly_fee_micro_usd)
+                    .sum()
+            } else {
+                0
+            };
+
+            let mut fee_sql = String::from(
+                "SELECT COALESCE(SUM(max_fee), 0) FROM (SELECT MAX(monthly_fee_micro_usd) AS max_fee FROM remote_subscription_snapshots WHERE monthly_fee_micro_usd > 0 AND device_id != ?1",
+            );
+            let mut fee_params: Vec<Value> = vec![Value::Text(local_dev.device_id)];
+            let mut next_param = 2usize;
+            if let Some(prov) = provider {
+                fee_sql.push_str(&format!(" AND LOWER(provider_id) = LOWER(?{next_param})"));
+                fee_params.push(Value::Text(prov.to_string()));
+                next_param += 1;
+            }
+            if let Some(dev) = device_id {
+                fee_sql.push_str(&format!(" AND device_id = ?{next_param}"));
+                fee_params.push(Value::Text(dev.to_string()));
+            }
+            fee_sql.push_str(" GROUP BY device_id, plan_id)");
+            let remote_fee_micro_usd: i64 =
+                conn.query_row(&fee_sql, params_from_iter(fee_params), |r| r.get(0))?;
+            let subscription_monthly_fee_micro_usd =
+                local_fee_micro_usd.saturating_add(remote_fee_micro_usd);
 
             let subscription_period_fee_micro_usd = if custom_range.is_some() {
                 let fee_start_ms = if start_ms <= 0 {

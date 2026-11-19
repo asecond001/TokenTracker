@@ -7,9 +7,24 @@ public protocol SecretStoring: Sendable {
     func deleteSecret(account: KeychainSecretAccount) throws
 }
 
-public enum KeychainSecretAccount: String, CaseIterable, Sendable {
-    case syncBearerToken = "sync_bearer_token"
-    case e2eePassphrase = "e2ee_passphrase"
+public struct KeychainSecretAccount: RawRepresentable, Hashable, Sendable {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public init(_ rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let syncBearerToken = KeychainSecretAccount(rawValue: "sync_bearer_token")
+    public static let e2eePassphrase = KeychainSecretAccount(rawValue: "e2ee_passphrase")
+    public static let cloudflareApiToken = KeychainSecretAccount(rawValue: "cloudflare_api_token")
+
+    public static func providerApiKey(_ accountId: String) -> KeychainSecretAccount {
+        KeychainSecretAccount(rawValue: "provider_api_key_\(accountId)")
+    }
 }
 
 public enum KeychainStoreError: LocalizedError, Equatable {

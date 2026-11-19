@@ -197,6 +197,31 @@ impl Storage {
         })
     }
 
+    pub fn apply_official_balance_payload(
+        &self,
+        provider_id: &str,
+        endpoint: &str,
+        body_json: &str,
+        now_ms: i64,
+    ) -> CoreResult<crate::pricing::OfficialBalanceApplyResult> {
+        let parsed: serde_json::Value = serde_json::from_str(body_json)?;
+        let (snapshot, rate_limits) = crate::pricing::parse_official_balance_payload(
+            provider_id,
+            endpoint,
+            &parsed,
+            now_ms,
+        )?;
+        self.upsert_provider_balance(&snapshot)?;
+        let observed_windows_updated = rate_limits.len();
+        if !rate_limits.is_empty() {
+            self.upsert_observed_rate_limits(&rate_limits)?;
+        }
+        Ok(crate::pricing::OfficialBalanceApplyResult {
+            balance: snapshot,
+            observed_windows_updated,
+        })
+    }
+
     pub fn upsert_provider_balance(&self, balance: &ProviderBalanceSnapshot) -> CoreResult<()> {
         self.with_conn_mut(|conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

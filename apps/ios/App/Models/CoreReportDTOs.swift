@@ -88,6 +88,8 @@ public struct MonthlyQueryDTO: Codable, Equatable, Sendable {
     public let providerId: String?
     public let deviceId: String?
     public let tzOffsetMinutes: Int32
+    public let startMs: Int64?
+    public let endMs: Int64?
 
     enum CodingKeys: String, CodingKey {
         case year
@@ -95,6 +97,8 @@ public struct MonthlyQueryDTO: Codable, Equatable, Sendable {
         case providerId = "provider_id"
         case deviceId = "device_id"
         case tzOffsetMinutes = "tz_offset_minutes"
+        case startMs = "start_ms"
+        case endMs = "end_ms"
     }
 
     public init(
@@ -102,13 +106,17 @@ public struct MonthlyQueryDTO: Codable, Equatable, Sendable {
         month: UInt32,
         providerId: String? = nil,
         deviceId: String? = nil,
-        tzOffsetMinutes: Int32 = Int32(TimeZone.current.secondsFromGMT() / 60)
+        tzOffsetMinutes: Int32 = Int32(TimeZone.current.secondsFromGMT() / 60),
+        startMs: Int64? = nil,
+        endMs: Int64? = nil
     ) {
         self.year = year
         self.month = month
         self.providerId = providerId
         self.deviceId = deviceId
         self.tzOffsetMinutes = tzOffsetMinutes
+        self.startMs = startMs
+        self.endMs = endMs
     }
 }
 
@@ -153,7 +161,11 @@ public struct AppPreferencesDTO: Codable, Equatable, Sendable {
     public var autoSyncPricing: Bool
     public var exchangeRateAuto: Bool
     public var lastRateSyncAtMs: Int64?
+    public var lastPricingSyncAtMs: Int64?
+    public var lastSubscriptionSyncAtMs: Int64?
     public var autoCheckUpdates: Bool
+    public var floatingWindowEnabled: Bool
+    public var updatedAtMs: Int64
 
     enum CodingKeys: String, CodingKey {
         case currency
@@ -172,7 +184,11 @@ public struct AppPreferencesDTO: Codable, Equatable, Sendable {
         case autoSyncPricing = "auto_sync_pricing"
         case exchangeRateAuto = "exchange_rate_auto"
         case lastRateSyncAtMs = "last_rate_sync_at_ms"
+        case lastPricingSyncAtMs = "last_pricing_sync_at_ms"
+        case lastSubscriptionSyncAtMs = "last_subscription_sync_at_ms"
         case autoCheckUpdates = "auto_check_updates"
+        case floatingWindowEnabled = "floating_window_enabled"
+        case updatedAtMs = "updated_at_ms"
     }
 
     public init(from decoder: Decoder) throws {
@@ -193,7 +209,11 @@ public struct AppPreferencesDTO: Codable, Equatable, Sendable {
         self.autoSyncPricing = try container.decode(Bool.self, forKey: .autoSyncPricing)
         self.exchangeRateAuto = try container.decode(Bool.self, forKey: .exchangeRateAuto)
         self.lastRateSyncAtMs = try container.decodeIfPresent(Int64.self, forKey: .lastRateSyncAtMs)
+        self.lastPricingSyncAtMs = try container.decodeIfPresent(Int64.self, forKey: .lastPricingSyncAtMs)
+        self.lastSubscriptionSyncAtMs = try container.decodeIfPresent(Int64.self, forKey: .lastSubscriptionSyncAtMs)
         self.autoCheckUpdates = try container.decode(Bool.self, forKey: .autoCheckUpdates)
+        self.floatingWindowEnabled = try container.decodeIfPresent(Bool.self, forKey: .floatingWindowEnabled) ?? false
+        self.updatedAtMs = try container.decodeIfPresent(Int64.self, forKey: .updatedAtMs) ?? 0
     }
 }
 
@@ -232,6 +252,7 @@ public struct RemoteSubscriptionSnapshotDTO: Codable, Equatable, Identifiable, S
     public let usedPercent: Double
     public let resetsAtMs: Int64?
     public let source: String
+    public let monthlyFeeMicroUsd: Int64
     public let updatedAtMs: Int64
 
     public var id: String { "\(deviceId)::\(planId)::\(windowId)" }
@@ -247,6 +268,91 @@ public struct RemoteSubscriptionSnapshotDTO: Codable, Equatable, Identifiable, S
         case usedPercent = "used_percent"
         case resetsAtMs = "resets_at_ms"
         case source
+        case monthlyFeeMicroUsd = "monthly_fee_micro_usd"
+        case updatedAtMs = "updated_at_ms"
+    }
+
+    public init(
+        deviceId: String,
+        deviceDisplayName: String,
+        planId: String,
+        windowId: String,
+        providerId: String,
+        planName: String,
+        windowLabel: String,
+        usedPercent: Double,
+        resetsAtMs: Int64?,
+        source: String,
+        monthlyFeeMicroUsd: Int64 = 0,
+        updatedAtMs: Int64
+    ) {
+        self.deviceId = deviceId
+        self.deviceDisplayName = deviceDisplayName
+        self.planId = planId
+        self.windowId = windowId
+        self.providerId = providerId
+        self.planName = planName
+        self.windowLabel = windowLabel
+        self.usedPercent = usedPercent
+        self.resetsAtMs = resetsAtMs
+        self.source = source
+        self.monthlyFeeMicroUsd = monthlyFeeMicroUsd
+        self.updatedAtMs = updatedAtMs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.deviceId = try container.decode(String.self, forKey: .deviceId)
+        self.deviceDisplayName = try container.decode(String.self, forKey: .deviceDisplayName)
+        self.planId = try container.decode(String.self, forKey: .planId)
+        self.windowId = try container.decode(String.self, forKey: .windowId)
+        self.providerId = try container.decode(String.self, forKey: .providerId)
+        self.planName = try container.decode(String.self, forKey: .planName)
+        self.windowLabel = try container.decode(String.self, forKey: .windowLabel)
+        self.usedPercent = try container.decode(Double.self, forKey: .usedPercent)
+        self.resetsAtMs = try container.decodeIfPresent(Int64.self, forKey: .resetsAtMs)
+        self.source = try container.decode(String.self, forKey: .source)
+        self.monthlyFeeMicroUsd = try container.decodeIfPresent(Int64.self, forKey: .monthlyFeeMicroUsd) ?? 0
+        self.updatedAtMs = try container.decode(Int64.self, forKey: .updatedAtMs)
+    }
+}
+
+public struct RemotePaygSnapshotDTO: Codable, Equatable, Identifiable, Sendable {
+    public let deviceId: String
+    public let deviceDisplayName: String
+    public let accountId: String
+    public let providerId: String
+    public let accountName: String
+    public let enabled: Bool
+    public let currency: String?
+    public let totalBalanceMicro: Int64?
+    public let grantedBalanceMicro: Int64?
+    public let toppedUpBalanceMicro: Int64?
+    public let remainingManualBalanceMicroUsd: Int64?
+    public let monthlyBudgetMicroUsd: Int64?
+    public let todayCostMicroUsd: Int64
+    public let monthCostMicroUsd: Int64
+    public let fetchedAtMs: Int64?
+    public let updatedAtMs: Int64
+
+    public var id: String { "\(deviceId)::\(accountId)" }
+
+    enum CodingKeys: String, CodingKey {
+        case deviceId = "device_id"
+        case deviceDisplayName = "device_display_name"
+        case accountId = "account_id"
+        case providerId = "provider_id"
+        case accountName = "account_name"
+        case enabled
+        case currency
+        case totalBalanceMicro = "total_balance_micro"
+        case grantedBalanceMicro = "granted_balance_micro"
+        case toppedUpBalanceMicro = "topped_up_balance_micro"
+        case remainingManualBalanceMicroUsd = "remaining_manual_balance_micro_usd"
+        case monthlyBudgetMicroUsd = "monthly_budget_micro_usd"
+        case todayCostMicroUsd = "today_cost_micro_usd"
+        case monthCostMicroUsd = "month_cost_micro_usd"
+        case fetchedAtMs = "fetched_at_ms"
         case updatedAtMs = "updated_at_ms"
     }
 }
@@ -258,6 +364,7 @@ public struct MobileBootstrapStateDTO: Codable, Equatable, Sendable {
     public let syncConfig: SyncConfigStateDTO
     public let syncedDevices: [SyncedDevicePulseDTO]
     public let remoteSubscriptions: [RemoteSubscriptionSnapshotDTO]
+    public let remotePaygAccounts: [RemotePaygSnapshotDTO]
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -266,6 +373,18 @@ public struct MobileBootstrapStateDTO: Codable, Equatable, Sendable {
         case syncConfig = "sync_config"
         case syncedDevices = "synced_devices"
         case remoteSubscriptions = "remote_subscriptions"
+        case remotePaygAccounts = "remote_payg_accounts"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.schemaVersion = try container.decode(UInt32.self, forKey: .schemaVersion)
+        self.viewerDeviceId = try container.decode(String.self, forKey: .viewerDeviceId)
+        self.preferences = try container.decode(AppPreferencesDTO.self, forKey: .preferences)
+        self.syncConfig = try container.decode(SyncConfigStateDTO.self, forKey: .syncConfig)
+        self.syncedDevices = try container.decode([SyncedDevicePulseDTO].self, forKey: .syncedDevices)
+        self.remoteSubscriptions = try container.decode([RemoteSubscriptionSnapshotDTO].self, forKey: .remoteSubscriptions)
+        self.remotePaygAccounts = try container.decodeIfPresent([RemotePaygSnapshotDTO].self, forKey: .remotePaygAccounts) ?? []
     }
 }
 
@@ -274,24 +393,44 @@ public struct MobilePreferencesPatchDTO: Codable, Equatable, Sendable {
     public let usdToCnyRate: String?
     public let theme: String?
     public let exchangeRateAuto: Bool?
+    public let autoSyncPricing: Bool?
+    public let deviceDisplayName: String?
+    public let bgMode: String?
+    public let bgPresetId: String?
+    public let bgOpacity: Double?
 
     enum CodingKeys: String, CodingKey {
         case currency
         case usdToCnyRate = "usd_to_cny_rate"
         case theme
         case exchangeRateAuto = "exchange_rate_auto"
+        case autoSyncPricing = "auto_sync_pricing"
+        case deviceDisplayName = "device_display_name"
+        case bgMode = "bg_mode"
+        case bgPresetId = "bg_preset_id"
+        case bgOpacity = "bg_opacity"
     }
 
     public init(
         currency: String? = nil,
         usdToCnyRate: String? = nil,
         theme: String? = nil,
-        exchangeRateAuto: Bool? = nil
+        exchangeRateAuto: Bool? = nil,
+        autoSyncPricing: Bool? = nil,
+        deviceDisplayName: String? = nil,
+        bgMode: String? = nil,
+        bgPresetId: String? = nil,
+        bgOpacity: Double? = nil
     ) {
         self.currency = currency
         self.usdToCnyRate = usdToCnyRate
         self.theme = theme
         self.exchangeRateAuto = exchangeRateAuto
+        self.autoSyncPricing = autoSyncPricing
+        self.deviceDisplayName = deviceDisplayName
+        self.bgMode = bgMode
+        self.bgPresetId = bgPresetId
+        self.bgOpacity = bgOpacity
     }
 }
 
@@ -380,6 +519,7 @@ public struct TrendPointDTO: Codable, Equatable, Identifiable, Sendable {
     public let tokens: Int64
     public let costMicroUsd: Int64
     public let requests: Int64
+    public let cacheHitRatio: Double
 
     public var id: Int64 { bucketStartMs }
 
@@ -388,6 +528,30 @@ public struct TrendPointDTO: Codable, Equatable, Identifiable, Sendable {
         case tokens
         case costMicroUsd = "cost_micro_usd"
         case requests
+        case cacheHitRatio = "cache_hit_ratio"
+    }
+
+    public init(
+        bucketStartMs: Int64,
+        tokens: Int64,
+        costMicroUsd: Int64,
+        requests: Int64,
+        cacheHitRatio: Double = 0
+    ) {
+        self.bucketStartMs = bucketStartMs
+        self.tokens = tokens
+        self.costMicroUsd = costMicroUsd
+        self.requests = requests
+        self.cacheHitRatio = cacheHitRatio
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.bucketStartMs = try container.decode(Int64.self, forKey: .bucketStartMs)
+        self.tokens = try container.decode(Int64.self, forKey: .tokens)
+        self.costMicroUsd = try container.decode(Int64.self, forKey: .costMicroUsd)
+        self.requests = try container.decode(Int64.self, forKey: .requests)
+        self.cacheHitRatio = try container.decodeIfPresent(Double.self, forKey: .cacheHitRatio) ?? 0
     }
 }
 
@@ -417,6 +581,8 @@ public struct TrendComparisonRowDTO: Codable, Equatable, Identifiable, Sendable 
     public let deltaPct: Double?
     public let currentCostMicroUsd: Int64
     public let previousCostMicroUsd: Int64
+    public let costDeltaPct: Double?
+    public let cacheHitRatio: Double
     public let requests: Int64
 
     public var id: String { key }
@@ -429,7 +595,101 @@ public struct TrendComparisonRowDTO: Codable, Equatable, Identifiable, Sendable 
         case deltaPct = "delta_pct"
         case currentCostMicroUsd = "current_cost_micro_usd"
         case previousCostMicroUsd = "previous_cost_micro_usd"
+        case costDeltaPct = "cost_delta_pct"
+        case cacheHitRatio = "cache_hit_ratio"
         case requests
+    }
+
+    public init(
+        key: String,
+        label: String,
+        currentTokens: Int64,
+        previousTokens: Int64,
+        deltaPct: Double?,
+        currentCostMicroUsd: Int64,
+        previousCostMicroUsd: Int64,
+        costDeltaPct: Double? = nil,
+        cacheHitRatio: Double = 0,
+        requests: Int64
+    ) {
+        self.key = key
+        self.label = label
+        self.currentTokens = currentTokens
+        self.previousTokens = previousTokens
+        self.deltaPct = deltaPct
+        self.currentCostMicroUsd = currentCostMicroUsd
+        self.previousCostMicroUsd = previousCostMicroUsd
+        self.costDeltaPct = costDeltaPct
+        self.cacheHitRatio = cacheHitRatio
+        self.requests = requests
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.key = try container.decode(String.self, forKey: .key)
+        self.label = try container.decode(String.self, forKey: .label)
+        self.currentTokens = try container.decode(Int64.self, forKey: .currentTokens)
+        self.previousTokens = try container.decode(Int64.self, forKey: .previousTokens)
+        self.deltaPct = try container.decodeIfPresent(Double.self, forKey: .deltaPct)
+        self.currentCostMicroUsd = try container.decode(Int64.self, forKey: .currentCostMicroUsd)
+        self.previousCostMicroUsd = try container.decode(Int64.self, forKey: .previousCostMicroUsd)
+        self.costDeltaPct = try container.decodeIfPresent(Double.self, forKey: .costDeltaPct)
+        self.cacheHitRatio = try container.decodeIfPresent(Double.self, forKey: .cacheHitRatio) ?? 0
+        self.requests = try container.decode(Int64.self, forKey: .requests)
+    }
+}
+
+public struct LiveModelSpeedDTO: Codable, Equatable, Identifiable, Sendable {
+    public let providerId: String
+    public let modelId: String
+    public let outputTps: Double
+    public let activityState: String
+
+    public var id: String { "\(providerId)::\(modelId)" }
+
+    enum CodingKeys: String, CodingKey {
+        case providerId = "provider_id"
+        case modelId = "model_id"
+        case outputTps = "output_tps"
+        case activityState = "activity_state"
+    }
+}
+
+public struct ActiveSessionSummaryDTO: Codable, Equatable, Identifiable, Sendable {
+    public let sessionKey: String
+    public let sessionTitle: String?
+    public let providerId: String
+    public let modelId: String
+    public let projectLabel: String
+    public let activityState: String
+    public let startedAtMs: Int64
+    public let lastActiveAtMs: Int64
+    public let requestCount: Int64
+    public let totalTokens: Int64
+    public let inputTokens: Int64
+    public let outputTokens: Int64
+    public let cacheReadTokens: Int64
+    public let estimatedCostMicroUsd: Int64
+    public let latestOutputTps: Double?
+
+    public var id: String { sessionKey }
+
+    enum CodingKeys: String, CodingKey {
+        case sessionKey = "session_key"
+        case sessionTitle = "session_title"
+        case providerId = "provider_id"
+        case modelId = "model_id"
+        case projectLabel = "project_label"
+        case activityState = "activity_state"
+        case startedAtMs = "started_at_ms"
+        case lastActiveAtMs = "last_active_at_ms"
+        case requestCount = "request_count"
+        case totalTokens = "total_tokens"
+        case inputTokens = "input_tokens"
+        case outputTokens = "output_tokens"
+        case cacheReadTokens = "cache_read_tokens"
+        case estimatedCostMicroUsd = "estimated_cost_micro_usd"
+        case latestOutputTps = "latest_output_tps"
     }
 }
 
@@ -438,10 +698,17 @@ public struct OverviewReportDTO: Codable, Equatable, Sendable {
     public let totalCostMicroUsd: Int64
     public let todayTokens: Int64
     public let todayCostMicroUsd: Int64
+    public let todayRequests: Int64
+    public let todayCacheHitRatio: Double
+    public let todayCacheSavedMicroUsd: Int64
+    public let todayTokensDeltaPct: Double?
+    public let todayCostDeltaPct: Double?
+    public let todayHourlyPulse: [TimeBucketPointDTO]
     public let cacheHitRatio: Double
     public let avgOutputTps: Double
     public let peakOutputTps: Double
     public let latestOutputTps: Double?
+    public let liveModelSpeeds: [LiveModelSpeedDTO]
     public let totalRequests: Int64
     public let observableSteps: Int64
     public let tokensDeltaPct: Double?
@@ -454,16 +721,24 @@ public struct OverviewReportDTO: Codable, Equatable, Sendable {
     public let providers: [ProviderSummaryRowDTO]
     public let providerShares: [UsageShareItemDTO]
     public let topModelShares: [UsageShareItemDTO]
+    public let activeSessions: [ActiveSessionSummaryDTO]
 
     enum CodingKeys: String, CodingKey {
         case totalTokens = "total_tokens"
         case totalCostMicroUsd = "total_cost_micro_usd"
         case todayTokens = "today_tokens"
         case todayCostMicroUsd = "today_cost_micro_usd"
+        case todayRequests = "today_requests"
+        case todayCacheHitRatio = "today_cache_hit_ratio"
+        case todayCacheSavedMicroUsd = "today_cache_saved_micro_usd"
+        case todayTokensDeltaPct = "today_tokens_delta_pct"
+        case todayCostDeltaPct = "today_cost_delta_pct"
+        case todayHourlyPulse = "today_hourly_pulse"
         case cacheHitRatio = "cache_hit_ratio"
         case avgOutputTps = "avg_output_tps"
         case peakOutputTps = "peak_output_tps"
         case latestOutputTps = "latest_output_tps"
+        case liveModelSpeeds = "live_model_speeds"
         case totalRequests = "total_requests"
         case observableSteps = "observable_steps"
         case tokensDeltaPct = "tokens_delta_pct"
@@ -476,6 +751,41 @@ public struct OverviewReportDTO: Codable, Equatable, Sendable {
         case providers
         case providerShares = "provider_shares"
         case topModelShares = "top_model_shares"
+        case activeSessions = "active_sessions"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.totalTokens = try container.decode(Int64.self, forKey: .totalTokens)
+        self.totalCostMicroUsd = try container.decode(Int64.self, forKey: .totalCostMicroUsd)
+        self.todayTokens = try container.decode(Int64.self, forKey: .todayTokens)
+        self.todayCostMicroUsd = try container.decode(Int64.self, forKey: .todayCostMicroUsd)
+        let decodedTotalRequests = try container.decode(Int64.self, forKey: .totalRequests)
+        self.totalRequests = decodedTotalRequests
+        self.todayRequests = try container.decodeIfPresent(Int64.self, forKey: .todayRequests) ?? decodedTotalRequests
+        let decodedCacheRatio = try container.decode(Double.self, forKey: .cacheHitRatio)
+        self.cacheHitRatio = decodedCacheRatio
+        self.todayCacheHitRatio = try container.decodeIfPresent(Double.self, forKey: .todayCacheHitRatio) ?? decodedCacheRatio
+        self.todayCacheSavedMicroUsd = try container.decodeIfPresent(Int64.self, forKey: .todayCacheSavedMicroUsd) ?? 0
+        self.todayTokensDeltaPct = try container.decodeIfPresent(Double.self, forKey: .todayTokensDeltaPct)
+        self.todayCostDeltaPct = try container.decodeIfPresent(Double.self, forKey: .todayCostDeltaPct)
+        self.todayHourlyPulse = try container.decodeIfPresent([TimeBucketPointDTO].self, forKey: .todayHourlyPulse) ?? []
+        self.avgOutputTps = try container.decode(Double.self, forKey: .avgOutputTps)
+        self.peakOutputTps = try container.decode(Double.self, forKey: .peakOutputTps)
+        self.latestOutputTps = try container.decodeIfPresent(Double.self, forKey: .latestOutputTps)
+        self.liveModelSpeeds = try container.decodeIfPresent([LiveModelSpeedDTO].self, forKey: .liveModelSpeeds) ?? []
+        self.observableSteps = try container.decode(Int64.self, forKey: .observableSteps)
+        self.tokensDeltaPct = try container.decodeIfPresent(Double.self, forKey: .tokensDeltaPct)
+        self.costDeltaPct = try container.decodeIfPresent(Double.self, forKey: .costDeltaPct)
+        self.cacheDeltaPct = try container.decodeIfPresent(Double.self, forKey: .cacheDeltaPct)
+        self.tpsDeltaPct = try container.decodeIfPresent(Double.self, forKey: .tpsDeltaPct)
+        self.seriesGranularity = try container.decode(String.self, forKey: .seriesGranularity)
+        self.series = try container.decode([TimeBucketPointDTO].self, forKey: .series)
+        self.providerSeries = try container.decode([TrendSeriesDTO].self, forKey: .providerSeries)
+        self.providers = try container.decode([ProviderSummaryRowDTO].self, forKey: .providers)
+        self.providerShares = try container.decode([UsageShareItemDTO].self, forKey: .providerShares)
+        self.topModelShares = try container.decode([UsageShareItemDTO].self, forKey: .topModelShares)
+        self.activeSessions = try container.decodeIfPresent([ActiveSessionSummaryDTO].self, forKey: .activeSessions) ?? []
     }
 }
 
@@ -552,8 +862,13 @@ public struct MonthlyReportDTO: Codable, Equatable, Sendable {
     public let monthTotalTokens: Int64
     public let monthTotalRequests: Int64
     public let monthCacheSavedMicroUsd: Int64
+    public let providerShares: [UsageShareItemDTO]
+    public let modelShares: [UsageShareItemDTO]
     public let dailyLedger: [MonthlyDailyLedgerRowDTO]
     public let heatmap365d: [HeatmapDayCellDTO]
+    public let rangeStartMs: Int64?
+    public let rangeEndMs: Int64?
+    public let subscriptionPeriodFeeMicroUsd: Int64?
 
     enum CodingKeys: String, CodingKey {
         case year
@@ -564,8 +879,114 @@ public struct MonthlyReportDTO: Codable, Equatable, Sendable {
         case monthTotalTokens = "month_total_tokens"
         case monthTotalRequests = "month_total_requests"
         case monthCacheSavedMicroUsd = "month_cache_saved_micro_usd"
+        case providerShares = "provider_shares"
+        case modelShares = "model_shares"
         case dailyLedger = "daily_ledger"
         case heatmap365d = "heatmap_365d"
+        case rangeStartMs = "range_start_ms"
+        case rangeEndMs = "range_end_ms"
+        case subscriptionPeriodFeeMicroUsd = "subscription_period_fee_micro_usd"
+    }
+
+    public init(
+        year: Int32,
+        month: UInt32,
+        apiEquivalentCostMicroUsd: Int64,
+        subscriptionMonthlyFeeMicroUsd: Int64,
+        roiMultiplier: Double?,
+        monthTotalTokens: Int64,
+        monthTotalRequests: Int64,
+        monthCacheSavedMicroUsd: Int64,
+        providerShares: [UsageShareItemDTO] = [],
+        modelShares: [UsageShareItemDTO] = [],
+        dailyLedger: [MonthlyDailyLedgerRowDTO],
+        heatmap365d: [HeatmapDayCellDTO],
+        rangeStartMs: Int64? = nil,
+        rangeEndMs: Int64? = nil,
+        subscriptionPeriodFeeMicroUsd: Int64? = nil
+    ) {
+        self.year = year
+        self.month = month
+        self.apiEquivalentCostMicroUsd = apiEquivalentCostMicroUsd
+        self.subscriptionMonthlyFeeMicroUsd = subscriptionMonthlyFeeMicroUsd
+        self.roiMultiplier = roiMultiplier
+        self.monthTotalTokens = monthTotalTokens
+        self.monthTotalRequests = monthTotalRequests
+        self.monthCacheSavedMicroUsd = monthCacheSavedMicroUsd
+        self.providerShares = providerShares
+        self.modelShares = modelShares
+        self.dailyLedger = dailyLedger
+        self.heatmap365d = heatmap365d
+        self.rangeStartMs = rangeStartMs
+        self.rangeEndMs = rangeEndMs
+        self.subscriptionPeriodFeeMicroUsd = subscriptionPeriodFeeMicroUsd
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.year = try container.decode(Int32.self, forKey: .year)
+        self.month = try container.decode(UInt32.self, forKey: .month)
+        self.apiEquivalentCostMicroUsd = try container.decode(Int64.self, forKey: .apiEquivalentCostMicroUsd)
+        self.subscriptionMonthlyFeeMicroUsd = try container.decode(Int64.self, forKey: .subscriptionMonthlyFeeMicroUsd)
+        self.roiMultiplier = try container.decodeIfPresent(Double.self, forKey: .roiMultiplier)
+        self.monthTotalTokens = try container.decode(Int64.self, forKey: .monthTotalTokens)
+        self.monthTotalRequests = try container.decode(Int64.self, forKey: .monthTotalRequests)
+        self.monthCacheSavedMicroUsd = try container.decode(Int64.self, forKey: .monthCacheSavedMicroUsd)
+        self.providerShares = try container.decodeIfPresent([UsageShareItemDTO].self, forKey: .providerShares) ?? []
+        self.modelShares = try container.decodeIfPresent([UsageShareItemDTO].self, forKey: .modelShares) ?? []
+        self.dailyLedger = try container.decode([MonthlyDailyLedgerRowDTO].self, forKey: .dailyLedger)
+        self.heatmap365d = try container.decode([HeatmapDayCellDTO].self, forKey: .heatmap365d)
+        self.rangeStartMs = try container.decodeIfPresent(Int64.self, forKey: .rangeStartMs)
+        self.rangeEndMs = try container.decodeIfPresent(Int64.self, forKey: .rangeEndMs)
+        self.subscriptionPeriodFeeMicroUsd = try container.decodeIfPresent(Int64.self, forKey: .subscriptionPeriodFeeMicroUsd)
+    }
+}
+
+public struct ModelPricingEntryDTO: Codable, Equatable, Identifiable, Sendable {
+    public let modelPattern: String
+    public let providerId: String
+    public let inputPerMMicroUsd: Int64
+    public let outputPerMMicroUsd: Int64
+    public let cacheReadPerMMicroUsd: Int64
+    public let cacheWritePerMMicroUsd: Int64
+    public let reasoningPerMMicroUsd: Int64
+    public let isUserOverride: Bool
+    public let effectiveFrom: String
+
+    public var id: String { "\(providerId)::\(modelPattern)" }
+
+    enum CodingKeys: String, CodingKey {
+        case modelPattern = "model_pattern"
+        case providerId = "provider_id"
+        case inputPerMMicroUsd = "input_per_m_micro_usd"
+        case outputPerMMicroUsd = "output_per_m_micro_usd"
+        case cacheReadPerMMicroUsd = "cache_read_per_m_micro_usd"
+        case cacheWritePerMMicroUsd = "cache_write_per_m_micro_usd"
+        case reasoningPerMMicroUsd = "reasoning_per_m_micro_usd"
+        case isUserOverride = "is_user_override"
+        case effectiveFrom = "effective_from"
+    }
+
+    public init(
+        modelPattern: String,
+        providerId: String,
+        inputPerMMicroUsd: Int64,
+        outputPerMMicroUsd: Int64,
+        cacheReadPerMMicroUsd: Int64,
+        cacheWritePerMMicroUsd: Int64,
+        reasoningPerMMicroUsd: Int64,
+        isUserOverride: Bool,
+        effectiveFrom: String
+    ) {
+        self.modelPattern = modelPattern
+        self.providerId = providerId
+        self.inputPerMMicroUsd = inputPerMMicroUsd
+        self.outputPerMMicroUsd = outputPerMMicroUsd
+        self.cacheReadPerMMicroUsd = cacheReadPerMMicroUsd
+        self.cacheWritePerMMicroUsd = cacheWritePerMMicroUsd
+        self.reasoningPerMMicroUsd = reasoningPerMMicroUsd
+        self.isUserOverride = isUserOverride
+        self.effectiveFrom = effectiveFrom
     }
 }
 
@@ -584,6 +1005,7 @@ public struct ModelStatRowDTO: Codable, Equatable, Identifiable, Sendable {
     public let estimatedCostMicroUsd: Int64
     public let costShareRatio: Double
     public let avgOutputTps: Double
+    public let effectivePricing: ModelPricingEntryDTO?
 
     public var id: String { "\(providerId)::\(modelId)" }
 
@@ -602,6 +1024,60 @@ public struct ModelStatRowDTO: Codable, Equatable, Identifiable, Sendable {
         case estimatedCostMicroUsd = "estimated_cost_micro_usd"
         case costShareRatio = "cost_share_ratio"
         case avgOutputTps = "avg_output_tps"
+        case effectivePricing = "effective_pricing"
+    }
+
+    public init(
+        modelId: String,
+        providerId: String,
+        requests: Int64,
+        observableSteps: Int64,
+        inputTokens: Int64,
+        outputTokens: Int64,
+        cacheReadTokens: Int64,
+        cacheWriteTokens: Int64,
+        reasoningTokens: Int64,
+        totalTokens: Int64,
+        cacheSavedMicroUsd: Int64,
+        estimatedCostMicroUsd: Int64,
+        costShareRatio: Double,
+        avgOutputTps: Double,
+        effectivePricing: ModelPricingEntryDTO? = nil
+    ) {
+        self.modelId = modelId
+        self.providerId = providerId
+        self.requests = requests
+        self.observableSteps = observableSteps
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.cacheReadTokens = cacheReadTokens
+        self.cacheWriteTokens = cacheWriteTokens
+        self.reasoningTokens = reasoningTokens
+        self.totalTokens = totalTokens
+        self.cacheSavedMicroUsd = cacheSavedMicroUsd
+        self.estimatedCostMicroUsd = estimatedCostMicroUsd
+        self.costShareRatio = costShareRatio
+        self.avgOutputTps = avgOutputTps
+        self.effectivePricing = effectivePricing
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.modelId = try container.decode(String.self, forKey: .modelId)
+        self.providerId = try container.decode(String.self, forKey: .providerId)
+        self.requests = try container.decode(Int64.self, forKey: .requests)
+        self.observableSteps = try container.decode(Int64.self, forKey: .observableSteps)
+        self.inputTokens = try container.decode(Int64.self, forKey: .inputTokens)
+        self.outputTokens = try container.decode(Int64.self, forKey: .outputTokens)
+        self.cacheReadTokens = try container.decode(Int64.self, forKey: .cacheReadTokens)
+        self.cacheWriteTokens = try container.decode(Int64.self, forKey: .cacheWriteTokens)
+        self.reasoningTokens = try container.decode(Int64.self, forKey: .reasoningTokens)
+        self.totalTokens = try container.decode(Int64.self, forKey: .totalTokens)
+        self.cacheSavedMicroUsd = try container.decode(Int64.self, forKey: .cacheSavedMicroUsd)
+        self.estimatedCostMicroUsd = try container.decode(Int64.self, forKey: .estimatedCostMicroUsd)
+        self.costShareRatio = try container.decode(Double.self, forKey: .costShareRatio)
+        self.avgOutputTps = try container.decode(Double.self, forKey: .avgOutputTps)
+        self.effectivePricing = try container.decodeIfPresent(ModelPricingEntryDTO.self, forKey: .effectivePricing)
     }
 
     public var cacheHitPercent: Double {
@@ -615,11 +1091,33 @@ public struct ModelStatsReportDTO: Codable, Equatable, Sendable {
     public let rows: [ModelStatRowDTO]
     public let totalCostMicroUsd: Int64
     public let totalCacheSavedMicroUsd: Int64
+    public let catalog: [ModelPricingEntryDTO]
 
     enum CodingKeys: String, CodingKey {
         case rows
         case totalCostMicroUsd = "total_cost_micro_usd"
         case totalCacheSavedMicroUsd = "total_cache_saved_micro_usd"
+        case catalog
+    }
+
+    public init(
+        rows: [ModelStatRowDTO],
+        totalCostMicroUsd: Int64,
+        totalCacheSavedMicroUsd: Int64,
+        catalog: [ModelPricingEntryDTO] = []
+    ) {
+        self.rows = rows
+        self.totalCostMicroUsd = totalCostMicroUsd
+        self.totalCacheSavedMicroUsd = totalCacheSavedMicroUsd
+        self.catalog = catalog
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.rows = try container.decode([ModelStatRowDTO].self, forKey: .rows)
+        self.totalCostMicroUsd = try container.decode(Int64.self, forKey: .totalCostMicroUsd)
+        self.totalCacheSavedMicroUsd = try container.decode(Int64.self, forKey: .totalCacheSavedMicroUsd)
+        self.catalog = try container.decodeIfPresent([ModelPricingEntryDTO].self, forKey: .catalog) ?? []
     }
 }
 
@@ -795,5 +1293,369 @@ public struct DesktopPairingPayload: Codable, Equatable, Sendable {
             e2ee: decoded.e2ee,
             key: cleanedKey?.isEmpty == true ? nil : cleanedKey
         )
+    }
+
+    /// Builds a `tokenvane://pair?v=1...` pairing link matching desktop/Rust `build_sync_pairing_uri`.
+    public static func makePairingURI(
+        url: String,
+        token: String,
+        e2ee: Bool,
+        key: String? = nil
+    ) -> String? {
+        let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedURL = trimmedURL.hasSuffix("/") ? String(trimmedURL.dropLast()) : trimmedURL
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedURL.isEmpty,
+              let parsed = URL(string: normalizedURL),
+              parsed.scheme != nil,
+              parsed.host != nil,
+              !trimmedToken.isEmpty else {
+            return nil
+        }
+
+        var items: [URLQueryItem] = [
+            URLQueryItem(name: "v", value: "1"),
+            URLQueryItem(name: "url", value: normalizedURL),
+            URLQueryItem(name: "token", value: trimmedToken),
+            URLQueryItem(name: "e2ee", value: e2ee ? "1" : "0")
+        ]
+        if e2ee, let trimmedKey = key?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedKey.isEmpty {
+            items.append(URLQueryItem(name: "key", value: trimmedKey))
+        }
+
+        var components = URLComponents()
+        components.scheme = "tokenvane"
+        components.host = "pair"
+        components.queryItems = items
+        return components.string
+    }
+}
+
+public struct SubscriptionWindowRuleDTO: Codable, Equatable, Identifiable, Sendable {
+    public let windowId: String
+    public let label: String
+    public let durationHours: Int64
+    public let rolling: Bool
+    public let unit: String
+    public let limitValue: Int64
+    public let warningPercent: UInt8
+    public let criticalPercent: UInt8
+
+    public var id: String { windowId }
+
+    enum CodingKeys: String, CodingKey {
+        case windowId = "window_id"
+        case label
+        case durationHours = "duration_hours"
+        case rolling
+        case unit
+        case limitValue = "limit_value"
+        case warningPercent = "warning_percent"
+        case criticalPercent = "critical_percent"
+    }
+
+    public init(
+        windowId: String,
+        label: String,
+        durationHours: Int64,
+        rolling: Bool,
+        unit: String,
+        limitValue: Int64,
+        warningPercent: UInt8 = 80,
+        criticalPercent: UInt8 = 95
+    ) {
+        self.windowId = windowId
+        self.label = label
+        self.durationHours = durationHours
+        self.rolling = rolling
+        self.unit = unit
+        self.limitValue = limitValue
+        self.warningPercent = warningPercent
+        self.criticalPercent = criticalPercent
+    }
+}
+
+public struct SubscriptionWindowStatusDTO: Codable, Equatable, Identifiable, Sendable {
+    public let windowId: String
+    public let label: String
+    public let durationHours: Int64
+    public let rolling: Bool
+    public let unit: String
+    public let usedValue: Int64
+    public let limitValue: Int64
+    public let usedPercent: Double
+    public let warningPercent: UInt8
+    public let criticalPercent: UInt8
+    public let burnRatePerHour: Double
+    public let projectedExhaustionHours: Double?
+    public let resetsAtMs: Int64?
+    public let resetsInSeconds: Int64
+    public let source: String
+    public let alertLevel: String
+
+    public var id: String { windowId }
+
+    enum CodingKeys: String, CodingKey {
+        case windowId = "window_id"
+        case label
+        case durationHours = "duration_hours"
+        case rolling
+        case unit
+        case usedValue = "used_value"
+        case limitValue = "limit_value"
+        case usedPercent = "used_percent"
+        case warningPercent = "warning_percent"
+        case criticalPercent = "critical_percent"
+        case burnRatePerHour = "burn_rate_per_hour"
+        case projectedExhaustionHours = "projected_exhaustion_hours"
+        case resetsAtMs = "resets_at_ms"
+        case resetsInSeconds = "resets_in_seconds"
+        case source
+        case alertLevel = "alert_level"
+    }
+}
+
+public struct SubscriptionPlanDTO: Codable, Equatable, Identifiable, Sendable {
+    public let planId: String
+    public let providerId: String
+    public let planName: String
+    public let enabled: Bool
+    public let monthlyFeeMicroUsd: Int64
+    public let windows: [SubscriptionWindowRuleDTO]
+    public let isUserConfigured: Bool
+    public let autoSource: String?
+    public let updatedAtMs: Int64
+
+    public var id: String { planId }
+
+    enum CodingKeys: String, CodingKey {
+        case planId = "plan_id"
+        case providerId = "provider_id"
+        case planName = "plan_name"
+        case enabled
+        case monthlyFeeMicroUsd = "monthly_fee_micro_usd"
+        case windows
+        case isUserConfigured = "is_user_configured"
+        case autoSource = "auto_source"
+        case updatedAtMs = "updated_at_ms"
+    }
+
+    public init(
+        planId: String,
+        providerId: String,
+        planName: String,
+        enabled: Bool = true,
+        monthlyFeeMicroUsd: Int64,
+        windows: [SubscriptionWindowRuleDTO],
+        isUserConfigured: Bool = true,
+        autoSource: String? = nil,
+        updatedAtMs: Int64
+    ) {
+        self.planId = planId
+        self.providerId = providerId
+        self.planName = planName
+        self.enabled = enabled
+        self.monthlyFeeMicroUsd = monthlyFeeMicroUsd
+        self.windows = windows
+        self.isUserConfigured = isUserConfigured
+        self.autoSource = autoSource
+        self.updatedAtMs = updatedAtMs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.planId = try container.decode(String.self, forKey: .planId)
+        self.providerId = try container.decode(String.self, forKey: .providerId)
+        self.planName = try container.decode(String.self, forKey: .planName)
+        self.enabled = try container.decode(Bool.self, forKey: .enabled)
+        self.monthlyFeeMicroUsd = try container.decode(Int64.self, forKey: .monthlyFeeMicroUsd)
+        self.windows = try container.decode([SubscriptionWindowRuleDTO].self, forKey: .windows)
+        self.isUserConfigured = try container.decodeIfPresent(Bool.self, forKey: .isUserConfigured) ?? false
+        self.autoSource = try container.decodeIfPresent(String.self, forKey: .autoSource)
+        self.updatedAtMs = try container.decode(Int64.self, forKey: .updatedAtMs)
+    }
+}
+
+public struct SubscriptionPlanTemplateDTO: Codable, Equatable, Identifiable, Sendable {
+    public let templateId: String
+    public let providerId: String
+    public let planName: String
+    public let monthlyFeeMicroUsd: Int64
+    public let windows: [SubscriptionWindowRuleDTO]
+    public let description: String
+    public let liveWindows: [SubscriptionWindowStatusDTO]
+
+    public var id: String { templateId }
+
+    enum CodingKeys: String, CodingKey {
+        case templateId = "template_id"
+        case providerId = "provider_id"
+        case planName = "plan_name"
+        case monthlyFeeMicroUsd = "monthly_fee_micro_usd"
+        case windows
+        case description
+        case liveWindows = "live_windows"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.templateId = try container.decode(String.self, forKey: .templateId)
+        self.providerId = try container.decode(String.self, forKey: .providerId)
+        self.planName = try container.decode(String.self, forKey: .planName)
+        self.monthlyFeeMicroUsd = try container.decode(Int64.self, forKey: .monthlyFeeMicroUsd)
+        self.windows = try container.decode([SubscriptionWindowRuleDTO].self, forKey: .windows)
+        self.description = try container.decode(String.self, forKey: .description)
+        self.liveWindows = try container.decodeIfPresent([SubscriptionWindowStatusDTO].self, forKey: .liveWindows) ?? []
+    }
+}
+
+public struct SubscriptionPlanStatusDTO: Codable, Equatable, Identifiable, Sendable {
+    public let plan: SubscriptionPlanDTO
+    public let windows: [SubscriptionWindowStatusDTO]
+    public let todayCostMicroUsd: Int64
+    public let weekCostMicroUsd: Int64
+    public let monthCostMicroUsd: Int64
+    public let monthTokens: Int64
+
+    public var id: String { plan.planId }
+
+    enum CodingKeys: String, CodingKey {
+        case plan
+        case windows
+        case todayCostMicroUsd = "today_cost_micro_usd"
+        case weekCostMicroUsd = "week_cost_micro_usd"
+        case monthCostMicroUsd = "month_cost_micro_usd"
+        case monthTokens = "month_tokens"
+    }
+}
+
+public struct ProviderBalanceSnapshotDTO: Codable, Equatable, Sendable {
+    public let providerId: String
+    public let currency: String
+    public let totalBalanceMicro: Int64?
+    public let grantedBalanceMicro: Int64?
+    public let toppedUpBalanceMicro: Int64?
+    public let dailyQuotaUsedMicro: Int64?
+    public let dailyQuotaLimitMicro: Int64?
+    public let fetchedAtMs: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case providerId = "provider_id"
+        case currency
+        case totalBalanceMicro = "total_balance_micro"
+        case grantedBalanceMicro = "granted_balance_micro"
+        case toppedUpBalanceMicro = "topped_up_balance_micro"
+        case dailyQuotaUsedMicro = "daily_quota_used_micro"
+        case dailyQuotaLimitMicro = "daily_quota_limit_micro"
+        case fetchedAtMs = "fetched_at_ms"
+    }
+}
+
+public struct PaygAccountDTO: Codable, Equatable, Identifiable, Sendable {
+    public let accountId: String
+    public let providerId: String
+    public let accountName: String
+    public let enabled: Bool
+    public let manualBalanceMicroUsd: Int64?
+    public let balanceAnchorMs: Int64?
+    public let monthlyBudgetMicroUsd: Int64?
+    public let isAuto: Bool
+    public let updatedAtMs: Int64
+
+    public var id: String { accountId }
+
+    enum CodingKeys: String, CodingKey {
+        case accountId = "account_id"
+        case providerId = "provider_id"
+        case accountName = "account_name"
+        case enabled
+        case manualBalanceMicroUsd = "manual_balance_micro_usd"
+        case balanceAnchorMs = "balance_anchor_ms"
+        case monthlyBudgetMicroUsd = "monthly_budget_micro_usd"
+        case isAuto = "is_auto"
+        case updatedAtMs = "updated_at_ms"
+    }
+
+    public init(
+        accountId: String,
+        providerId: String,
+        accountName: String,
+        enabled: Bool = true,
+        manualBalanceMicroUsd: Int64? = nil,
+        balanceAnchorMs: Int64? = nil,
+        monthlyBudgetMicroUsd: Int64? = nil,
+        isAuto: Bool = false,
+        updatedAtMs: Int64
+    ) {
+        self.accountId = accountId
+        self.providerId = providerId
+        self.accountName = accountName
+        self.enabled = enabled
+        self.manualBalanceMicroUsd = manualBalanceMicroUsd
+        self.balanceAnchorMs = balanceAnchorMs
+        self.monthlyBudgetMicroUsd = monthlyBudgetMicroUsd
+        self.isAuto = isAuto
+        self.updatedAtMs = updatedAtMs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.accountId = try container.decode(String.self, forKey: .accountId)
+        self.providerId = try container.decode(String.self, forKey: .providerId)
+        self.accountName = try container.decode(String.self, forKey: .accountName)
+        self.enabled = try container.decode(Bool.self, forKey: .enabled)
+        self.manualBalanceMicroUsd = try container.decodeIfPresent(Int64.self, forKey: .manualBalanceMicroUsd)
+        self.balanceAnchorMs = try container.decodeIfPresent(Int64.self, forKey: .balanceAnchorMs)
+        self.monthlyBudgetMicroUsd = try container.decodeIfPresent(Int64.self, forKey: .monthlyBudgetMicroUsd)
+        self.isAuto = try container.decodeIfPresent(Bool.self, forKey: .isAuto) ?? false
+        self.updatedAtMs = try container.decode(Int64.self, forKey: .updatedAtMs)
+    }
+}
+
+public struct PaygAccountStatusDTO: Codable, Equatable, Identifiable, Sendable {
+    public let account: PaygAccountDTO
+    public let officialBalance: ProviderBalanceSnapshotDTO?
+    public let remainingManualBalanceMicroUsd: Int64?
+    public let todayCostMicroUsd: Int64
+    public let monthCostMicroUsd: Int64
+    public let budgetUsedPercent: Double?
+
+    public var id: String { account.accountId }
+
+    enum CodingKeys: String, CodingKey {
+        case account
+        case officialBalance = "official_balance"
+        case remainingManualBalanceMicroUsd = "remaining_manual_balance_micro_usd"
+        case todayCostMicroUsd = "today_cost_micro_usd"
+        case monthCostMicroUsd = "month_cost_micro_usd"
+        case budgetUsedPercent = "budget_used_percent"
+    }
+}
+
+public struct OfficialBalanceApplyResultDTO: Codable, Equatable, Sendable {
+    public let balance: ProviderBalanceSnapshotDTO
+    public let observedWindowsUpdated: Int
+
+    enum CodingKeys: String, CodingKey {
+        case balance
+        case observedWindowsUpdated = "observed_windows_updated"
+    }
+}
+
+public struct CloudflareWorkerUploadBundleDTO: Codable, Equatable, Sendable {
+    public let workerName: String
+    public let bearerToken: String
+    public let e2eeEnabled: Bool
+    public let e2eePassphrase: String?
+    public let contentType: String
+    public let multipartBodyBase64: String
+
+    enum CodingKeys: String, CodingKey {
+        case workerName = "worker_name"
+        case bearerToken = "bearer_token"
+        case e2eeEnabled = "e2ee_enabled"
+        case e2eePassphrase = "e2ee_passphrase"
+        case contentType = "content_type"
+        case multipartBodyBase64 = "multipart_body_base64"
     }
 }

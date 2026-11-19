@@ -1,8 +1,35 @@
+import Charts
 import SwiftUI
+
+private enum OverviewShareMetric: String, CaseIterable, Identifiable {
+    case tokens
+    case cost
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .tokens: return L10n.tr("overview.shares.unit", default: "Tokens")
+        case .cost: return L10n.tr("overview.shares.unit_cost", default: "费用")
+        }
+    }
+}
+
+private struct IntradayPulseSegment: Identifiable {
+    let bucketStartMs: Int64
+    let date: Date
+    let typeKey: String
+    let typeLabel: String
+    let tokens: Double
+
+    var id: String { "\(bucketStartMs)::\(typeKey)" }
+}
 
 public struct OverviewView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Bindable var store: AppStore
+    @State private var shareMetric: OverviewShareMetric = .tokens
+    @State private var showingSpeedPopover = false
 
     public init(store: AppStore) {
         self.store = store
@@ -18,9 +45,15 @@ public struct OverviewView: View {
                 } else {
                     heroMetricsSection
                     HairlineDivider(insetLeading: 16)
+                    intradayPulseSection
+                    HairlineDivider(insetLeading: 16)
                     sharesBreakdownSection
                     HairlineDivider(insetLeading: 16)
                     syncedDevicesPulseSection
+                    if !(store.overview?.providers.isEmpty ?? true) {
+                        HairlineDivider(insetLeading: 16)
+                        providerSummarySection
+                    }
                     HairlineDivider(insetLeading: 16)
                     topQuotasSection
                 }
@@ -30,7 +63,7 @@ public struct OverviewView: View {
         .refreshable {
             await store.triggerManualSync()
         }
-        .background(SemanticColors.surfacePrimary)
+        .background(Color.clear)
     }
 
     private var unpairedEmptyBanner: some View {
@@ -71,35 +104,69 @@ public struct OverviewView: View {
         let ov = store.overview
         let rate = store.usdToCnyRate
         let cur = store.currency
+        let liveTps = ov?.latestOutputTps
+        let hasLiveSpeed = (liveTps ?? 0) > 0
+        let speeds = ov?.liveModelSpeeds ?? []
 
         return VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(
-                        store.timeRange == .today
-                            ? L10n.tr("overview.hero.today", default: "今日花费")
-                            : L10n.tr("overview.hero.period", default: "周期花费")
-                    )
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
+                    Text(L10n.tr("overview.hero.today", default: "今日花费"))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
 
-                    Text(TokenVaneFormatters.formatCurrency(ov?.totalCostMicroUsd ?? 0, currency: cur, rateString: rate))
+                    Text(TokenVaneFormatters.formatCurrency(ov?.todayCostMicroUsd ?? 0, currency: cur, rateString: rate))
                         .font(.largeTitle.weight(.semibold))
                         .tabularMetrics()
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                         .accessibilityIdentifier("overview.totalCost")
+
+                    DeltaBadge(percent: ov?.todayCostDeltaPct)
                 }
+
                 Spacer()
+
                 VStack(alignment: .trailing, spacing: 4) {
-                    Text(L10n.tr("overview.hero.today_cost", default: "今日"))
+                    Text(L10n.tr("overview.metric.tps_live", default: "实时速率"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Text(TokenVaneFormatters.formatCurrency(ov?.todayCostMicroUsd ?? 0, currency: cur, rateString: rate))
-                        .font(.callout.weight(.semibold))
-                        .tabularMetrics()
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+                    Button {
+                        showingSpeedPopover.toggle()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(hasLiveSpeed ? SemanticColors.statusLive : Color.secondary.opacity(0.4))
+                                .frame(width: 7, height: 7)
+                            Text(
+                                hasLiveSpeed
+                                    ? TokenVaneFormatters.formatTps(liveTps)
+                                    : L10n.tr("overview.live_speed.idle", default: "空闲")
+                            )
+                            .font(.callout.weight(.semibold))
+                            .tabularMetrics()
+                            .lineLimit(1)
+                            if !speeds.isEmpty {
+                                Image(systemName: "chevron.down")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .popover(isPresented: $showingSpeedPopover) {
+                        liveSpeedPopoverContent(speeds: speeds, ov: ov)
+                    }
+
+                    if let avg = ov?.avgOutputTps, avg > 0 {
+                        Text(L10n.trFormat("overview.tps_avg_sub", default: "今日均 %@", TokenVaneFormatters.formatTps(avg)))
+                            .font(.caption2)
+                            .tabularMetrics()
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -107,12 +174,16 @@ public struct OverviewView: View {
                 LazyVGrid(
                     columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
                     alignment: .leading,
-                    spacing: 10
+                    spacing: 12
                 ) {
                     metricCells(ov: ov)
                 }
             } else {
-                HStack(spacing: 0) {
+                LazyVGrid(
+                    columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+                    alignment: .leading,
+                    spacing: 12
+                ) {
                     metricCells(ov: ov)
                 }
             }
@@ -122,38 +193,225 @@ public struct OverviewView: View {
     }
 
     @ViewBuilder
-    private func metricCells(ov: OverviewReportDTO?) -> some View {
-        metricCell(
-            title: L10n.tr("overview.metric.tokens", default: "总 Token"),
-            value: TokenVaneFormatters.formatCompactTokens(ov?.totalTokens ?? 0)
-        )
-        metricCell(
-            title: L10n.tr("overview.metric.cache_hit", default: "缓存命中"),
-            value: TokenVaneFormatters.formatPercent((ov?.cacheHitRatio ?? 0) * 100.0)
-        )
-        metricCell(
-            title: L10n.tr("overview.metric.tps", default: "最新速率"),
-            value: TokenVaneFormatters.formatTps(ov?.latestOutputTps)
-        )
-        metricCell(
-            title: L10n.tr("overview.metric.requests", default: "请求数"),
-            value: TokenVaneFormatters.formatExactInt(ov?.totalRequests ?? 0)
-        )
+    private func liveSpeedPopoverContent(speeds: [LiveModelSpeedDTO], ov: OverviewReportDTO?) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L10n.tr("overview.live_speed.popover_title", default: "近期生成速率 (3m 窗口)"))
+                .font(.caption.weight(.semibold))
+            if speeds.isEmpty {
+                Text(L10n.tr("overview.live_speed.popover_empty", default: "近 3 分钟内暂无活跃流式输出"))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(speeds) { item in
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(item.activityState == "active" ? SemanticColors.statusLive : SemanticColors.statusWarning)
+                            .frame(width: 6, height: 6)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(item.modelId)
+                                .font(.caption.weight(.medium))
+                                .lineLimit(1)
+                            Text(TokenVaneFormatters.providerDisplayName(item.providerId))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 12)
+                        Text(TokenVaneFormatters.formatTps(item.outputTps))
+                            .font(.caption.weight(.semibold))
+                            .tabularMetrics()
+                    }
+                }
+            }
+            if let peak = ov?.peakOutputTps, peak > 0 {
+                HairlineDivider()
+                HStack {
+                    Text(L10n.tr("overview.live_speed.peak", default: "今日峰值"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(TokenVaneFormatters.formatTps(peak))
+                        .font(.caption2.weight(.semibold))
+                        .tabularMetrics()
+                }
+            }
+        }
+        .padding(14)
+        .frame(minWidth: 240)
+        .presentationCompactAdaptation(.popover)
     }
 
-    private func metricCell(title: String, value: String) -> some View {
+    @ViewBuilder
+    private func metricCells(ov: OverviewReportDTO?) -> some View {
+        let rate = store.usdToCnyRate
+        let cur = store.currency
+
         VStack(alignment: .leading, spacing: 3) {
-            Text(title)
+            Text(L10n.tr("overview.metric.today_tokens", default: "今日 Tokens"))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            Text(value)
+            Text(TokenVaneFormatters.formatCompactTokens(ov?.todayTokens ?? 0))
                 .font(.subheadline.weight(.semibold))
                 .tabularMetrics()
                 .lineLimit(1)
-                .minimumScaleFactor(0.75)
+            DeltaBadge(percent: ov?.todayTokensDeltaPct)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+
+        VStack(alignment: .leading, spacing: 3) {
+            Text(L10n.tr("overview.metric.cache_hit", default: "缓存命中"))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Text(TokenVaneFormatters.formatPercent((ov?.todayCacheHitRatio ?? 0) * 100.0))
+                .font(.subheadline.weight(.semibold))
+                .tabularMetrics()
+                .lineLimit(1)
+            Text(
+                L10n.trFormat(
+                    "overview.cache_saved_sub",
+                    default: "已省 %@",
+                    TokenVaneFormatters.formatCurrency(ov?.todayCacheSavedMicroUsd ?? 0, currency: cur, rateString: rate)
+                )
+            )
+            .font(.caption2)
+            .tabularMetrics()
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+
+        VStack(alignment: .leading, spacing: 3) {
+            Text(L10n.tr("overview.metric.requests", default: "请求数"))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Text(TokenVaneFormatters.formatExactInt(ov?.todayRequests ?? 0))
+                .font(.subheadline.weight(.semibold))
+                .tabularMetrics()
+                .lineLimit(1)
+            Text(
+                L10n.trFormat(
+                    "overview.peak_tps_sub",
+                    default: "峰值 %@",
+                    TokenVaneFormatters.formatTps(ov?.peakOutputTps)
+                )
+            )
+            .font(.caption2)
+            .tabularMetrics()
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+
+        let activeProviders = (ov?.providers ?? []).filter { $0.todayTokens > 0 || $0.periodTokens > 0 }.count
+        let devicesCount = store.bootstrap?.syncedDevices.count ?? 0
+        VStack(alignment: .leading, spacing: 3) {
+            Text(L10n.tr("overview.metric.channels", default: "活跃通道"))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Text(L10n.trFormat("overview.providers_active", default: "%lld 服务商", Int64(activeProviders)))
+                .font(.subheadline.weight(.semibold))
+                .tabularMetrics()
+                .lineLimit(1)
+            Text(L10n.trFormat("overview.devices.count", default: "%lld 台", Int64(devicesCount)))
+                .font(.caption2)
+                .tabularMetrics()
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var intradayPulseSection: some View {
+        let pulsePoints = (store.overview?.todayHourlyPulse.isEmpty == false
+            ? store.overview?.todayHourlyPulse
+            : store.overview?.series) ?? []
+        let segments = buildPulseSegments(from: pulsePoints)
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(L10n.tr("overview.pulse.title", default: "今日实时脉冲 (24h)"))
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(L10n.tr("overview.pulse.granularity", default: "按小时"))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if segments.isEmpty {
+                Text(L10n.tr("overview.pulse.waiting", default: "今日等待第一笔脉冲"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 12)
+            } else {
+                Chart(segments) { seg in
+                    BarMark(
+                        x: .value(L10n.tr("chart.axis.time", default: "时间"), seg.date, unit: .hour),
+                        y: .value(L10n.tr("chart.axis.tokens", default: "Tokens"), seg.tokens)
+                    )
+                    .foregroundStyle(by: .value(L10n.tr("chart.axis.series", default: "类型"), seg.typeLabel))
+                }
+                .chartForegroundStyleScale([
+                    "Input": TokenVaneFormatters.tokenTypeColor("input"),
+                    "Output": TokenVaneFormatters.tokenTypeColor("output"),
+                    "Cache Read": TokenVaneFormatters.tokenTypeColor("cache_read"),
+                    "Cache Write": TokenVaneFormatters.tokenTypeColor("cache_write")
+                ])
+                .chartLegend(position: .bottom, alignment: .leading)
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: .hour, count: 4)) { value in
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
+                            .foregroundStyle(SemanticColors.hairline)
+                        AxisValueLabel {
+                            if let d = value.as(Date.self) {
+                                Text(TokenVaneFormatters.formatChartAxisDate(d, subDay: true))
+                                    .font(.caption2)
+                                    .tabularMetrics()
+                            }
+                        }
+                    }
+                }
+                .chartYAxis {
+                    AxisMarks(position: .trailing) { value in
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
+                            .foregroundStyle(SemanticColors.hairline)
+                        AxisValueLabel {
+                            if let v = value.as(Double.self) {
+                                Text(TokenVaneFormatters.formatCompactTokens(Int64(v)))
+                                    .font(.caption2)
+                                    .tabularMetrics()
+                            }
+                        }
+                    }
+                }
+                .frame(height: 150)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 16)
+    }
+
+    private func buildPulseSegments(from points: [TimeBucketPointDTO]) -> [IntradayPulseSegment] {
+        var out: [IntradayPulseSegment] = []
+        for p in points {
+            let date = Date(timeIntervalSince1970: Double(p.bucketStartMs) / 1000.0)
+            if p.inputTokens > 0 {
+                out.append(IntradayPulseSegment(bucketStartMs: p.bucketStartMs, date: date, typeKey: "input", typeLabel: "Input", tokens: Double(p.inputTokens)))
+            }
+            let effOut = p.outputTokens + p.reasoningTokens
+            if effOut > 0 {
+                out.append(IntradayPulseSegment(bucketStartMs: p.bucketStartMs, date: date, typeKey: "output", typeLabel: "Output", tokens: Double(effOut)))
+            }
+            if p.cacheReadTokens > 0 {
+                out.append(IntradayPulseSegment(bucketStartMs: p.bucketStartMs, date: date, typeKey: "cache_read", typeLabel: "Cache Read", tokens: Double(p.cacheReadTokens)))
+            }
+            if p.cacheWriteTokens > 0 {
+                out.append(IntradayPulseSegment(bucketStartMs: p.bucketStartMs, date: date, typeKey: "cache_write", typeLabel: "Cache Write", tokens: Double(p.cacheWriteTokens)))
+            }
+        }
+        return out
     }
 
     private var sharesBreakdownSection: some View {
@@ -163,23 +421,23 @@ public struct OverviewView: View {
             ShareBarSegment(
                 id: $0.key,
                 label: $0.label,
-                sharePercent: $0.tokenSharePercent,
+                sharePercent: shareMetric == .tokens ? $0.tokenSharePercent : $0.costSharePercent,
                 color: TokenVaneFormatters.providerColor($0.key)
             )
         }
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(
-                    store.timeRange == .today
-                        ? L10n.tr("overview.shares.today", default: "今日分布")
-                        : L10n.tr("overview.shares.period", default: "用量分布")
-                )
-                .font(.subheadline.weight(.semibold))
+                Text(L10n.tr("overview.shares.today", default: "今日分布"))
+                    .font(.subheadline.weight(.semibold))
                 Spacer()
-                Text(L10n.tr("overview.shares.unit", default: "Tokens"))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                Picker(L10n.tr("overview.shares.metric_picker", default: "指标"), selection: $shareMetric) {
+                    ForEach(OverviewShareMetric.allCases) { m in
+                        Text(m.title).tag(m)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 140)
             }
 
             InlineShareBar(segments: segments, height: 6)
@@ -195,7 +453,8 @@ public struct OverviewView: View {
                         Text(L10n.tr("overview.shares.by_provider", default: "服务商"))
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.secondary)
-                        ForEach(providers.prefix(4)) { item in
+                        ForEach(providers.prefix(5)) { item in
+                            let pct = shareMetric == .tokens ? item.tokenSharePercent : item.costSharePercent
                             HStack(spacing: 6) {
                                 Circle()
                                     .fill(TokenVaneFormatters.providerColor(item.key))
@@ -204,7 +463,7 @@ public struct OverviewView: View {
                                     .font(.caption)
                                     .lineLimit(1)
                                 Spacer(minLength: 4)
-                                Text(TokenVaneFormatters.formatPercent(item.tokenSharePercent))
+                                Text(TokenVaneFormatters.formatPercent(pct))
                                     .font(.caption)
                                     .tabularMetrics()
                                     .foregroundStyle(.secondary)
@@ -217,16 +476,20 @@ public struct OverviewView: View {
                         Text(L10n.tr("overview.shares.top_models", default: "Top 模型"))
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.secondary)
-                        ForEach(models.prefix(4)) { item in
+                        ForEach(models.prefix(5)) { item in
                             HStack(spacing: 6) {
                                 Text(item.label)
                                     .font(.caption)
                                     .lineLimit(1)
                                 Spacer(minLength: 4)
-                                Text(TokenVaneFormatters.formatCompactTokens(item.tokens))
-                                    .font(.caption)
-                                    .tabularMetrics()
-                                    .foregroundStyle(.secondary)
+                                Text(
+                                    shareMetric == .tokens
+                                        ? TokenVaneFormatters.formatCompactTokens(item.tokens)
+                                        : TokenVaneFormatters.formatCurrency(item.costMicroUsd, currency: store.currency, rateString: store.usdToCnyRate)
+                                )
+                                .font(.caption)
+                                .tabularMetrics()
+                                .foregroundStyle(.secondary)
                             }
                         }
                     }
@@ -303,6 +566,63 @@ public struct OverviewView: View {
         .padding(.vertical, 16)
     }
 
+    private var providerSummarySection: some View {
+        let rows = (store.overview?.providers ?? [])
+            .filter { $0.todayTokens > 0 || $0.monthTokens > 0 }
+        return VStack(alignment: .leading, spacing: 10) {
+            Text(L10n.tr("overview.providers.title", default: "服务商花费"))
+                .font(.subheadline.weight(.semibold))
+            if rows.isEmpty {
+                Text(L10n.tr("overview.shares.waiting", default: "等待数据"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(rows) { row in
+                    HStack(spacing: 10) {
+                        Circle()
+                            .fill(TokenVaneFormatters.providerColor(row.providerId))
+                            .frame(width: 7, height: 7)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(TokenVaneFormatters.providerDisplayName(row.providerId))
+                                    .font(.subheadline.weight(.medium))
+                                if let label = row.activeWindowLabel, let pct = row.activeWindowUsedPercent {
+                                    Text("\(label) \(TokenVaneFormatters.formatPercent(pct, decimals: 0))")
+                                        .font(.caption2)
+                                        .tabularMetrics()
+                                        .foregroundStyle(TokenVaneFormatters.quotaSeverityColor(usedPercent: pct))
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1)
+                                        .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 3, style: .continuous))
+                                }
+                            }
+                            Text("今日 \(TokenVaneFormatters.formatCompactTokens(row.todayTokens)) · 本月 \(TokenVaneFormatters.formatCompactTokens(row.monthTokens))")
+                                .font(.caption2)
+                                .tabularMetrics()
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(TokenVaneFormatters.formatCurrency(row.todayCostMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))
+                                .font(.subheadline.weight(.medium))
+                                .tabularMetrics()
+                            Text("本月 \(TokenVaneFormatters.formatCurrency(row.monthCostMicroUsd, currency: store.currency, rateString: store.usdToCnyRate))")
+                                .font(.caption2)
+                                .tabularMetrics()
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    if row.id != rows.last?.id {
+                        HairlineDivider()
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 16)
+    }
+
     private var topQuotasSection: some View {
         let sorted = (store.bootstrap?.remoteSubscriptions ?? [])
             .sorted { $0.usedPercent > $1.usedPercent }
@@ -342,7 +662,7 @@ public struct OverviewView: View {
                         )
                         HStack {
                             Text(
-                                sub.source == "official_header"
+                                sub.source == "official_header" || sub.source == "official_api" || sub.source == "official_cli" || sub.source == "official_log_snapshot"
                                     ? L10n.tr("overview.quotas.source.official", default: "官方")
                                     : L10n.tr("overview.quotas.source.estimated", default: "推算")
                             )

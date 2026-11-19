@@ -34,6 +34,24 @@ export interface SyncSubscriptionSnapshot {
   used_percent: number;
   resets_at_ms: number | null;
   source: string;
+  monthly_fee_micro_usd?: number;
+}
+
+export interface SyncPaygSnapshot {
+  account_id: string;
+  provider_id: string;
+  account_name: string;
+  enabled: boolean;
+  currency: string | null;
+  total_balance_micro: number | null;
+  granted_balance_micro: number | null;
+  topped_up_balance_micro: number | null;
+  remaining_manual_balance_micro_usd: number | null;
+  monthly_budget_micro_usd: number | null;
+  today_cost_micro_usd: number;
+  month_cost_micro_usd: number;
+  fetched_at_ms: number | null;
+  updated_at_ms: number;
 }
 
 export interface SyncEnvelopeV1 {
@@ -44,6 +62,7 @@ export interface SyncEnvelopeV1 {
   since_watermark_ms: number;
   hourly_deltas: SyncHourlyDelta[];
   subscription_snapshots: SyncSubscriptionSnapshot[];
+  payg_snapshots?: SyncPaygSnapshot[];
 }
 
 export interface EncryptedSyncEnvelopeV1 {
@@ -235,8 +254,28 @@ export class SyncHubCore {
         used_percent REAL NOT NULL,
         resets_at_ms INTEGER,
         source TEXT NOT NULL,
+        monthly_fee_micro_usd INTEGER NOT NULL DEFAULT 0,
         server_seq_ms INTEGER NOT NULL,
         PRIMARY KEY (device_id, plan_id, window_id)
+      );
+      CREATE TABLE IF NOT EXISTS device_payg_snapshots (
+        device_id TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        account_name TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        currency TEXT,
+        total_balance_micro INTEGER,
+        granted_balance_micro INTEGER,
+        topped_up_balance_micro INTEGER,
+        remaining_manual_balance_micro_usd INTEGER,
+        monthly_budget_micro_usd INTEGER,
+        today_cost_micro_usd INTEGER NOT NULL DEFAULT 0,
+        month_cost_micro_usd INTEGER NOT NULL DEFAULT 0,
+        fetched_at_ms INTEGER,
+        updated_at_ms INTEGER NOT NULL,
+        server_seq_ms INTEGER NOT NULL,
+        PRIMARY KEY (device_id, account_id)
       );
       CREATE TABLE IF NOT EXISTS e2ee_envelopes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -248,6 +287,12 @@ export class SyncHubCore {
       CREATE INDEX IF NOT EXISTS idx_hub_e2ee_seq
         ON e2ee_envelopes (server_seq_ms ASC, device_id);
     `);
+    const subCols = this.sql.exec<{ name: string }>('PRAGMA table_info(device_subscriptions)');
+    if (!subCols.some((c) => c.name.toLowerCase() === 'monthly_fee_micro_usd')) {
+      this.sql.exec(
+        'ALTER TABLE device_subscriptions ADD COLUMN monthly_fee_micro_usd INTEGER NOT NULL DEFAULT 0'
+      );
+    }
     this.initialized = true;
   }
 
@@ -378,11 +423,16 @@ export class SyncHubCore {
 
       this.sql.exec('DELETE FROM device_subscriptions WHERE device_id = ?1', deviceId);
       for (const snap of env.subscription_snapshots ?? []) {
+        const monthlyFee =
+          typeof snap.monthly_fee_micro_usd === 'number' &&
+          Number.isFinite(snap.monthly_fee_micro_usd)
+            ? Math.round(snap.monthly_fee_micro_usd)
+            : 0;
         this.sql.exec(
           `INSERT INTO device_subscriptions (
              device_id, plan_id, window_id, provider_id, plan_name,
-             window_label, used_percent, resets_at_ms, source, server_seq_ms
-           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
+             window_label, used_percent, resets_at_ms, source, monthly_fee_micro_usd, server_seq_ms
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
           deviceId,
           snap.plan_id,
           snap.window_id,
@@ -392,6 +442,35 @@ export class SyncHubCore {
           snap.used_percent,
           snap.resets_at_ms ?? null,
           snap.source,
+          monthlyFee,
+          serverSeqMs
+        );
+      }
+
+      this.sql.exec('DELETE FROM device_payg_snapshots WHERE device_id = ?1', deviceId);
+      for (const payg of env.payg_snapshots ?? []) {
+        this.sql.exec(
+          `INSERT INTO device_payg_snapshots (
+             device_id, account_id, provider_id, account_name, enabled,
+             currency, total_balance_micro, granted_balance_micro, topped_up_balance_micro,
+             remaining_manual_balance_micro_usd, monthly_budget_micro_usd,
+             today_cost_micro_usd, month_cost_micro_usd, fetched_at_ms, updated_at_ms, server_seq_ms
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`,
+          deviceId,
+          payg.account_id,
+          payg.provider_id,
+          payg.account_name,
+          payg.enabled ? 1 : 0,
+          payg.currency ?? null,
+          payg.total_balance_micro ?? null,
+          payg.granted_balance_micro ?? null,
+          payg.topped_up_balance_micro ?? null,
+          payg.remaining_manual_balance_micro_usd ?? null,
+          payg.monthly_budget_micro_usd ?? null,
+          payg.today_cost_micro_usd ?? 0,
+          payg.month_cost_micro_usd ?? 0,
+          payg.fetched_at_ms ?? null,
+          payg.updated_at_ms,
           serverSeqMs
         );
       }
@@ -437,6 +516,7 @@ export class SyncHubCore {
 
       this.sql.exec('DELETE FROM device_hourly_rollups WHERE device_id = ?1', deviceId);
       this.sql.exec('DELETE FROM device_subscriptions WHERE device_id = ?1', deviceId);
+      this.sql.exec('DELETE FROM device_payg_snapshots WHERE device_id = ?1', deviceId);
 
       this.sql.exec(
         `INSERT INTO e2ee_envelopes (device_id, server_seq_ms, payload_json, created_at_ms)
@@ -545,12 +625,39 @@ export class SyncHubCore {
         used_percent: number;
         resets_at_ms: number | null;
         source: string;
+        monthly_fee_micro_usd: number;
       }>(
         `SELECT plan_id, provider_id, plan_name, window_id, window_label,
-                used_percent, resets_at_ms, source
+                used_percent, resets_at_ms, source, monthly_fee_micro_usd
          FROM device_subscriptions
          WHERE device_id = ?1
          ORDER BY provider_id ASC, window_id ASC`,
+        dev.device_id
+      );
+
+      const paygRows = this.sql.exec<{
+        account_id: string;
+        provider_id: string;
+        account_name: string;
+        enabled: number;
+        currency: string | null;
+        total_balance_micro: number | null;
+        granted_balance_micro: number | null;
+        topped_up_balance_micro: number | null;
+        remaining_manual_balance_micro_usd: number | null;
+        monthly_budget_micro_usd: number | null;
+        today_cost_micro_usd: number;
+        month_cost_micro_usd: number;
+        fetched_at_ms: number | null;
+        updated_at_ms: number;
+      }>(
+        `SELECT account_id, provider_id, account_name, enabled,
+                currency, total_balance_micro, granted_balance_micro, topped_up_balance_micro,
+                remaining_manual_balance_micro_usd, monthly_budget_micro_usd,
+                today_cost_micro_usd, month_cost_micro_usd, fetched_at_ms, updated_at_ms
+         FROM device_payg_snapshots
+         WHERE device_id = ?1
+         ORDER BY provider_id ASC, account_id ASC`,
         dev.device_id
       );
 
@@ -592,6 +699,30 @@ export class SyncHubCore {
             used_percent: Number(s.used_percent),
             resets_at_ms: s.resets_at_ms === null ? null : Number(s.resets_at_ms),
             source: s.source,
+            monthly_fee_micro_usd: Number(s.monthly_fee_micro_usd ?? 0),
+          })),
+          payg_snapshots: paygRows.map((p) => ({
+            account_id: p.account_id,
+            provider_id: p.provider_id,
+            account_name: p.account_name,
+            enabled: Number(p.enabled) !== 0,
+            currency: p.currency,
+            total_balance_micro:
+              p.total_balance_micro === null ? null : Number(p.total_balance_micro),
+            granted_balance_micro:
+              p.granted_balance_micro === null ? null : Number(p.granted_balance_micro),
+            topped_up_balance_micro:
+              p.topped_up_balance_micro === null ? null : Number(p.topped_up_balance_micro),
+            remaining_manual_balance_micro_usd:
+              p.remaining_manual_balance_micro_usd === null
+                ? null
+                : Number(p.remaining_manual_balance_micro_usd),
+            monthly_budget_micro_usd:
+              p.monthly_budget_micro_usd === null ? null : Number(p.monthly_budget_micro_usd),
+            today_cost_micro_usd: Number(p.today_cost_micro_usd ?? 0),
+            month_cost_micro_usd: Number(p.month_cost_micro_usd ?? 0),
+            fetched_at_ms: p.fetched_at_ms === null ? null : Number(p.fetched_at_ms),
+            updated_at_ms: Number(p.updated_at_ms),
           })),
         },
         encrypted_envelope: null,

@@ -3,9 +3,19 @@ import SwiftUI
 public struct RootSplitOrTabView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Bindable var store: AppStore
+    @State private var showingTimeRangeSheet = false
 
     public init(store: AppStore) {
         self.store = store
+    }
+
+    private var backdropLayer: some View {
+        let prefs = store.bootstrap?.preferences
+        return WorkspaceBackdropView(
+            mode: prefs?.bgMode ?? "none",
+            presetId: prefs?.bgPresetId ?? "aurora_slate",
+            opacity: prefs?.bgOpacity ?? 0.18
+        )
     }
 
     public var body: some View {
@@ -16,8 +26,11 @@ public struct RootSplitOrTabView: View {
                 iPhoneLayout
             }
         }
-        .background(SemanticColors.surfacePrimary.ignoresSafeArea())
+        .background(backdropLayer)
         .tint(SemanticColors.accentIndigo)
+        .sheet(isPresented: $showingTimeRangeSheet) {
+            TimeRangePickerSheet(store: store)
+        }
         .alert(
             L10n.tr("pairing.alert.title", default: "连接同步中枢"),
             isPresented: Binding(
@@ -60,48 +73,32 @@ public struct RootSplitOrTabView: View {
 
     private var iPhoneLayout: some View {
         TabView(selection: $store.selectedTab) {
-            NavigationStack {
-                VStack(spacing: 0) {
-                    globalContextStrip
-                    HairlineDivider()
-                    resetAlertBanner
-                    OverviewView(store: store)
-                }
-                .background(SemanticColors.surfacePrimary)
-                .navigationTitle(MainTab.overview.navTitle)
-                .navigationBarTitleDisplayMode(.inline)
+            iPhoneTabStack(tab: .overview) {
+                OverviewView(store: store)
             }
             .tabItem {
                 Label(MainTab.overview.title, systemImage: MainTab.overview.systemImage)
             }
             .tag(MainTab.overview)
 
-            NavigationStack {
-                VStack(spacing: 0) {
-                    globalContextStrip
-                    HairlineDivider()
-                    resetAlertBanner
-                    AnalyticsView(store: store)
-                }
-                .background(SemanticColors.surfacePrimary)
-                .navigationTitle(MainTab.analytics.navTitle)
-                .navigationBarTitleDisplayMode(.inline)
+            iPhoneTabStack(tab: .analytics) {
+                AnalyticsView(store: store)
             }
             .tabItem {
                 Label(MainTab.analytics.title, systemImage: MainTab.analytics.systemImage)
             }
             .tag(MainTab.analytics)
 
-            NavigationStack {
-                VStack(spacing: 0) {
-                    globalContextStrip
-                    HairlineDivider()
-                    resetAlertBanner
-                    QuotasAndModelsView(store: store)
-                }
-                .background(SemanticColors.surfacePrimary)
-                .navigationTitle(MainTab.quotas.navTitle)
-                .navigationBarTitleDisplayMode(.inline)
+            iPhoneTabStack(tab: .models) {
+                ModelsCompareView(store: store)
+            }
+            .tabItem {
+                Label(MainTab.models.title, systemImage: MainTab.models.systemImage)
+            }
+            .tag(MainTab.models)
+
+            iPhoneTabStack(tab: .quotas) {
+                QuotasAndModelsView(store: store)
             }
             .tabItem {
                 Label(MainTab.quotas.title, systemImage: MainTab.quotas.systemImage)
@@ -110,7 +107,7 @@ public struct RootSplitOrTabView: View {
 
             NavigationStack {
                 SettingsView(store: store)
-                    .background(SemanticColors.surfacePrimary)
+                    .background(backdropLayer)
                     .navigationTitle(MainTab.settings.navTitle)
                     .navigationBarTitleDisplayMode(.inline)
             }
@@ -118,6 +115,21 @@ public struct RootSplitOrTabView: View {
                 Label(MainTab.settings.title, systemImage: MainTab.settings.systemImage)
             }
             .tag(MainTab.settings)
+        }
+    }
+
+    @ViewBuilder
+    private func iPhoneTabStack<Content: View>(tab: MainTab, @ViewBuilder content: () -> Content) -> some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                globalContextStrip(for: tab)
+                HairlineDivider()
+                resetAlertBanner
+                content()
+            }
+            .background(backdropLayer)
+            .navigationTitle(tab.navTitle)
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 
@@ -134,7 +146,7 @@ public struct RootSplitOrTabView: View {
         } detail: {
             VStack(spacing: 0) {
                 if store.selectedTab != .settings {
-                    globalContextStrip
+                    globalContextStrip(for: store.selectedTab)
                     HairlineDivider()
                     resetAlertBanner
                 }
@@ -144,6 +156,8 @@ public struct RootSplitOrTabView: View {
                         OverviewView(store: store)
                     case .analytics:
                         AnalyticsView(store: store)
+                    case .models:
+                        ModelsCompareView(store: store)
                     case .quotas:
                         QuotasAndModelsView(store: store)
                     case .settings:
@@ -151,7 +165,7 @@ public struct RootSplitOrTabView: View {
                     }
                 }
             }
-            .background(SemanticColors.surfacePrimary)
+            .background(backdropLayer)
             .navigationTitle(store.selectedTab.navTitle)
             .navigationBarTitleDisplayMode(.inline)
         }
@@ -184,120 +198,220 @@ public struct RootSplitOrTabView: View {
         }
     }
 
-    private var globalContextStrip: some View {
-        HStack(spacing: 8) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    // Device filter menu
-                    Menu {
-                        Button {
-                            Task { await store.selectDevice(nil) }
-                        } label: {
-                            if store.selectedDeviceId == nil {
-                                Label(L10n.tr("filter.all_devices", default: "全部设备"), systemImage: "checkmark")
-                            } else {
-                                Text(L10n.tr("filter.all_devices", default: "全部设备"))
-                            }
+    private func showsTimeRangeControls(for tab: MainTab) -> Bool {
+        tab == .analytics || tab == .models
+    }
+
+    private func globalContextStrip(for tab: MainTab) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        deviceFilterMenu
+                        if tab != .quotas {
+                            providerFilterMenu
                         }
-                        if let devices = store.bootstrap?.syncedDevices {
-                            ForEach(devices) { dev in
-                                Button {
-                                    Task { await store.selectDevice(dev.deviceId) }
-                                } label: {
-                                    if store.selectedDeviceId == dev.deviceId {
-                                        Label(dev.deviceName, systemImage: "checkmark")
-                                    } else {
-                                        Text(dev.deviceName)
-                                    }
-                                }
-                            }
+                        if tab == .overview {
+                            Text(L10n.trFormat("range.today_date_chip", default: "今日 · %@", TokenVaneFormatters.formatDayKey(Date())))
+                                .font(.caption2)
+                                .tabularMetrics()
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
                         }
+                    }
+                }
+
+                // Pinned right-side currency toggle & sync pulse (always visible on small iPhones)
+                HStack(spacing: 6) {
+                    Button {
+                        Task { await store.toggleCurrency() }
+                    } label: {
+                        Text(store.currency)
+                            .font(.caption2.weight(.semibold))
+                            .tabularMetrics()
+                            .foregroundStyle(SemanticColors.accentIndigo)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .strokeBorder(SemanticColors.hairline, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("global.currencyToggle")
+
+                    Button {
+                        Task { await store.triggerManualSync() }
                     } label: {
                         HStack(spacing: 4) {
-                            Image(systemName: "desktopcomputer")
+                            Circle()
+                                .fill(syncIndicatorColor)
+                                .frame(width: 7, height: 7)
+                            Text(syncIndicatorText)
                                 .font(.caption2)
-                            Text(selectedDeviceLabel)
-                                .font(.caption.weight(.medium))
+                                .tabularMetrics()
+                                .foregroundStyle(.secondary)
                                 .lineLimit(1)
-                            Image(systemName: "chevron.down")
-                                .font(.caption2.weight(.semibold))
                         }
-                        .foregroundStyle(.primary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("global.syncPulse")
+                }
+                .fixedSize(horizontal: true, vertical: false)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+
+            if showsTimeRangeControls(for: tab) {
+                HairlineDivider(insetLeading: 16)
+                HStack(spacing: 6) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 4) {
+                            ForEach(TimeRangePreset.allCases) { preset in
+                                Button {
+                                    if preset == .custom {
+                                        showingTimeRangeSheet = true
+                                    } else {
+                                        Task { await store.selectTimeRange(preset) }
+                                    }
+                                } label: {
+                                    Text(preset.title)
+                                        .font(.caption2.weight(store.timeRange == preset ? .semibold : .regular))
+                                        .foregroundStyle(store.timeRange == preset ? Color.primary : Color.secondary)
+                                        .lineLimit(1)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(
+                                            store.timeRange == preset
+                                                ? SemanticColors.surfaceSubtle
+                                                : Color.clear,
+                                            in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("range.\(preset.rawValue)")
+                            }
+                        }
+                    }
+
+                    Button {
+                        showingTimeRangeSheet = true
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "calendar")
+                                .font(.caption2)
+                            Text(store.resolvedDateSpanLabel)
+                                .font(.caption2)
+                                .tabularMetrics()
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
                         .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
                     }
-                    .accessibilityIdentifier("global.devicePicker")
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("range.spanButton")
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 5)
+            }
+        }
+        .background(Color.clear)
+    }
 
-                    // Time range strip
-                    HStack(spacing: 2) {
-                        ForEach(TimeRangePreset.allCases) { preset in
-                            Button {
-                                Task { await store.selectTimeRange(preset) }
-                            } label: {
-                                Text(preset.title)
-                                    .font(.caption2.weight(store.timeRange == preset ? .semibold : .regular))
-                                    .foregroundStyle(store.timeRange == preset ? Color.primary : Color.secondary)
-                                    .lineLimit(1)
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 5)
-                                    .background(
-                                        store.timeRange == preset
-                                            ? SemanticColors.surfaceSubtle
-                                            : Color.clear,
-                                        in: RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("range.\(preset.rawValue)")
+    private var deviceFilterMenu: some View {
+        Menu {
+            Button {
+                Task { await store.selectDevice(nil) }
+            } label: {
+                if store.selectedDeviceId == nil {
+                    Label(L10n.tr("filter.all_devices", default: "全部设备"), systemImage: "checkmark")
+                } else {
+                    Text(L10n.tr("filter.all_devices", default: "全部设备"))
+                }
+            }
+            if let devices = store.bootstrap?.syncedDevices {
+                ForEach(devices) { dev in
+                    Button {
+                        Task { await store.selectDevice(dev.deviceId) }
+                    } label: {
+                        if store.selectedDeviceId == dev.deviceId {
+                            Label(dev.deviceName, systemImage: "checkmark")
+                        } else {
+                            Text(dev.deviceName)
                         }
                     }
                 }
             }
-
-            // Pinned right-side currency toggle & sync pulse (always visible on small iPhones)
-            HStack(spacing: 6) {
-                Button {
-                    Task { await store.toggleCurrency() }
-                } label: {
-                    Text(store.currency)
-                        .font(.caption2.weight(.semibold))
-                        .tabularMetrics()
-                        .foregroundStyle(SemanticColors.accentIndigo)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .strokeBorder(SemanticColors.hairline, lineWidth: 1)
-                        )
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("global.currencyToggle")
-
-                Button {
-                    Task { await store.triggerManualSync() }
-                } label: {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(syncIndicatorColor)
-                            .frame(width: 7, height: 7)
-                        Text(syncIndicatorText)
-                            .font(.caption2)
-                            .tabularMetrics()
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 4)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("global.syncPulse")
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "desktopcomputer")
+                    .font(.caption2)
+                Text(selectedDeviceLabel)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
             }
-            .fixedSize(horizontal: true, vertical: false)
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
-        .background(SemanticColors.surfacePrimary)
+        .accessibilityIdentifier("global.devicePicker")
+    }
+
+    private var providerFilterMenu: some View {
+        Menu {
+            Button {
+                Task { await store.selectProvider(nil) }
+            } label: {
+                if store.selectedProviderId == nil {
+                    Label(L10n.tr("filter.all_providers", default: "全部服务商"), systemImage: "checkmark")
+                } else {
+                    Text(L10n.tr("filter.all_providers", default: "全部服务商"))
+                }
+            }
+            ForEach(store.availableProviders, id: \.self) { providerId in
+                let displayName = TokenVaneFormatters.providerDisplayName(providerId)
+                Button {
+                    Task { await store.selectProvider(providerId) }
+                } label: {
+                    if store.selectedProviderId == providerId {
+                        Label(displayName, systemImage: "checkmark")
+                    } else {
+                        Text(displayName)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "cpu")
+                    .font(.caption2)
+                Text(selectedProviderLabel)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(SemanticColors.surfaceSubtle, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+        }
+        .accessibilityIdentifier("global.providerPicker")
+    }
+
+    private var selectedProviderLabel: String {
+        guard let selected = store.selectedProviderId else {
+            return L10n.tr("filter.all_providers", default: "全部服务商")
+        }
+        return TokenVaneFormatters.providerDisplayName(selected)
     }
 
     private var selectedDeviceLabel: String {

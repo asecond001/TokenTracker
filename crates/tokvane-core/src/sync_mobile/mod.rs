@@ -4,18 +4,21 @@ use std::path::Path;
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
+pub mod worker_bundle;
+pub use worker_bundle::{build_cloudflare_worker_upload_bundle, CloudflareWorkerUploadBundle};
+
 use crate::analytics::{
-    date_key_from_ms, local_day_bounds_ms, local_offset, query_latest_tps, query_provider_shares,
+    date_key_from_ms, local_day_bounds_ms, local_offset, query_provider_shares,
+    query_recent_rollup_live_speeds,
 };
 use crate::domain::{
-    provider_ids, AppPreferences, CurrencyCode, EncryptedSyncEnvelopeV1,
+    provider_ids, AppPreferences, CurrencyCode, EncryptedSyncEnvelopeV1, RemotePaygSnapshot,
     RemoteSubscriptionSnapshot, SyncConfigState, SyncEnvelopeV1,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::pricing::remote_sync::{format_exchange_rate, parse_remote_exchange_rate_json};
 use crate::storage::repository::{
-    merge_remote_envelope_tx, query_local_device, rebuild_remote_daily_rollups_tx, DAY_MS,
-    HOUR_MS,
+    merge_remote_envelope_tx, query_local_device, rebuild_remote_daily_rollups_tx, HOUR_MS,
 };
 use crate::storage::Storage;
 use crate::sync_crypto::{clear_key_cache, decrypt_sync_envelope_v1_cached};
@@ -56,6 +59,8 @@ pub struct SyncPullIngestReport {
     pub envelopes_applied: usize,
     pub hourly_buckets_applied: usize,
     pub subscription_snapshots_applied: usize,
+    #[serde(default)]
+    pub payg_snapshots_applied: usize,
     pub next_since_ms: i64,
     pub server_seq_ms: i64,
     pub has_more: bool,
@@ -84,6 +89,8 @@ pub struct MobileBootstrapState {
     pub sync_config: SyncConfigState,
     pub synced_devices: Vec<SyncedDevicePulse>,
     pub remote_subscriptions: Vec<RemoteSubscriptionSnapshot>,
+    #[serde(default)]
+    pub remote_payg_accounts: Vec<RemotePaygSnapshot>,
 }
 
 /// Partial preferences patch supported from the iOS settings screen.
@@ -93,6 +100,16 @@ pub struct MobilePreferencesPatch {
     pub usd_to_cny_rate: Option<String>,
     pub theme: Option<String>,
     pub exchange_rate_auto: Option<bool>,
+    #[serde(default)]
+    pub auto_sync_pricing: Option<bool>,
+    #[serde(default)]
+    pub device_display_name: Option<String>,
+    #[serde(default)]
+    pub bg_mode: Option<String>,
+    #[serde(default)]
+    pub bg_preset_id: Option<String>,
+    #[serde(default)]
+    pub bg_opacity: Option<f64>,
 }
 
 /// Compact provider breakdown item inside `MobileWidgetSnapshot`.
@@ -280,6 +297,7 @@ impl Storage {
         let preferences = self.get_preferences()?;
         let sync_config = self.get_sync_config_state()?;
         let remote_subscriptions = self.list_remote_subscription_snapshots()?;
+        let remote_payg_accounts = self.list_remote_payg_snapshots()?;
         let (today_start_ms, _) = local_day_bounds_ms(now_ms, tz_offset_minutes);
         let today_aligned_start = today_start_ms.div_euclid(HOUR_MS) * HOUR_MS;
 
@@ -296,6 +314,8 @@ impl Storage {
                             SELECT MAX(updated_at_ms) AS ts FROM usage_hourly_rollups u WHERE u.device_id = d.device_id
                             UNION ALL
                             SELECT MAX(updated_at_ms) AS ts FROM remote_subscription_snapshots s WHERE s.device_id = d.device_id
+                            UNION ALL
+                            SELECT MAX(updated_at_ms) AS ts FROM remote_payg_snapshots p WHERE p.device_id = d.device_id
                         )
                     ) AS last_activity_ms,
                     COALESCE((
@@ -352,6 +372,7 @@ impl Storage {
             sync_config,
             synced_devices,
             remote_subscriptions,
+            remote_payg_accounts,
         })
     }
 
@@ -380,6 +401,7 @@ impl Storage {
             let mut envelopes_applied = 0usize;
             let mut hourly_buckets_applied = 0usize;
             let mut subscription_snapshots_applied = 0usize;
+            let mut payg_snapshots_applied = 0usize;
             let mut applied_devices: BTreeMap<String, ()> = BTreeMap::new();
 
             for envelope in &envelopes {
@@ -394,6 +416,7 @@ impl Storage {
                     envelopes_applied += 1;
                     hourly_buckets_applied += outcome.hourly_buckets_applied;
                     subscription_snapshots_applied += outcome.subscription_snapshots_applied;
+                    payg_snapshots_applied += outcome.payg_snapshots_applied;
                     applied_devices.insert(outcome.device_id, ());
                 }
             }
@@ -418,6 +441,7 @@ impl Storage {
                 envelopes_applied,
                 hourly_buckets_applied,
                 subscription_snapshots_applied,
+                payg_snapshots_applied,
                 next_since_ms: pull.next_since_ms,
                 server_seq_ms: pull.server_seq_ms,
                 has_more: pull.has_more,
@@ -441,7 +465,15 @@ impl Storage {
             let local_dev = query_local_device(conn)?;
             let today_totals = query_hourly_totals(conn, today_start_ms, now_ms, None)?;
             let month_totals = query_hourly_totals(conn, month_start_ms, now_ms, None)?;
-            let latest_output_tps = query_latest_tps(conn, now_ms - DAY_MS, now_ms, None, None)?;
+            let live_speeds = query_recent_rollup_live_speeds(conn, now_ms, None, None)?;
+            let latest_output_tps = if live_speeds.is_empty() {
+                None
+            } else {
+                Some(
+                    live_speeds.iter().map(|s| s.output_tps).sum::<f64>()
+                        / live_speeds.len() as f64,
+                )
+            };
 
             let active_device_count: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM devices WHERE device_id != ?1",
@@ -537,8 +569,39 @@ impl Storage {
         if let Some(auto_rate) = patch.exchange_rate_auto {
             prefs.exchange_rate_auto = auto_rate;
         }
+        if let Some(auto_pricing) = patch.auto_sync_pricing {
+            prefs.auto_sync_pricing = auto_pricing;
+        }
+        let updated_display_name = patch
+            .device_display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+        if let Some(ref name) = updated_display_name {
+            prefs.device_display_name = name.clone();
+        }
+        if let Some(mode) = patch.bg_mode.as_deref() {
+            prefs.bg_mode = mode.trim().to_string();
+        }
+        if let Some(preset) = patch.bg_preset_id.as_deref() {
+            let trimmed = preset.trim();
+            if !trimmed.is_empty() {
+                prefs.bg_preset_id = trimmed.to_string();
+            }
+        }
+        if let Some(opacity) = patch.bg_opacity {
+            prefs.bg_opacity = opacity;
+        }
         self.update_preferences(&prefs)?;
         let _ = self.with_conn(|conn| {
+            if let Some(ref name) = updated_display_name {
+                let local_dev = query_local_device(conn)?;
+                conn.execute(
+                    "UPDATE devices SET device_name = ?1 WHERE device_id = ?2",
+                    params![name, local_dev.device_id],
+                )?;
+            }
             conn.execute(
                 "UPDATE app_preferences SET updated_at_ms = ?1 WHERE id = 1",
                 params![now_ms],
@@ -590,6 +653,7 @@ impl Storage {
                 params![local_dev.device_id],
             )?;
             tx.execute("DELETE FROM remote_subscription_snapshots", [])?;
+            tx.execute("DELETE FROM remote_payg_snapshots", [])?;
             tx.execute(
                 "DELETE FROM devices WHERE device_id != ?1",
                 params![local_dev.device_id],
@@ -666,6 +730,23 @@ mod tests {
                 used_percent: 64.5,
                 resets_at_ms: Some(base_ms + 3 * HOUR_MS),
                 source: "local_estimation".to_string(),
+                monthly_fee_micro_usd: 100_000_000,
+            }],
+            payg_snapshots: vec![crate::domain::SyncPaygSnapshot {
+                account_id: "auto_deepseek_harness".to_string(),
+                provider_id: "deepseek_harness".to_string(),
+                account_name: "DeepSeek 官方账户余额".to_string(),
+                enabled: true,
+                currency: Some("CNY".to_string()),
+                total_balance_micro: Some(88_000_000),
+                granted_balance_micro: Some(10_000_000),
+                topped_up_balance_micro: Some(78_000_000),
+                remaining_manual_balance_micro_usd: None,
+                monthly_budget_micro_usd: None,
+                today_cost_micro_usd: 50_000,
+                month_cost_micro_usd: 250_000,
+                fetched_at_ms: Some(base_ms + 4_500),
+                updated_at_ms: base_ms + 4_500,
             }],
         }
     }
@@ -767,6 +848,7 @@ mod tests {
             .expect("bootstrap");
         assert_eq!(bootstrap.synced_devices.len(), 2);
         assert_eq!(bootstrap.remote_subscriptions.len(), 2);
+        assert_eq!(bootstrap.remote_payg_accounts.len(), 2);
 
         let snapshot = storage
             .build_mobile_widget_snapshot(base_ms + HOUR_MS + 20_000, 480)
@@ -824,5 +906,33 @@ mod tests {
             .expect("bootstrap after reset");
         assert!(after_reset.synced_devices.is_empty());
         assert!(after_reset.remote_subscriptions.is_empty());
+        assert!(after_reset.remote_payg_accounts.is_empty());
+    }
+
+    #[test]
+    fn builds_cloudflare_worker_upload_bundle_with_validation() {
+        assert!(build_cloudflare_worker_upload_bundle(
+            Some("-bad-name"),
+            None,
+            false,
+            None,
+            true
+        )
+        .is_err());
+
+        let bundle = build_cloudflare_worker_upload_bundle(
+            None,
+            None,
+            true,
+            None,
+            true,
+        )
+        .expect("bundle");
+        assert_eq!(bundle.worker_name, "tokenvane-sync-worker");
+        assert_eq!(bundle.bearer_token.len(), 48);
+        assert!(bundle.e2ee_enabled);
+        assert_eq!(bundle.e2ee_passphrase.as_ref().map(String::len), Some(32));
+        assert!(bundle.content_type.starts_with("multipart/form-data; boundary="));
+        assert!(!bundle.multipart_body_base64.is_empty());
     }
 }

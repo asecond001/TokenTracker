@@ -9,7 +9,7 @@ use crate::error::CoreResult;
 use crate::pricing::default_pricing_catalog;
 use crate::storage::repository::{rebuild_rollup_from_events, DAY_MS, HOUR_MS};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 13;
+pub const CURRENT_SCHEMA_VERSION: i64 = 14;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -236,6 +236,10 @@ pub fn run_migrations(conn: &mut Connection) -> CoreResult<()> {
 
     if current_version < 13 {
         migrate_v12_to_v13(conn, now_ms)?;
+    }
+
+    if current_version < 14 {
+        migrate_v13_to_v14(conn, now_ms)?;
     }
 
     seed_defaults(conn, now_ms)?;
@@ -1010,6 +1014,50 @@ fn migrate_v12_to_v13(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
     tx.execute(
         "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
         params![13i64, now_ms],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_v13_to_v14(conn: &mut Connection, now_ms: i64) -> CoreResult<()> {
+    let tx = conn.transaction()?;
+
+    add_column_if_missing(
+        &tx,
+        "remote_subscription_snapshots",
+        "monthly_fee_micro_usd",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS remote_payg_snapshots (
+            device_id TEXT NOT NULL,
+            device_display_name TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            account_name TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            currency TEXT,
+            total_balance_micro INTEGER,
+            granted_balance_micro INTEGER,
+            topped_up_balance_micro INTEGER,
+            remaining_manual_balance_micro_usd INTEGER,
+            monthly_budget_micro_usd INTEGER,
+            today_cost_micro_usd INTEGER NOT NULL DEFAULT 0,
+            month_cost_micro_usd INTEGER NOT NULL DEFAULT 0,
+            fetched_at_ms INTEGER,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (device_id, account_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_remote_payg_provider
+            ON remote_payg_snapshots (provider_id, updated_at_ms DESC);
+        "#,
+    )?;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
+        params![14i64, now_ms],
     )?;
     tx.commit()?;
     Ok(())

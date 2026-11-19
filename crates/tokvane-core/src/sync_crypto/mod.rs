@@ -258,7 +258,9 @@ mod tests {
                 used_percent: 38.5,
                 resets_at_ms: Some(1_760_010_000_000),
                 source: "local_estimation".to_string(),
+                monthly_fee_micro_usd: 15_000_000,
             }],
+            payg_snapshots: Vec::new(),
         }
     }
 

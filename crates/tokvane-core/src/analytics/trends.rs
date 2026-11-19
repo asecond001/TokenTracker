@@ -16,7 +16,17 @@ impl Storage {
                 Utc::now().timestamp_millis(),
             )?;
             let span = inclusive_window_span(eff_start_ms, eff_end_ms);
-            let effective_granularity = resolve_trend_granularity(query.granularity, span);
+            let mut effective_granularity = resolve_trend_granularity(query.granularity, span);
+            if effective_granularity == TrendGranularity::FifteenMinutes {
+                let has_raw_events: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM usage_events LIMIT 1)",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if !has_raw_events {
+                    effective_granularity = TrendGranularity::Hourly;
+                }
+            }
 
             let current_rows = fetch_trend_rows(
                 conn,

@@ -162,6 +162,7 @@ impl Storage {
                     device_id: remote_device_id.to_string(),
                     hourly_buckets_applied: 0,
                     subscription_snapshots_applied: 0,
+                    payg_snapshots_applied: 0,
                 });
             }
 
@@ -187,7 +188,8 @@ impl Storage {
             let mut stmt = conn.prepare(
                 r#"
                 SELECT device_id, device_display_name, plan_id, window_id, provider_id,
-                       plan_name, window_label, used_percent, resets_at_ms, source, updated_at_ms
+                       plan_name, window_label, used_percent, resets_at_ms, source,
+                       monthly_fee_micro_usd, updated_at_ms
                 FROM remote_subscription_snapshots
                 ORDER BY device_display_name ASC, provider_id ASC, window_id ASC
                 "#,
@@ -204,7 +206,8 @@ impl Storage {
                     used_percent: row.get(7)?,
                     resets_at_ms: row.get(8)?,
                     source: row.get(9)?,
-                    updated_at_ms: row.get(10)?,
+                    monthly_fee_micro_usd: row.get(10)?,
+                    updated_at_ms: row.get(11)?,
                 })
             })?;
             let mut out = Vec::new();
@@ -215,13 +218,78 @@ impl Storage {
         })
     }
 
-    /// Build a Phase 2 ready `SyncEnvelopeV1` containing only desensitized hourly deltas
-    /// and subscription window percentages updated since `since_watermark_ms`.
+    pub fn list_remote_payg_snapshots(&self) -> CoreResult<Vec<RemotePaygSnapshot>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT device_id, device_display_name, account_id, provider_id, account_name,
+                       enabled, currency, total_balance_micro, granted_balance_micro,
+                       topped_up_balance_micro, remaining_manual_balance_micro_usd,
+                       monthly_budget_micro_usd, today_cost_micro_usd, month_cost_micro_usd,
+                       fetched_at_ms, updated_at_ms
+                FROM remote_payg_snapshots
+                ORDER BY device_display_name ASC, provider_id ASC, account_name ASC
+                "#,
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(RemotePaygSnapshot {
+                    device_id: row.get(0)?,
+                    device_display_name: row.get(1)?,
+                    account_id: row.get(2)?,
+                    provider_id: row.get(3)?,
+                    account_name: row.get(4)?,
+                    enabled: row.get::<_, i64>(5)? != 0,
+                    currency: row.get(6)?,
+                    total_balance_micro: row.get(7)?,
+                    granted_balance_micro: row.get(8)?,
+                    topped_up_balance_micro: row.get(9)?,
+                    remaining_manual_balance_micro_usd: row.get(10)?,
+                    monthly_budget_micro_usd: row.get(11)?,
+                    today_cost_micro_usd: row.get(12)?,
+                    month_cost_micro_usd: row.get(13)?,
+                    fetched_at_ms: row.get(14)?,
+                    updated_at_ms: row.get(15)?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    /// Build a Phase 2 ready `SyncEnvelopeV1` containing only desensitized hourly deltas,
+    /// subscription window percentages/fees, and PAYG balance snapshots updated since `since_watermark_ms`.
     pub fn build_sync_envelope_v1(
         &self,
         since_watermark_ms: i64,
         now_ms: i64,
     ) -> CoreResult<SyncEnvelopeV1> {
+        let payg_statuses = self.query_payg_accounts(now_ms, 0)?;
+        let payg_snapshots: Vec<SyncPaygSnapshot> = payg_statuses
+            .into_iter()
+            .map(|st| SyncPaygSnapshot {
+                account_id: st.account.account_id,
+                provider_id: st.account.provider_id,
+                account_name: st.account.account_name,
+                enabled: st.account.enabled,
+                currency: st.official_balance.as_ref().map(|b| b.currency.clone()),
+                total_balance_micro: st.official_balance.as_ref().and_then(|b| b.total_balance_micro),
+                granted_balance_micro: st.official_balance.as_ref().and_then(|b| b.granted_balance_micro),
+                topped_up_balance_micro: st
+                    .official_balance
+                    .as_ref()
+                    .and_then(|b| b.topped_up_balance_micro),
+                remaining_manual_balance_micro_usd: st.remaining_manual_balance_micro_usd,
+                monthly_budget_micro_usd: st.account.monthly_budget_micro_usd,
+                today_cost_micro_usd: st.today_cost_micro_usd,
+                month_cost_micro_usd: st.month_cost_micro_usd,
+                fetched_at_ms: st.official_balance.as_ref().map(|b| b.fetched_at_ms),
+                updated_at_ms: st.account.updated_at_ms,
+            })
+            .collect();
+
         self.with_conn(|conn| {
             let device = query_local_device(conn)?;
             let prefs = load_preferences(conn)?;
@@ -271,8 +339,11 @@ impl Storage {
             let observed = load_observed_rate_limits(conn)?;
             let samples_by_provider = load_window_samples_map(conn, now_ms)?;
 
+            let mut configured_providers: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             let mut subscription_snapshots = Vec::new();
             for plan in plans.iter().filter(|p| p.enabled && p.is_user_configured) {
+                configured_providers.insert(plan.provider_id.to_ascii_lowercase());
                 let samples = samples_by_provider
                     .get(&plan.provider_id)
                     .map(Vec::as_slice)
@@ -288,8 +359,69 @@ impl Storage {
                         used_percent: win.used_percent,
                         resets_at_ms: win.resets_at_ms,
                         source: win.source,
+                        monthly_fee_micro_usd: plan.monthly_fee_micro_usd,
                     });
                 }
+            }
+
+            // Also include unbound official observed quota windows not covered by a configured plan.
+            let mut sorted_observed: Vec<&ObservedRateLimitWindow> = observed
+                .iter()
+                .filter(|obs| {
+                    obs.source.as_deref() != Some("local_log_hint")
+                        && obs.window_name != "tier_hint"
+                        && !configured_providers.contains(&obs.provider_id.to_ascii_lowercase())
+                })
+                .collect();
+            sorted_observed.sort_by_key(|a| std::cmp::Reverse(a.observed_at_ms));
+
+            let mut emitted_unbound: std::collections::HashSet<(String, String)> =
+                std::collections::HashSet::new();
+            for obs in sorted_observed {
+                let rule = infer_window_rule_from_observed(
+                    &obs.provider_id,
+                    obs,
+                    &[],
+                    None,
+                    None,
+                );
+                let win = crate::subscription::evaluate_window(
+                    &obs.provider_id,
+                    &rule,
+                    &[],
+                    &observed,
+                    now_ms,
+                );
+                if win.source == "local_estimation" {
+                    continue;
+                }
+                let dedup_key = (
+                    obs.provider_id.to_ascii_lowercase(),
+                    win.window_id.to_ascii_lowercase(),
+                );
+                if !emitted_unbound.insert(dedup_key) {
+                    continue;
+                }
+                let plan_name = obs
+                    .plan_hint
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| {
+                        format!("{} 官方限额", provider_ids::display_name(&obs.provider_id))
+                    });
+                subscription_snapshots.push(SyncSubscriptionSnapshot {
+                    plan_id: format!("observed:{}", obs.provider_id),
+                    provider_id: obs.provider_id.clone(),
+                    plan_name,
+                    window_id: win.window_id,
+                    window_label: win.label,
+                    used_percent: win.used_percent,
+                    resets_at_ms: win.resets_at_ms,
+                    source: win.source,
+                    monthly_fee_micro_usd: 0,
+                });
             }
 
             Ok(SyncEnvelopeV1 {
@@ -300,6 +432,7 @@ impl Storage {
                 since_watermark_ms,
                 hourly_deltas,
                 subscription_snapshots,
+                payg_snapshots,
             })
         })
     }
@@ -329,6 +462,7 @@ pub(crate) fn merge_remote_envelope_tx(
             device_id: remote_device_id.to_string(),
             hourly_buckets_applied: 0,
             subscription_snapshots_applied: 0,
+            payg_snapshots_applied: 0,
         });
     }
 
@@ -380,7 +514,12 @@ pub(crate) fn merge_remote_envelope_tx(
                 tps_sum = excluded.tps_sum,
                 max_output_tps = excluded.max_output_tps,
                 updated_at_ms = excluded.updated_at_ms
-            WHERE excluded.updated_at_ms >= usage_hourly_rollups.updated_at_ms
+            WHERE excluded.updated_at_ms > usage_hourly_rollups.updated_at_ms
+               OR (excluded.updated_at_ms = usage_hourly_rollups.updated_at_ms
+                   AND (excluded.request_count != usage_hourly_rollups.request_count
+                        OR excluded.input_tokens != usage_hourly_rollups.input_tokens
+                        OR excluded.output_tokens != usage_hourly_rollups.output_tokens
+                        OR excluded.estimated_cost_micro_usd != usage_hourly_rollups.estimated_cost_micro_usd))
             "#,
         )?;
 
@@ -407,11 +546,11 @@ pub(crate) fn merge_remote_envelope_tx(
             ])?;
             if changed > 0 {
                 hourly_applied += 1;
+                affected_days.insert((
+                    remote_device_id.to_string(),
+                    delta.bucket_start_ms.div_euclid(DAY_MS) * DAY_MS,
+                ));
             }
-            affected_days.insert((
-                remote_device_id.to_string(),
-                delta.bucket_start_ms.div_euclid(DAY_MS) * DAY_MS,
-            ));
         }
     }
 
@@ -423,8 +562,9 @@ pub(crate) fn merge_remote_envelope_tx(
         r#"
         INSERT INTO remote_subscription_snapshots (
             device_id, device_display_name, plan_id, window_id, provider_id,
-            plan_name, window_label, used_percent, resets_at_ms, source, updated_at_ms
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            plan_name, window_label, used_percent, resets_at_ms, source,
+            monthly_fee_micro_usd, updated_at_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         "#,
     )?;
     for snap in &envelope.subscription_snapshots {
@@ -439,7 +579,44 @@ pub(crate) fn merge_remote_envelope_tx(
             snap.used_percent,
             snap.resets_at_ms,
             snap.source,
+            snap.monthly_fee_micro_usd,
             envelope.generated_at_ms.max(received_at_ms),
+        ])?;
+    }
+
+    tx.execute(
+        "DELETE FROM remote_payg_snapshots WHERE device_id = ?1",
+        params![remote_device_id],
+    )?;
+    let mut payg_stmt = tx.prepare_cached(
+        r#"
+        INSERT INTO remote_payg_snapshots (
+            device_id, device_display_name, account_id, provider_id, account_name,
+            enabled, currency, total_balance_micro, granted_balance_micro,
+            topped_up_balance_micro, remaining_manual_balance_micro_usd,
+            monthly_budget_micro_usd, today_cost_micro_usd, month_cost_micro_usd,
+            fetched_at_ms, updated_at_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+        "#,
+    )?;
+    for payg in &envelope.payg_snapshots {
+        payg_stmt.execute(params![
+            remote_device_id,
+            display_name,
+            payg.account_id,
+            payg.provider_id,
+            payg.account_name,
+            i64::from(payg.enabled),
+            payg.currency,
+            payg.total_balance_micro,
+            payg.granted_balance_micro,
+            payg.topped_up_balance_micro,
+            payg.remaining_manual_balance_micro_usd,
+            payg.monthly_budget_micro_usd,
+            payg.today_cost_micro_usd,
+            payg.month_cost_micro_usd,
+            payg.fetched_at_ms,
+            payg.updated_at_ms.max(envelope.generated_at_ms).max(received_at_ms),
         ])?;
     }
 
@@ -447,6 +624,7 @@ pub(crate) fn merge_remote_envelope_tx(
         device_id: remote_device_id.to_string(),
         hourly_buckets_applied: hourly_applied,
         subscription_snapshots_applied: envelope.subscription_snapshots.len(),
+        payg_snapshots_applied: envelope.payg_snapshots.len(),
     })
 }
 
